@@ -9,8 +9,7 @@ a thin client that talks to it.
 claudio/
 ├── backend/     Python service (FastAPI + OpenAI Agents SDK)
 ├── frontend/    React + TypeScript + Vite + Tailwind client
-├── claudio_specs.md          Reverse-engineered Claude Code architecture
-└── claudio_specs_agent.md    Claudio implementation spec
+└── claudio_specs_agent.md    Claudio implementation specs inspired by Claude Code
 ```
 
 ## Architecture
@@ -59,6 +58,14 @@ lives in `config/config.yaml` (copy from `config/config.example.yaml`).
 cd frontend
 npm install
 npm run dev         # http://localhost:5173
+#or
+npm run dev -- --host
+ VITE v5.4.21  ready in 176 ms
+
+  ➜  Local:   http://localhost:5174/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+
 ```
 
 Open http://localhost:5173. Default auth token is `dev-token-change-me`
