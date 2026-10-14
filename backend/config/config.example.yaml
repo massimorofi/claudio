@@ -1,0 +1,67 @@
+# Claudio backend configuration.
+# Copy to config.yaml (cp config.example.yaml config.yaml) and edit.
+# Every value can also be overridden by env var: CLAUDIO__SECTION__KEY
+# e.g. CLAUDIO__LLM__MODEL="gpt-5"  CLAUDIO__SERVER__AUTH_TOKEN="..."
+
+server:
+  host: 127.0.0.1          # restart-required
+  port: 8100               # restart-required
+  auth_token: "dev-token-change-me"   # REQUIRED for non-loopback binds; hot-reloadable
+  cors_origins:            # hot-reloadable
+    - "http://localhost:5173"
+
+llm:                       # hot-reloadable (applies to next run)
+  provider: openai
+  # Local dev model (LM Studio). For OpenAI: model: gpt-5, base_url: null
+  model: "qwen3.5-4b-claude-4.6-opus-reasoning-distilled"
+  api_key: "local"
+  base_url: "http://127.0.0.1:1234/v1"
+  temperature: 0.2
+  max_tokens: 4096
+  fallback_model: null
+  timeout_seconds: 120
+  retry_attempts: 3
+  # Approximate price per million tokens (USD) for budget tracking.
+  price_input_per_mtok: 0.0
+  price_output_per_mtok: 0.0
+
+agent:
+  name: claudio
+  instructions_file: instructions.md   # relative to this config dir; or inline `instructions:`
+  max_turns: 50
+  max_budget_usd: 5.0
+  approval_mode: on_request            # off | on_request | always
+  workspace_dir: ./data/workspace
+  context_window: 32768              # used for compaction threshold math
+  compaction_reserve: 8192           # tokens reserved (summary + answer room)
+  max_output_chars: 8000             # per-tool output clip
+  strict_tools: false                  # strict JSON-schema tool mode (off for local models)
+  tools:
+    enabled:
+      - read_file
+      - write_file
+      - edit_file
+      - list_dir
+      - run_command
+      - web_fetch
+      - web_search
+      - todo_write
+    disabled: []
+  subagents:
+    explorer:
+      description: "Read-only code/file explorer; returns a report only"
+      instructions_file: agents/explorer.md
+      tools: [read_file, list_dir, web_fetch]
+      max_turns: 30
+
+mcp:                       # agent-restart-required (connections)
+  servers: []
+  #  - id: filesystem
+  #    transport: stdio
+  #    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
+  #    enabled: true
+
+monitoring:
+  log_level: INFO            # hot-reloadable
+  log_retention_days: 7
+  metrics_snapshot_interval_seconds: 5
