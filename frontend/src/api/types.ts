@@ -232,6 +232,10 @@ export interface RunFailedEvent {
   message: string
   retryable: boolean
 }
+export interface RunRestartingEvent {
+  reason: string // 'compacted' | 'fallback' | an error code
+  attempt: number
+}
 
 // ---- Monitoring ----
 

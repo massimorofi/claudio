@@ -197,6 +197,24 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
         error: `${d.code}: ${d.message}`,
       }
     }
+    case 'run_restarting': {
+      // The failed attempt is being retried (or compacted / fallen back).
+      // Discard its partial output so the retry re-streams into a clean slate:
+      // keep everything up to and including the last user message.
+      let lastUser = -1
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        if (state.items[i].kind === 'user') {
+          lastUser = i
+          break
+        }
+      }
+      return {
+        ...state,
+        items: state.items.slice(0, lastUser + 1),
+        streaming: true,
+        error: null,
+      }
+    }
     case 'heartbeat':
       return state
     default:

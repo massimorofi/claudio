@@ -127,7 +127,7 @@ backend/
 │   │       └── planning.py       # todo_write + nag constant
 │   ├── sessions/
 │   │   ├── store.py              # SDK SQLiteSession factory + JSONL mirror + repair
-│   │   └── compaction.py         # Compactor class (see §3.6.7 — NOT wired)
+│   │   └── compaction.py         # Compactor class (wired into the run loop — see §3.6.7)
 │   ├── runs/
 │   │   ├── manager.py            # active-run registry, cancel, reconnect buffers
 │   │   └── events.py             # SDK stream events → SSE event mapping
@@ -143,7 +143,7 @@ backend/
 │   └── observability/
 │       ├── metrics.py            # in-process counters + latency samples
 │       └── logging.py            # JSON logs + ring buffer
-└── tests/                        # 30 tests (settings, tools, approval flow)
+└── tests/                        # 50 tests (settings, tools, approval flow, recovery layer)
 ```
 
 ### 3.3 Process lifecycle and shell scripts (actual)
@@ -182,17 +182,17 @@ llm:
   base_url: "http://127.0.0.1:1234/v1"
   temperature: 0.2
   max_tokens: 4096
-  fallback_model: null             # CONFIG ONLY — not used (see §3.7)
+  fallback_model: null             # secondary model tried on primary failure (see §3.7)
   timeout_seconds: 120
-  retry_attempts: 3                # CONFIG ONLY — not used (see §3.7)
-  price_input_per_mtok: 0.0        # USD per 1M input tokens (cost tracking)
+  retry_attempts: 3                # app-level retry count for transient errors (see §3.7)
+  price_input_per_mtok: 0.0        # USD per 1M input tokens (cost + budget)
   price_output_per_mtok: 0.0
 
 agent:
   name: claudio
   instructions_file: instructions.md   # relative to config dir; or inline `instructions:`
   max_turns: 50
-  max_budget_usd: 5.0              # CONFIG ONLY — tracked but NOT enforced (see §3.7)
+  max_budget_usd: 5.0              # per-session cumulative budget, enforced (0 = disabled)
   approval_mode: on_request        # off | on_request | always  (validated)
   workspace_dir: ./data/workspace
   context_window: 32768            # used by Compactor threshold (see §3.6.7)
@@ -236,7 +236,7 @@ monitoring:
 { "error": { "code": "...", "message": "...", "retryable": false, "details": {} } }
 ```
 
-**Error codes actually emitted:** `validation_error` (422), `unauthorized` (401), `forbidden` (403), `not_found` (404), `agent_already_running` / `agent_start_failed` (409), `already_resolved` (409), `no_resume_state` (409), `agent_not_running` (409), `timeout` (504), and run-level codes from `_classify_error`: `max_turns_exceeded`, `llm_auth_error`, `llm_unavailable`, `input_rejected`, `cancelled`, `internal_error`.
+**Error codes actually emitted:** `validation_error` (422), `unauthorized` (401), `forbidden` (403), `not_found` (404), `agent_already_running` / `agent_start_failed` (409), `already_resolved` (409), `no_resume_state` (409), `agent_not_running` (409), `timeout` (504), and run-level codes from `_classify_error`: `budget_exceeded`, `max_turns_exceeded`, `llm_auth_error`, `llm_unavailable`, `input_rejected`, `cancelled`, `internal_error`.
 
 #### 3.5.1 System
 
@@ -301,6 +301,7 @@ SSE events (each frame has `id:`, `event:`, `data:`):
 | `approval_required` | `{approval_id, tool, arguments, reason}` | HITL gate — run paused until resolved |
 | `handoff` | `{from_agent?, to_agent}` | Agent handoff / update |
 | `usage` | `{input_tokens, output_tokens, cost_usd}` | Accounting |
+| `run_restarting` | `{reason, attempt}` | A failed attempt is being retried / compacted / fallen back — see §3.7. `reason` is `"compacted"`, `"fallback"`, or an error code; `attempt` is the retry counter. The frontend discards the partial assistant output and re-streams from the last user message. |
 | `run_completed` | `{run_id, session_id, final_output, usage}` | Terminal success |
 | `run_failed` | `{run_id, error:{code, message, retryable}}` | Terminal failure |
 | `heartbeat` | `{}` | Every 15s — keep-alive |
@@ -425,11 +426,16 @@ On `POST /approvals/{id}`: resolve the approval in the DB, load the run's `resum
 - **Output guardrail** (`@output_guardrail name="output_safety"`): trips on empty output or leaked-secret patterns (`sk-…`, `AKIA…`, `-----BEGIN … PRIVATE KEY-----`).
 - Guardrails run in parallel with the agent (SDK-native).
 
-#### 3.6.7 Context management / compaction — ⚠️ IMPLEMENTED BUT NOT WIRED
+#### 3.6.7 Context management / compaction — ✅ WIRED
 
 `sessions/compaction.py` contains a complete `Compactor` class: `should_compact(input_tokens)` at `context_window − reserve`, a structured 6-section `SUMMARY_PROMPT`, a `compact()` that runs a one-shot summarizer agent and replaces the session with the summary, and a **circuit breaker** (3 consecutive failures → disable for the session).
 
-**However, `compact()` / `should_compact()` are never called from the run loop.** The `Compactor` is constructed by the supervisor and passed to `RunManager`, but `_run_stream` does not invoke it. So **automatic compaction is currently dormant.** Long sessions rely on the model/provider context window only. (This is the single largest gap between the design and the shipped code.)
+Compaction is now **wired into the run loop** by `RunManager._run_with_recovery` (see §3.7), at two points:
+
+1. **Proactive, before the run starts.** `_maybe_compact` estimates the current conversation size and, if `should_compact(est)` and the session is not circuit-broken, runs `compact()` first so the run begins with a trimmed history.
+2. **Reactive, on context overflow.** If the provider rejects the prompt with a context-length error (`_is_context_overflow`), the manager compacts once and retries the run on the trimmed history. Reactive compaction is capped at **once per run** so a persistently-overflowing session cannot loop forever.
+
+**Token estimate source.** The compaction trigger uses a **content-length estimate** (`_estimate_items_tokens` = total string characters ÷ 4) computed from `session.get_items()`, not the provider-reported `input_tokens`. This is deliberate: some local providers (observed with LM Studio) return **zero token usage on the streamed path** (`run_streamed` result reports `input_tokens = 0`), which would make a usage-based trigger never fire. The ÷4 heuristic is provider-independent and conservative enough to keep the proactive trigger working regardless of what the provider reports. The persisted `claudio_sessions.last_context_tokens` field records the last known input-token count (real usage when available, otherwise the content estimate) so the next run's proactive check has a starting point.
 
 #### 3.6.8 Subagents (`subagents.spawn_subagent`)
 
@@ -442,27 +448,42 @@ async def spawn_subagent(ctx, agent_id: str, task: str) -> dict:
 ```
 `tctx.agent_factory` is supplied by the run manager; `agent_factory("list")` returns the configured subagent ids. The tool is exposed only when `spawn_subagent` is in `agent.tools.enabled`.
 
-#### 3.6.9 Budgets and turn limits — ⚠️ PARTIAL
+#### 3.6.9 Budgets and turn limits — ✅ ENFORCED
 
 - `max_turns` **is** passed to the Runner; `MaxTurnsExceeded` is caught and surfaced as a failed run with `code:"max_turns_exceeded"`.
-- **USD budget is computed but NOT enforced.** Per-run cost is computed from `usage × price_*_per_mtok` and added to session totals on completion, but there is **no check that cancels a run when `max_budget_usd` is exceeded**. `max_budget_usd` is currently decorative.
+- **USD budget is enforced per-session, cumulatively.** `agent.max_budget_usd` caps the **total spend of a session** (not a single run). Enforcement has two gates, both in `runs/manager.py`:
+  1. **Run-start gate** — before a run begins, the session's accumulated `total_cost_usd` is read as `base_cost`; if `base_cost >= max_budget_usd` the run is refused immediately with `BudgetExceededError` (surfaced as `run_failed` code `budget_exceeded`) and the LLM is never called.
+  2. **Mid-run check** — during streaming, after each event the cumulative spend `base_cost + current_run_cost` is recomputed from real usage; if it crosses the cap the run is cancelled with `BudgetExceededError`.
+  - `max_budget_usd = 0` disables enforcement entirely (unlimited).
+  - `BudgetExceededError` is **terminal**: it is not retried, does not trigger fallback, and does not trigger reactive compaction — `_classify_error` returns `("budget_exceeded", retryable=False)`.
+  - **Provider caveat:** the mid-run check relies on real token usage. On providers that report zero usage on the streamed path (see §3.6.7), the mid-run cost stays ~0, so the cap effectively only bites on the run-start gate. This is moot for free/local models (price 0) and correct for paid providers that report usage.
 
-### 3.7 Error handling and recovery — ⚠️ SIMPLER THAN DESIGNED
+### 3.7 Error handling and recovery — ✅ IMPLEMENTED
 
-The original design (§3.7 of the prior draft) described a layered recovery system. **What is actually implemented:**
+A layered recovery wrapper lives in `RunManager._run_with_recovery`, which sits between the run driver and the actual streaming call (`_run_stream`). Every new run and every resumed run goes through it. The wrapper is **bounded** — each recovery mechanism has its own cap so a pathological session cannot loop forever.
 
-- **OpenAI client default retries** — the `AsyncOpenAI` client retries transient transport errors internally (SDK/openai default). No custom backoff loop is implemented.
-- **Run-level error classification** — `_classify_error(exc)` maps an exception to `(code, retryable)`: `max_turns_exceeded`, `llm_auth_error` (auth/401/api key), `llm_unavailable` (429/503/connection/timeout), `input_rejected` (guardrail), else `internal_error`. The run is marked `failed`, persisted, and a `run_failed` SSE event is emitted.
-- **Crash recovery** — on boot, `fail_interrupted_runs()` marks any run left `running` as `failed` with `code:"backend_restarted"`.
+**Order of recovery on a failed attempt.** When `_run_stream` raises, the wrapper inspects the exception and tries, in this priority order:
 
-**What is NOT implemented** (present in config or design only):
-- ❌ **Fallback model** — `llm.fallback_model` is never used.
-- ❌ **App-level retry policy** — `llm.retry_attempts` is never read; no `min(500·2^n,30000)+jitter` loop.
-- ❌ **Reactive compaction on "prompt too long"** — not wired (see §3.6.7).
-- ❌ **Budget enforcement** — see §3.6.9.
-- ❌ **`retry_count` metric** — `Metrics.inc_retry()` exists but is never called; the counter stays 0.
+1. **Reactive compaction on context overflow.** If `_is_context_overflow(exc)` (message matches "context length" / "maximum context" / "context_window" / "prompt is too long" / "too many tokens" / "reduce the length") and reactive compaction has **not** already been used this run: compact the session, publish `run_restarting` with `reason:"compacted"`, re-snapshot, and retry. Capped at **once per run**.
+2. **App-level retry with exponential backoff.** If the error is retryable (`_classify_error` → `retryable=True`) and `attempt < llm.retry_attempts`: increment `retry_count`, roll the session back to the pre-run snapshot, publish `run_restarting` with the error code as `reason`, sleep `_backoff_seconds(attempt)`, and retry. `retry_attempts` from config now drives this loop.
+3. **Fallback model.** If a `llm.fallback_model` is configured and has **not** already been used this run: rebuild the agent with `model_override = fallback_model` (via `build_primary_agent`), roll the session back, publish `run_restarting` with `reason:"fallback"`, and retry. Capped at **once per run**.
+4. **Give up.** Otherwise re-raise → run marked `failed`, `run_failed` SSE emitted.
 
-These are the honest gaps. They are straightforward to add (each is a small, localized change in `runs/manager.py`) and are listed in §7 as the remaining work.
+**Backoff.** `_backoff_seconds(attempt) = min(500·2^(attempt−1), 30000)/1000 + uniform(0, 0.25)` — exponential growth capped at 30s plus a small random jitter to avoid thundering-herd synchronization.
+
+**Session rollback.** Before the loop starts, the manager snapshots `session.get_items()`. On every retry / fallback / reactive-compaction restart it restores that snapshot, so a half-failed attempt never leaves dirty partial state in the conversation history.
+
+**Terminal errors.** `BudgetExceededError` and `asyncio.CancelledError` are re-raised immediately — they are never retried, never trigger fallback, never trigger compaction.
+
+**Client retries disabled.** The `AsyncOpenAI` client is constructed with `max_retries=0` so the SDK/openai internal retry does not double up with this app-level policy. The app-level loop is the single source of truth for retries.
+
+**`retry_count` metric** is now incremented on every retry (was previously dead).
+
+**Run-level error classification** — `_classify_error(exc)` maps an exception to `(code, retryable)`: `budget_exceeded` (never retryable), `max_turns_exceeded`, `llm_auth_error` (auth/401/api key), `llm_unavailable` (429/503/connection/timeout), `input_rejected` (guardrail), else `internal_error`.
+
+**Crash recovery** — on boot, `fail_interrupted_runs()` marks any run left `running` as `failed` with `code:"backend_restarted"`.
+
+**Frontend handling.** On `run_restarting` the chat reducer truncates the visible items back to the last user message (dropping the failed attempt's partial assistant/tool output) and keeps `streaming: true`, so the retry re-streams into a clean bubble.
 
 ### 3.8 Security (actual)
 
@@ -569,11 +590,11 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 | CLAUDE.md / memory | ✅ Implemented | `memory.py` + `instructions.py` |
 | Config hot/restart + history/restore | ✅ Implemented | `settings.py` + `config.py` |
 | Reload-safe run reattach | ✅ Implemented | `active_run` endpoint + `useChat.resumeActiveRun` |
-| **Compaction** | ⚠️ Class built, **not wired** | `compaction.py` (dormant) |
-| **USD budget enforcement** | ⚠️ Computed, **not enforced** | cost tracked; no cancel-on-exceed |
-| **Fallback model** | ❌ Not implemented | config only |
-| **App-level retry/backoff** | ❌ Not implemented | config only |
-| **Reactive compaction on overflow** | ❌ Not implemented | — |
+| Compaction | ✅ Implemented | `compaction.py` wired into `RunManager._run_with_recovery` (proactive + reactive) |
+| USD budget enforcement | ✅ Implemented | per-session cumulative; run-start gate + mid-run check (§3.6.9) |
+| Fallback model | ✅ Implemented | tried once on failure via `model_override` (§3.7) |
+| App-level retry/backoff | ✅ Implemented | `min(500·2^n,30000)+jitter` honoring `llm.retry_attempts`; `retry_count` incremented (§3.7) |
+| Reactive compaction on overflow | ✅ Implemented | on context-length error, compact once + retry (§3.7) |
 | Background shells / cron / full hooks | ❌ Out of scope v1 | — |
 
 ---
@@ -584,7 +605,7 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 |---|---|
 | Backend survives kill -9 | ✅ Sessions/approvals persist; interrupted runs marked failed on boot |
 | Client disconnect / UI reload | ✅ Run continues; reattach via `active_run` + resume stream |
-| OpenAI outage | ⚠️ Errors surfaced as `llm_unavailable`; no automatic fallback/retry loop |
+| OpenAI outage | ✅ Transient errors retried with exponential backoff (`llm.retry_attempts`); optional `fallback_model` tried once; `run_restarting` emitted between attempts (§3.7) |
 | Observability | ✅ run_id → events → usage → cost; logs ring buffer |
 | Config safety | ✅ Schema validation on every write; history + restore |
 | Mobile | ✅ 360px usable; responsive shell |
@@ -594,14 +615,11 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 
 ## 7. Implementation status & remaining work
 
-**Done and verified:** backend (30 tests pass), streaming chat, approvals end-to-end, config CRUD + test, sessions, monitoring, full responsive frontend, reload-safe reattach.
+**Done and verified:** backend (50 tests pass), streaming chat, approvals end-to-end, config CRUD + test, sessions, monitoring, full responsive frontend, reload-safe reattach, and the full recovery layer — compaction wiring (proactive + reactive), per-session cumulative USD budget enforcement, app-level retry with exponential backoff, fallback model, and `retry_count` metric — all covered by `tests/test_recovery.py`.
 
 **Remaining (each a small, localized change):**
-1. **Wire compaction** — call `compactor.should_compact()` / `compact()` in `RunManager._run_stream` after each turn using the latest `usage.input_tokens`.
-2. **Enforce USD budget** — after computing cost each turn, if `record.cost_usd > max_budget_usd`, cancel with `code:"budget_exceeded"`.
-3. **Fallback model** — on non-retryable primary failure, rebuild the run with `llm.fallback_model`.
-4. **App-level retry** — implement the `min(500·2^n,30000)+jitter` loop honoring `llm.retry_attempts`, and call `metrics.inc_retry()`.
-5. **Schema-driven config form** — optionally render the config form from `GET /config/schema` with react-hook-form + Zod (currently hand-controlled).
+1. **Schema-driven config form** — optionally render the config form from `GET /config/schema` with react-hook-form + Zod (currently hand-controlled).
+2. **Provider usage on streamed path** — the mid-run budget check and the compaction trigger rely on a content-length estimate because some local providers (LM Studio) report zero token usage on `run_streamed`. A provider that reports usage on the streamed path makes both exact; no code change needed, just a provider that supports it.
 
 ---
 
@@ -613,7 +631,7 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 1. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` (or just run `./start.sh`, which does this on first run).
 2. `cp config/config.example.yaml config/config.yaml`; set `server.auth_token`, `llm.*` (model/base_url), `agent.workspace_dir`.
 3. `./start.sh` → backend on `http://127.0.0.1:8100`. Verify `curl http://127.0.0.1:8100/healthz`.
-4. Tests: `PYTHONPATH=src .venv/bin/python -m pytest -q` (30 tests).
+4. Tests: `PYTHONPATH=src .venv/bin/python -m pytest -q` (50 tests).
 
 **Frontend:**
 1. `npm install`.

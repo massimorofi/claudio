@@ -24,11 +24,17 @@ from .tools.registry import build_tools
 
 
 def _make_model(config: AppConfig, model_name: str | None = None) -> OpenAIChatCompletionsModel:
-    """Build a Chat Completions model bound to the configured OpenAI-compatible endpoint."""
+    """Build a Chat Completions model bound to the configured OpenAI-compatible endpoint.
+
+    ``max_retries=0`` disables the OpenAI client's own retry loop so the
+    application-level retry policy in :class:`claudio.runs.manager.RunManager`
+    is the single source of truth (otherwise retries nest and double up).
+    """
     client = AsyncOpenAI(
         api_key=config.llm.api_key or "local",
         base_url=config.llm.base_url,
         timeout=float(config.llm.timeout_seconds),
+        max_retries=0,
     )
     return OpenAIChatCompletionsModel(
         model=model_name or config.llm.model,
@@ -100,8 +106,13 @@ def _agent_factory(config: AppConfig):
     return factory
 
 
-def build_primary_agent(config: AppConfig) -> Agent[ToolContext]:
-    """Build the primary agent from the current config."""
+def build_primary_agent(
+    config: AppConfig, model_override: str | None = None
+) -> Agent[ToolContext]:
+    """Build the primary agent from the current config.
+
+    ``model_override`` replaces the configured model name (used for fallback).
+    """
     enabled = list(config.agent.tools.enabled)
 
     tools = build_tools(
@@ -122,7 +133,7 @@ def build_primary_agent(config: AppConfig) -> Agent[ToolContext]:
     return Agent[ToolContext](
         name=config.agent.name,
         instructions=_dynamic_instructions(config),
-        model=_make_model(config),
+        model=_make_model(config, model_override),
         model_settings=_model_settings(config),
         tools=tools,
         output_type=str,

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS claudio_sessions (
     total_cost_usd REAL NOT NULL DEFAULT 0,
     total_input_tokens INTEGER NOT NULL DEFAULT 0,
     total_output_tokens INTEGER NOT NULL DEFAULT 0,
+    last_context_tokens INTEGER NOT NULL DEFAULT 0,
     compaction_disabled INTEGER NOT NULL DEFAULT 0,
     turns_since_todo INTEGER NOT NULL DEFAULT 0
 );
@@ -95,6 +96,13 @@ class Database:
         if "resume_state_json" not in cols:
             await self.conn.execute(
                 "ALTER TABLE claudio_runs ADD COLUMN resume_state_json TEXT"
+            )
+            await self.conn.commit()
+        async with self.conn.execute("PRAGMA table_info(claudio_sessions)") as cur:
+            scols = {row["name"] for row in await cur.fetchall()}
+        if "last_context_tokens" not in scols:
+            await self.conn.execute(
+                "ALTER TABLE claudio_sessions ADD COLUMN last_context_tokens INTEGER NOT NULL DEFAULT 0"
             )
             await self.conn.commit()
 

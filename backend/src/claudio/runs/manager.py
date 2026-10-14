@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -27,6 +28,20 @@ from .events import translate_stream_event
 logger = logging.getLogger(__name__)
 
 RING_BUFFER_SIZE = 2000
+
+
+class BudgetExceededError(Exception):
+    """Raised when a session's cumulative spend reaches ``max_budget_usd``.
+
+    Treated as a terminal, non-retryable failure by the recovery loop.
+    """
+
+    def __init__(self, spent: float, budget: float) -> None:
+        super().__init__(
+            f"Budget exceeded: ${spent:.4f} spent of ${budget:.4f} limit"
+        )
+        self.spent = spent
+        self.budget = budget
 
 
 @dataclass
@@ -236,7 +251,7 @@ class RunManager:
                     "data": {"run_id": record.run_id, "session_id": record.session_id},
                 },
             )
-            await self._run_stream(record, agent, message, tctx, session)
+            await self._run_with_recovery(record, agent, message, tctx, session)
         except asyncio.CancelledError:
             await self._finalize_cancelled(record)
         except Exception as e:  # noqa: BLE001
@@ -266,7 +281,7 @@ class RunManager:
                         rejection_message=rejection_message
                         or "The user denied this action.",
                     )
-            await self._run_stream(record, agent, state, tctx, session)
+            await self._run_with_recovery(record, agent, state, tctx, session)
         except asyncio.CancelledError:
             await self._finalize_cancelled(record)
         except Exception as e:  # noqa: BLE001
@@ -278,8 +293,141 @@ class RunManager:
         data = json.loads(state_json) if isinstance(state_json, str) else state_json
         return RunState.from_json(agent, data)
 
-    async def _run_stream(self, record, agent, input_data, tctx, session) -> None:
-        """Drive a streamed run to completion, interruption, or failure."""
+    async def _last_context_tokens(self, session_id: str) -> int:
+        """The input-token size of the most recent completed turn (context proxy)."""
+        row = await self.db.get_session(session_id)
+        return int((row or {}).get("last_context_tokens") or 0)
+
+    async def _maybe_compact(self, record: RunRecord, session) -> int:
+        """Proactively compact the session if its current size nears the window.
+
+        The current size is estimated from the session's text content so it works
+        even with providers that don't report usage on the streamed path. Returns
+        the (post-compaction) estimated token count.
+        """
+        items = await session.get_items()
+        est = _estimate_items_tokens(items)
+        if self.compactor.is_disabled(record.session_id):
+            return est
+        if self.compactor.should_compact(est):
+            if await self.compactor.compact(
+                session, _make_model(self.config), record.session_id
+            ):
+                items = await session.get_items()
+                est = _estimate_items_tokens(items)
+        return est
+
+    async def _run_with_recovery(
+        self, record: RunRecord, agent, input_data, tctx, session
+    ) -> None:
+        """Wrap a streamed run with compaction, budget, retry and fallback.
+
+        Recovery strategies, each bounded so the loop always terminates:
+        - **Proactive compaction** once, before the first attempt.
+        - **Run-start budget gate** on the session's cumulative spend.
+        - **Reactive compaction** once, on a context-overflow error.
+        - **Retry with exponential backoff** up to ``llm.retry_attempts``.
+        - **Fallback model** once, if ``llm.fallback_model`` is set.
+
+        ``BudgetExceededError`` and cancellation are terminal (never retried).
+        """
+        max_retries = max(0, int(self.config.llm.retry_attempts or 0))
+        budget = float(self.config.agent.max_budget_usd or 0.0)
+        fallback = self.config.llm.fallback_model
+
+        row = await self.db.get_session(record.session_id)
+        base_cost = float((row or {}).get("total_cost_usd") or 0.0)
+
+        # Run-start budget gate (per-session cumulative), before any work that
+        # itself costs money (compaction included).
+        if budget > 0 and base_cost >= budget:
+            raise BudgetExceededError(base_cost, budget)
+
+        # Proactive compaction once, before the first attempt.
+        await self._maybe_compact(record, session)
+        # Snapshot the session AFTER proactive compaction so a rollback restores
+        # the compacted state. The SDK appends the run's input to the session
+        # during the run, so a naive retry would otherwise double-append it.
+        snapshot = await session.get_items()
+
+        attempt = 0
+        used_fallback = False
+        used_reactive_compaction = False
+        while True:
+            try:
+                await self._run_stream(
+                    record, agent, input_data, tctx, session, base_cost
+                )
+                return  # completed, or paused for approval (normal)
+            except asyncio.CancelledError:
+                raise
+            except BudgetExceededError:
+                raise  # terminal, not retryable
+            except Exception as exc:  # noqa: BLE001
+                code, retryable = _classify_error(exc)
+
+                # (1) Reactive compaction on context overflow — once per run.
+                if (
+                    _is_context_overflow(exc)
+                    and not used_reactive_compaction
+                    and not self.compactor.is_disabled(record.session_id)
+                ):
+                    used_reactive_compaction = True
+                    if await self.compactor.compact(
+                        session, _make_model(self.config), record.session_id
+                    ):
+                        snapshot = await session.get_items()
+                        self._publish(
+                            record,
+                            {
+                                "event": "run_restarting",
+                                "data": {"reason": "compacted", "attempt": attempt},
+                            },
+                        )
+                        continue
+
+                # (2) App-level retry with exponential backoff on transient errors.
+                if retryable and attempt < max_retries:
+                    attempt += 1
+                    self.metrics.inc_retry()
+                    await session.clear_session()
+                    await session.add_items(snapshot)
+                    self._publish(
+                        record,
+                        {
+                            "event": "run_restarting",
+                            "data": {"reason": code, "attempt": attempt},
+                        },
+                    )
+                    await asyncio.sleep(_backoff_seconds(attempt))
+                    continue
+
+                # (3) Fallback model, once, if configured.
+                if not used_fallback and fallback:
+                    used_fallback = True
+                    agent = build_primary_agent(self.config, model_override=fallback)
+                    await session.clear_session()
+                    await session.add_items(snapshot)
+                    self._publish(
+                        record,
+                        {
+                            "event": "run_restarting",
+                            "data": {"reason": "fallback", "attempt": attempt},
+                        },
+                    )
+                    continue
+
+                # Nothing left to try.
+                raise
+
+    async def _run_stream(
+        self, record, agent, input_data, tctx, session, base_cost: float = 0.0
+    ) -> None:
+        """Drive a streamed run to completion, interruption, or failure.
+
+        Checks the per-session budget after each turn (each completed response).
+        """
+        budget = float(self.config.agent.max_budget_usd or 0.0)
         result = Runner.run_streamed(
             agent,
             input_data,
@@ -293,6 +441,11 @@ class RunManager:
                 return
             for sse in translate_stream_event(event):
                 self._publish(record, sse)
+            # Mid-run budget check: each response.completed grows raw_responses.
+            if budget > 0:
+                spent = base_cost + _compute_cost(_extract_usage(result), self.config)
+                if spent >= budget:
+                    raise BudgetExceededError(spent, budget)
 
         # After the stream: interruptions (approval) or completion.
         interruptions = getattr(result, "interruptions", None)
@@ -300,7 +453,7 @@ class RunManager:
             await self._handle_interruption(record, result)
             return
 
-        await self._finalize_completed(record, result)
+        await self._finalize_completed(record, result, session)
 
     async def _handle_interruption(self, record: RunRecord, result) -> None:
         state = result.to_state()
@@ -336,7 +489,7 @@ class RunManager:
                 },
             )
 
-    async def _finalize_completed(self, record: RunRecord, result) -> None:
+    async def _finalize_completed(self, record: RunRecord, result, session=None) -> None:
         usage = _extract_usage(result)
         record.input_tokens = usage["input_tokens"]
         record.output_tokens = usage["output_tokens"]
@@ -348,6 +501,12 @@ class RunManager:
         self.metrics.add_usage(
             record.input_tokens, record.output_tokens, record.cost_usd
         )
+        # Persist the post-run context size. Prefer the model-reported input size;
+        # fall back to a content estimate when the provider reports 0 (common on
+        # the streamed path for local providers).
+        last_in = _last_response_input_tokens(result, 0)
+        if last_in <= 0 and session is not None:
+            last_in = _estimate_items_tokens(await session.get_items())
         await self.db.update_run(
             record.run_id,
             state="completed",
@@ -367,7 +526,7 @@ class RunManager:
                 "run_id": record.run_id,
             },
         )
-        await self._update_session_totals(record)
+        await self._update_session_totals(record, last_context_tokens=last_in)
         self._publish(
             record,
             {
@@ -443,17 +602,21 @@ class RunManager:
         )
         self._close_subscribers(record)
 
-    async def _update_session_totals(self, record: RunRecord) -> None:
+    async def _update_session_totals(
+        self, record: RunRecord, last_context_tokens: int | None = None
+    ) -> None:
         row = await self.db.get_session(record.session_id)
         if not row:
             return
-        await self.db.update_session(
-            record.session_id,
-            total_cost_usd=(row.get("total_cost_usd") or 0) + record.cost_usd,
-            total_input_tokens=(row.get("total_input_tokens") or 0) + record.input_tokens,
-            total_output_tokens=(row.get("total_output_tokens") or 0) + record.output_tokens,
-            message_count=(row.get("message_count") or 0) + 1,
-        )
+        fields: dict[str, Any] = {
+            "total_cost_usd": (row.get("total_cost_usd") or 0) + record.cost_usd,
+            "total_input_tokens": (row.get("total_input_tokens") or 0) + record.input_tokens,
+            "total_output_tokens": (row.get("total_output_tokens") or 0) + record.output_tokens,
+            "message_count": (row.get("message_count") or 0) + 1,
+        }
+        if last_context_tokens is not None:
+            fields["last_context_tokens"] = last_context_tokens
+        await self.db.update_session(record.session_id, **fields)
 
     def _close_subscribers(self, record: RunRecord) -> None:
         for q in list(record.subscribers):
@@ -483,6 +646,64 @@ def _compute_cost(usage: dict[str, int], config: AppConfig) -> float:
     )
 
 
+def _last_response_input_tokens(result, default: int = 0) -> int:
+    """Input-token count of the most recent model response (full context sent).
+
+    Some OpenAI-compatible providers (e.g. LM Studio) report zero usage on the
+    streamed path; callers should fall back to :func:`_estimate_items_tokens`
+    when this returns 0.
+    """
+    raw = getattr(result, "raw_responses", None) or []
+    if not raw:
+        return default
+    usage = getattr(raw[-1], "usage", None)
+    if not usage:
+        return default
+    return getattr(usage, "input_tokens", default) or default
+
+
+def _iter_strings(obj: Any):
+    """Yield every string value nested in a JSON-like structure."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
+def _estimate_items_tokens(items: Any) -> int:
+    """Rough token estimate from the total text content of the session items.
+
+    Provider-independent (does not rely on the model reporting usage). Uses the
+    common ~4 chars/token heuristic over all string content (message text, tool
+    arguments, tool results).
+    """
+    total_chars = sum(len(s) for s in _iter_strings(items))
+    return total_chars // 4
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff capped at 30s, plus a small jitter."""
+    base = min(500 * (2 ** (attempt - 1)), 30000) / 1000.0
+    return base + random.uniform(0, 0.25)
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """Detect a model 'context length exceeded' style error."""
+    m = str(exc).lower()
+    return (
+        "context length" in m
+        or "maximum context" in m
+        or "context_window" in m
+        or "prompt is too long" in m
+        or "too many tokens" in m
+        or "reduce the length" in m
+    )
+
+
 def _extract_arguments(item) -> Any:
     raw = getattr(item, "arguments", None)
     if raw is None:
@@ -499,6 +720,8 @@ def _classify_error(exc: Exception) -> tuple[str, bool]:
     """Map an exception to (error_code, retryable)."""
     name = type(exc).__name__
     msg = str(exc).lower()
+    if isinstance(exc, BudgetExceededError):
+        return "budget_exceeded", False
     if "max_turns" in name.lower() or "max turns" in msg:
         return "max_turns_exceeded", False
     if "auth" in msg or "api key" in msg or "401" in msg:
