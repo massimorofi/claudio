@@ -76,6 +76,8 @@ class AgentConfig(BaseModel):
     compaction_reserve: int = 8192
     max_output_chars: int = 8000
     strict_tools: bool = False
+    skills_enabled: bool = True
+    skills_dir: str = "./skills"
     tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)
     subagents: dict[str, SubagentConfig] = Field(default_factory=dict)
 

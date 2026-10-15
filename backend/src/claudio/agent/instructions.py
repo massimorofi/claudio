@@ -9,8 +9,11 @@ import platform
 from datetime import datetime, timezone
 from pathlib import Path
 
+from typing import Any
+
 from ..settings import AppConfig
 from .memory import discover_memory_files, render_memory_block
+from .skill_loader import render_skill_block
 from .tools.planning import TURNS_SINCE_WRITE_NAG
 
 BASE_IDENTITY = """You are Claudio, an AI agent that helps the user get work done by using tools.
@@ -27,6 +30,7 @@ def build_instructions(
     config: AppConfig,
     session_id: str,
     turns_since_todo: int = 0,
+    skill_entries: list[dict[str, Any]] | None = None,
 ) -> str:
     """Assemble the full system prompt for a run."""
     workspace = Path(config.agent.workspace_dir).resolve()
@@ -43,6 +47,11 @@ def build_instructions(
         f"- Approval mode: {config.agent.approval_mode}",
     ]
     sections.append("\n".join(env_lines))
+
+    # Skills catalog (names + descriptions only; full text loads on demand).
+    skill_block = render_skill_block(skill_entries)
+    if skill_block:
+        sections.append(skill_block)
 
     # Memory files.
     memory_files = discover_memory_files(workspace, Path(config_dir))

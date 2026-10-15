@@ -392,7 +392,26 @@ function AgentSection({
             onChange={(e) => upd({ workspace_dir: e.target.value })}
           />
         </Field>
+        <Field
+          label="Skills dir"
+          hint="Folder of Agent Skills (each a directory with a SKILL.md)."
+        >
+          <input
+            className={inputCls}
+            value={agent.skills_dir}
+            onChange={(e) => upd({ skills_dir: e.target.value })}
+          />
+        </Field>
       </div>
+
+      <label className="mt-1 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={agent.skills_enabled}
+          onChange={(e) => upd({ skills_enabled: e.target.checked })}
+        />
+        <span>Enable Agent Skills (adds list_skills / load_skill / read_skill_resource)</span>
+      </label>
 
       <div className="mt-2">
         <div className="mb-1 text-xs font-medium text-black/60">Enabled tools</div>

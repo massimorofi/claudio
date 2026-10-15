@@ -5,6 +5,8 @@ config change + agent restart is all that's needed to reshape the agent.
 """
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
 
 from agents import (
@@ -19,8 +21,25 @@ from ..settings import AppConfig
 from .context import ToolContext
 from .instructions import build_instructions
 from .guardrails import input_safety_guardrail, output_safety_guardrail
+from .skill_loader import SkillScan, build_skill_tools, scan_skills
 from .subagents import spawn_subagent
 from .tools.registry import build_tools
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_skills_dir(config: AppConfig) -> Path:
+    """Resolve the configured skills directory to an absolute path.
+
+    A relative ``skills_dir`` is anchored to the backend base directory (the
+    folder that contains ``src/``), derived from this module's own location so it
+    does not depend on the process cwd. An absolute ``skills_dir`` is used as-is.
+    """
+    p = Path(config.agent.skills_dir).expanduser()
+    if p.is_absolute():
+        return p
+    backend_base = Path(__file__).resolve().parents[3]
+    return (backend_base / p).resolve()
 
 
 def _make_model(config: AppConfig, model_name: str | None = None) -> OpenAIChatCompletionsModel:
@@ -49,7 +68,7 @@ def _model_settings(config: AppConfig) -> ModelSettings:
     )
 
 
-def _dynamic_instructions(config: AppConfig):
+def _dynamic_instructions(config: AppConfig, skill_entries: list[dict[str, Any]] | None = None):
     """Instructions that recompute per turn (todo nag depends on turn count)."""
 
     async def _instructions(ctx, agent) -> str:  # noqa: ANN001
@@ -58,6 +77,7 @@ def _dynamic_instructions(config: AppConfig):
             config,
             session_id=tctx.session_id,
             turns_since_todo=tctx.turns_since_todo,
+            skill_entries=skill_entries,
         )
 
     return _instructions
@@ -138,9 +158,22 @@ def build_primary_agent(
         )
         tools.append(spawn_tool)
 
+    # Agent Skills: scan the skills folder once per build and expose the
+    # read-only list/load/read tools. The catalog also goes into the system prompt.
+    skill_entries: list[dict[str, Any]] | None = None
+    if config.agent.skills_enabled:
+        try:
+            scan = scan_skills(_resolve_skills_dir(config))
+        except (OSError, ValueError) as exc:
+            logger.warning("skills scan failed: %s", exc)
+            scan = SkillScan({}, [])
+        if scan.skills:
+            tools.extend(build_skill_tools(scan, strict_mode=config.agent.strict_tools))
+        skill_entries = scan.entries
+
     return Agent[ToolContext](
         name=config.agent.name,
-        instructions=_dynamic_instructions(config),
+        instructions=_dynamic_instructions(config, skill_entries=skill_entries),
         model=_make_model(config, model_override),
         model_settings=_model_settings(config),
         tools=tools,

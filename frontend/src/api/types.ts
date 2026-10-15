@@ -71,6 +71,8 @@ export interface AgentCfg {
   compaction_reserve: number
   max_output_chars: number
   strict_tools: boolean
+  skills_enabled: boolean
+  skills_dir: string
   tools: { enabled: string[]; disabled: string[] }
   subagents: Record<string, SubagentCfg>
 }
@@ -270,6 +272,22 @@ export interface WorkspaceTreeResponse {
   workspace: string
   tree: WorkspaceNode[]
   truncated: boolean
+}
+
+// ---- Skills ----
+
+export interface SkillEntry {
+  directory: string
+  name?: string
+  description?: string
+  valid: boolean
+  error?: string
+}
+
+export interface SkillsResponse {
+  directory: string
+  enabled: boolean
+  skills: SkillEntry[]
 }
 
 // ---- Monitoring ----

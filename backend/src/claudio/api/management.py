@@ -5,6 +5,8 @@ from fastapi import APIRouter, Request
 
 from .deps import require_auth, ApiError
 from ..agent.tools.registry import tool_inventory
+from ..agent.skill_loader import scan_skills
+from ..agent.builder import _resolve_skills_dir
 
 router = APIRouter()
 
@@ -52,3 +54,27 @@ async def agent_status(request: Request) -> dict:
 async def agent_tools(request: Request) -> dict:
     require_auth(request)
     return {"tools": tool_inventory()}
+
+
+@router.get("/skills")
+async def list_skills(request: Request) -> dict:
+    """List installed Agent Skills (valid and broken) with their directory."""
+    require_auth(request)
+    supervisor = request.app.state.supervisor
+    config = supervisor.config
+    if config is None:
+        from ..settings import load_config
+
+        config = load_config(supervisor.config_path)
+    skills_dir = _resolve_skills_dir(config)
+    if not config.agent.skills_enabled:
+        return {"directory": str(skills_dir), "enabled": False, "skills": []}
+    try:
+        scan = scan_skills(skills_dir)
+    except (OSError, ValueError) as exc:
+        raise ApiError(500, "skills_scan_failed", f"Failed to scan skills: {exc}")
+    return {
+        "directory": str(skills_dir),
+        "enabled": True,
+        "skills": scan.entries,
+    }
