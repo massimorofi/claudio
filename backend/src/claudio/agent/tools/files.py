@@ -2,8 +2,9 @@
 
 Every write/edit backs up the previous content under
 ``data/file-history/<session_id>/`` before modifying the file, so changes can be
-rewound. File tools are confined to the workspace; paths outside it require
-approval (enforced by the registry's approval policy).
+rewound. File tools are confined to the workspace: in ``on_request`` mode the
+read-only tools refuse paths that resolve outside it (destructive tools are gated
+by approval instead).
 """
 from __future__ import annotations
 
@@ -76,6 +77,8 @@ async def read_file(
     """
     tctx = ctx.context
     target = tctx.resolve_path(path)
+    if tctx.approval_mode == "on_request" and not tctx.is_within_workspace(target):
+        return {"ok": False, "error": f"Path outside workspace: {path}"}
     if not target.exists():
         return {"ok": False, "error": f"No such file: {path}"}
     if not target.is_file():
@@ -169,6 +172,8 @@ async def list_dir(ctx: RunContextWrapper[ToolContext], path: str = ".") -> dict
     """
     tctx = ctx.context
     target = tctx.resolve_path(path)
+    if tctx.approval_mode == "on_request" and not tctx.is_within_workspace(target):
+        return {"ok": False, "error": f"Path outside workspace: {path}"}
     if not target.exists() or not target.is_dir():
         return {"ok": False, "error": f"No such directory: {path}"}
     entries = []

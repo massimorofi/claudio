@@ -13,6 +13,7 @@ from claudio.settings import (
     validate_candidate,
     write_config_atomic,
     redact_secrets,
+    restore_redacted_secrets,
     changed_keys,
     restart_required_for,
     config_schema_json,
@@ -64,6 +65,33 @@ def test_redact_secrets():
     redacted = redact_secrets(cfg.model_dump())
     assert redacted["llm"]["api_key"] == "***"
     assert redacted["server"]["auth_token"] == "***"
+
+
+def test_restore_redacted_secrets_keeps_current():
+    current = {"server": {"auth_token": "real-token"}, "llm": {"api_key": "sk-real"}}
+    candidate = {
+        "server": {"auth_token": "***"},
+        "llm": {"api_key": "***", "model": "m2"},
+    }
+    restored = restore_redacted_secrets(candidate, current)
+    assert restored["server"]["auth_token"] == "real-token"
+    assert restored["llm"]["api_key"] == "sk-real"
+    # Non-secret fields still take the candidate value.
+    assert restored["llm"]["model"] == "m2"
+
+
+def test_restore_redacted_secrets_passes_through_real_values():
+    current = {"server": {"auth_token": "a"}}
+    candidate = {"server": {"auth_token": "b"}}
+    restored = restore_redacted_secrets(candidate, current)
+    assert restored["server"]["auth_token"] == "b"
+
+
+def test_redact_then_restore_roundtrip():
+    cfg = AppConfig()
+    redacted = redact_secrets(cfg.model_dump())
+    restored = restore_redacted_secrets(redacted, cfg.model_dump())
+    assert restored == cfg.model_dump()
 
 
 def test_changed_keys():

@@ -175,6 +175,23 @@ def redact_secrets(cfg_dict: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def restore_redacted_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Replace redacted placeholders in ``candidate`` with the real values from ``current``.
+
+    The config API redacts secrets on read (see :func:`redact_secrets`). When a
+    client echoes that redacted config back on save, the ``***`` placeholders must
+    not overwrite the stored secrets — a field carrying the placeholder is treated
+    as "unchanged".
+    """
+    out = copy.deepcopy(candidate)
+    for section, key in SECRET_FIELDS:
+        if isinstance(out.get(section), dict) and out[section].get(key) == REDACTED:
+            cur = current.get(section)
+            if isinstance(cur, dict) and cur.get(key):
+                out[section][key] = cur[key]
+    return out
+
+
 def changed_keys(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     """Dotted keys that differ between two config dicts."""
     diffs: list[str] = []

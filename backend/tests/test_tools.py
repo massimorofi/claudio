@@ -94,40 +94,40 @@ async def test_list_dir(tctx):
 
 # ---- registry approval logic -------------------------------------------
 
-async def test_approval_destructive_on_request(tctx):
+def test_approval_destructive_on_request():
+    from claudio.agent.tools.registry import needs_approval_for
+
     meta = TOOL_META["write_file"]
-    checker = _make_checker(meta)
-    needs = await checker(_ctx(tctx), {"path": "x.txt"}, "call1")
-    assert needs is True
+    assert needs_approval_for(meta, "on_request") is True
 
 
-async def test_approval_readonly_on_request(tctx):
+def test_approval_readonly_on_request():
+    from claudio.agent.tools.registry import needs_approval_for
+
     meta = TOOL_META["read_file"]
-    checker = _make_checker(meta)
-    needs = await checker(_ctx(tctx), {"path": "x.txt"}, "call1")
-    assert needs is False
+    assert needs_approval_for(meta, "on_request") is False
 
 
-async def test_approval_off_never(tctx):
-    tctx.approval_mode = "off"
+def test_approval_off_never():
+    from claudio.agent.tools.registry import needs_approval_for
+
     meta = TOOL_META["run_command"]
-    checker = _make_checker(meta)
-    needs = await checker(_ctx(tctx), {"command": "ls"}, "call1")
-    assert needs is False
+    assert needs_approval_for(meta, "off") is False
 
 
-async def test_approval_always(tctx):
-    tctx.approval_mode = "always"
+def test_approval_always():
+    from claudio.agent.tools.registry import needs_approval_for
+
     meta = TOOL_META["read_file"]
-    checker = _make_checker(meta)
-    needs = await checker(_ctx(tctx), {"path": "x.txt"}, "call1")
-    assert needs is True
+    assert needs_approval_for(meta, "always") is True
 
 
-def _make_checker(meta):
-    from claudio.agent.tools.registry import _make_approval_check
-
-    return _make_approval_check(meta)
+async def test_read_file_outside_workspace_refused(tctx):
+    # In on_request mode the read-only file tools refuse paths that escape
+    # the workspace, instead of relying on an approval prompt.
+    res = await file_tools.read_file(_ctx(tctx), "/etc/passwd")
+    assert res["ok"] is False
+    assert "outside workspace" in res["error"].lower()
 
 
 def test_build_tools_filters_unknown():

@@ -12,6 +12,7 @@ from ..settings import (
     validate_candidate,
     write_config_atomic,
     redact_secrets,
+    restore_redacted_secrets,
     changed_keys,
     restart_required_for,
     config_schema_json,
@@ -50,6 +51,9 @@ async def put_config(request: Request, payload: dict) -> dict:
 
     # Merge-patch: candidate over current.
     merged = _merge(current, payload)
+    # The client only ever sees redacted secrets; a '***' in the payload means
+    # "unchanged", never "set the secret to ***".
+    merged = restore_redacted_secrets(merged, current)
     try:
         validated = AppConfig.model_validate(merged)
     except Exception as e:  # noqa: BLE001
@@ -142,12 +146,14 @@ async def config_restore(request: Request, payload: dict) -> dict:
     version = await supervisor.db.get_config_version(int(version_id))
     if not version:
         raise ApiError(404, "not_found", f"No config version {version_id}")
-    candidate = version["config"]
+    current = _current_dict(supervisor)
+    # A version saved after a redacted round-trip may hold '***' placeholders;
+    # keep the live secret values instead of restoring the placeholders.
+    candidate = restore_redacted_secrets(version["config"], current)
     try:
         AppConfig.model_validate(candidate)
     except Exception as e:  # noqa: BLE001
         raise ApiError(422, "validation_error", f"Stored version invalid: {e}")
-    current = _current_dict(supervisor)
     changed = changed_keys(current, candidate)
     required = restart_required_for(changed)
     write_config_atomic(supervisor.config_path, candidate)

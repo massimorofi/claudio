@@ -56,7 +56,7 @@ async def logs(request: Request, level: str | None = None, since: str | None = N
         min_level = order.get(level.upper(), 0)
         entries = [e for e in entries if order.get(e.get("level", ""), 0) >= min_level]
     if since:
-        entries = [e for e in entries if (e.get("ts") or "") >= since]
+        entries = [e for e in entries if (e.get("timestamp") or "") >= since]
     return {"logs": entries[-limit:]}
 
 
@@ -68,7 +68,7 @@ async def runs(request: Request, limit: int = 50) -> dict:
     return {
         "runs": [
             {
-                "run_id": r["id"],
+                "id": r["id"],
                 "session_id": r["session_id"],
                 "state": r["state"],
                 "started_at": r["started_at"],

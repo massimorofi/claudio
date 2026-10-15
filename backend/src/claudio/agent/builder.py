@@ -84,6 +84,7 @@ def build_subagent(config: AppConfig, agent_id: str) -> Agent[ToolContext] | Non
     tools = build_tools(
         enabled=cfg.tools,
         strict_mode=config.agent.strict_tools,
+        approval_mode=config.agent.approval_mode,
     )
     return Agent[ToolContext](
         name=agent_id,
@@ -107,18 +108,25 @@ def _agent_factory(config: AppConfig):
 
 
 def build_primary_agent(
-    config: AppConfig, model_override: str | None = None
+    config: AppConfig,
+    model_override: str | None = None,
+    approval_mode: str | None = None,
 ) -> Agent[ToolContext]:
     """Build the primary agent from the current config.
 
     ``model_override`` replaces the configured model name (used for fallback).
+    ``approval_mode`` overrides the configured approval policy for this agent's
+    tools; it should match the run's effective approval mode so the tool cards and
+    the approval gate agree. Defaults to ``config.agent.approval_mode``.
     """
     enabled = list(config.agent.tools.enabled)
+    mode = approval_mode or config.agent.approval_mode
 
     tools = build_tools(
         enabled=enabled,
         disabled=config.agent.tools.disabled,
         strict_mode=config.agent.strict_tools,
+        approval_mode=mode,
     )
     # The spawn tool is only exposed when explicitly enabled (it is not part of the
     # base registry's raw-function map, so build_tools skips it).

@@ -95,19 +95,23 @@ def translate_stream_event(event) -> list[dict[str, Any]]:
     return out
 
 
-def _safe_args(raw: Any) -> Any:
-    if raw is None:
-        return {}
-    if isinstance(raw, (dict, list)):
-        return raw
-    if isinstance(raw, str):
-        import json
+def _safe_args(raw: Any) -> str:
+    """Return the tool-call arguments as a JSON string.
 
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return {"raw": raw}
-    return {"value": str(raw)}
+    The frontend types ``arguments`` as a string and pretty-prints it by parsing,
+    so the wire format must be a string — sending a dict makes React try to render
+    an object as a child and crash the view.
+    """
+    if raw is None:
+        return "{}"
+    if isinstance(raw, str):
+        return raw
+    import json
+
+    try:
+        return json.dumps(raw)
+    except (TypeError, ValueError):
+        return str(raw)
 
 
 def _is_error_output(output: Any) -> bool:

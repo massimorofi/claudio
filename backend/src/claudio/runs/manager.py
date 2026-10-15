@@ -240,7 +240,8 @@ class RunManager:
         self, record: RunRecord, message: str, approval_mode: str | None
     ) -> None:
         try:
-            agent = build_primary_agent(self.config)
+            mode = approval_mode or self.config.agent.approval_mode
+            agent = build_primary_agent(self.config, approval_mode=mode)
             tctx = self._build_context(record, approval_mode)
             session = self.session_store.make_sdk_session(record.session_id)
             self.metrics.inc_run_started()
@@ -291,7 +292,7 @@ class RunManager:
         from agents import RunState
 
         data = json.loads(state_json) if isinstance(state_json, str) else state_json
-        return RunState.from_json(agent, data)
+        return await RunState.from_json(agent, data)
 
     async def _last_context_tokens(self, session_id: str) -> int:
         """The input-token size of the most recent completed turn (context proxy)."""
@@ -457,7 +458,8 @@ class RunManager:
 
     async def _handle_interruption(self, record: RunRecord, result) -> None:
         state = result.to_state()
-        state_json = state.to_json()
+        state_dict = state.to_json(context_serializer=_serialize_tool_context)
+        state_json = json.dumps(state_dict)
         record.resume_state_json = state_json
         record.state = "awaiting_approval"
         # Persist resume state on the run row.
@@ -483,7 +485,7 @@ class RunManager:
                     "data": {
                         "approval_id": approval_id,
                         "tool": tool_name,
-                        "arguments": arguments,
+                        "arguments": json.dumps(arguments),
                         "reason": f"Approval required to run {tool_name}",
                     },
                 },
@@ -714,6 +716,25 @@ def _extract_arguments(item) -> Any:
         except (json.JSONDecodeError, ValueError):
             return {"raw": raw}
     return raw or {}
+
+
+def _serialize_tool_context(ctx: Any) -> dict[str, Any]:
+    """JSON-safe view of a :class:`ToolContext` for run-state persistence.
+
+    The SDK serializes the run context when a run pauses for approval. The live
+    ``Database`` (a sqlite connection) and the ``agent_factory`` callable cannot be
+    serialized, so they are omitted here. This is safe: on resume the run manager
+    builds a fresh ``ToolContext`` (with a live DB) and passes it as the run
+    context, which overrides whatever was restored from this snapshot.
+    """
+    return {
+        "session_id": ctx.session_id,
+        "workspace": str(ctx.workspace),
+        "approval_mode": ctx.approval_mode,
+        "run_id": ctx.run_id,
+        "cost_usd": ctx.cost_usd,
+        "turns_since_todo": ctx.turns_since_todo,
+    }
 
 
 def _classify_error(exc: Exception) -> tuple[str, bool]:

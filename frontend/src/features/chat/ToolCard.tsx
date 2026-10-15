@@ -54,8 +54,15 @@ export default function ToolCard({ item }: { item: ToolItem }) {
   )
 }
 
-function pretty(raw: string): string {
-  if (!raw) return ''
+function pretty(raw: unknown): string {
+  if (raw == null || raw === '') return ''
+  if (typeof raw !== 'string') {
+    try {
+      return JSON.stringify(raw, null, 2)
+    } catch {
+      return String(raw)
+    }
+  }
   try {
     return JSON.stringify(JSON.parse(raw), null, 2)
   } catch {

@@ -21,7 +21,7 @@ class RingBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:  # noqa: D102
         try:
             entry = {
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": record.levelname,
                 "logger": record.name,
                 "message": record.getMessage(),
@@ -64,5 +64,5 @@ def setup_logging(level: str = "INFO") -> None:
     root.addHandler(RingBufferHandler())
 
     # Quieten noisy third-party loggers.
-    for noisy in ("httpx", "httpcore", "openai", "uvicorn.access"):
+    for noisy in ("httpx", "httpx2", "httpcore", "openai", "uvicorn.access"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
