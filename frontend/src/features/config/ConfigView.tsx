@@ -5,7 +5,11 @@ import { api } from '../../api/client'
 import type { AppConfig, ConfigHistoryEntry, LlmTestResult } from '../../api/types'
 
 type SetField = <K extends keyof AppConfig>(k: K, v: AppConfig[K]) => void
-type TestMut = { mutate: () => void; isPending: boolean; data?: LlmTestResult }
+type TestMut = {
+  mutate: (llm: AppConfig['llm']) => void
+  isPending: boolean
+  data?: LlmTestResult
+}
 
 export default function ConfigView() {
   const [tab, setTab] = useState<'llm' | 'agent' | 'mcp' | 'danger'>('llm')
@@ -41,7 +45,9 @@ export default function ConfigView() {
   })
 
   const testMut = useMutation({
-    mutationFn: () => api.post<LlmTestResult>('/config/llm/test'),
+    mutationFn: (llm: AppConfig['llm']) =>
+      api.post<LlmTestResult>('/config/llm/test', { llm }),
+    onError: (e: Error) => setMessage({ kind: 'err', text: e.message }),
   })
 
   const historyQ = useQuery({
@@ -265,7 +271,7 @@ function LlmSection({
       </div>
 
       <button
-        onClick={() => testMut.mutate()}
+        onClick={() => testMut.mutate(llm)}
         disabled={testMut.isPending}
         className="mt-2 flex items-center gap-2 rounded-lg border border-brand px-4 py-2 text-sm font-semibold text-brand disabled:opacity-50"
       >

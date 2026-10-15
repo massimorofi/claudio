@@ -19,6 +19,12 @@ export default function ChatView() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
   const restoredRef = useRef(false)
+  // Whether the transcript should keep following new streamed content. It is
+  // turned off as soon as the user scrolls up, so streaming never yanks the
+  // view away from what they are reading.
+  const stickRef = useRef(true)
+  const lastScrollTop = useRef(0)
+  const [showJump, setShowJump] = useState(false)
 
   const { state, send, stop, approve, deny, clear, loadSession, resumeActiveRun } = useChat(
     sessionId,
@@ -59,15 +65,49 @@ export default function ChatView() {
     queryFn: () => api.get<{ sessions: SessionSummary[] }>('/sessions'),
   })
 
-  useEffect(() => {
+  const isAtBottom = () => {
+    const el = scrollRef.current
+    if (!el) return true
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= 80
+  }
+
+  const handleScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const cur = el.scrollTop
+    const atBottom = el.scrollHeight - cur - el.clientHeight <= 80
+    if (cur < lastScrollTop.current - 1) {
+      // Any upward scroll means the user wants to read above — stop following.
+      stickRef.current = false
+    } else if (atBottom) {
+      stickRef.current = true
+    }
+    lastScrollTop.current = cur
+    setShowJump(!atBottom)
+  }
+
+  const scrollToBottom = () => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
+    stickRef.current = true
+    setShowJump(false)
+  }
+
+  // Follow new streamed content only while the user is pinned to the bottom.
+  useEffect(() => {
+    if (stickRef.current) {
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    }
   }, [state.items])
 
   const onSend = () => {
     const text = input.trim()
     if (!text || state.streaming) return
     setInput('')
+    // A new message should always bring the view back to the bottom.
+    stickRef.current = true
+    setShowJump(false)
     send(text)
   }
 
@@ -82,6 +122,8 @@ export default function ChatView() {
     clear()
     setSessionId(null)
     saveActiveSession(null)
+    stickRef.current = true
+    setShowJump(false)
   }
 
   const openSession = async (id: string) => {
@@ -90,6 +132,8 @@ export default function ChatView() {
     setSessionId(id)
     saveActiveSession(id)
     await resumeActiveRun(id)
+    stickRef.current = true
+    setShowJump(false)
   }
 
   const deleteSession = async (id: string) => {
@@ -198,7 +242,12 @@ export default function ChatView() {
         )}
 
         {/* Transcript */}
-        <div ref={scrollRef} className="scroll-thin flex-1 overflow-y-auto px-4 py-4">
+        <div className="relative flex-1 min-h-0">
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="scroll-thin h-full overflow-y-auto px-4 py-4"
+          >
           {state.items.length === 0 && (
             <div className="flex h-full items-center justify-center text-sm text-black/40">
               {restoring ? 'Restoring session…' : 'Ask Claudio anything.'}
@@ -246,6 +295,15 @@ export default function ChatView() {
             <div className="my-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
               {state.error}
             </div>
+          )}
+          </div>
+          {showJump && (
+            <button
+              onClick={scrollToBottom}
+              className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-medium text-black/70 shadow-md hover:bg-black/5"
+            >
+              <ChevronDown size={14} /> Scroll to bottom
+            </button>
           )}
         </div>
 

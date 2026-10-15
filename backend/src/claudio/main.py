@@ -18,7 +18,7 @@ from .settings import load_config
 from .supervisor import Supervisor
 from .observability.logging import setup_logging
 from .api.deps import ApiError, error_envelope
-from .api import system, management, config, chat, approvals, sessions, monitoring
+from .api import system, management, config, chat, approvals, sessions, monitoring, workspace
 
 # Disable OpenAI tracing — we run against local/compatible endpoints and rely on
 # our own run/event records, not OpenAI's trace exporter.
@@ -133,6 +133,7 @@ app.include_router(chat.router, prefix=API_PREFIX)
 app.include_router(approvals.router, prefix=API_PREFIX)
 app.include_router(sessions.router, prefix=API_PREFIX)
 app.include_router(monitoring.router, prefix=API_PREFIX)
+app.include_router(workspace.router, prefix=API_PREFIX)
 
 
 @app.get("/")

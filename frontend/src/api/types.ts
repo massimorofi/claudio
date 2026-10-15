@@ -237,6 +237,41 @@ export interface RunRestartingEvent {
   attempt: number
 }
 
+// ---- Workspace ----
+
+export interface WorkspaceFile {
+  path: string
+  size: number
+  modified: string
+}
+
+export interface WorkspaceListResponse {
+  workspace: string
+  files: WorkspaceFile[]
+  truncated: boolean
+}
+
+export interface WorkspaceDeleteResponse {
+  ok: boolean
+  deleted: string[]
+  failed: { path: string; error: string }[]
+}
+
+export interface WorkspaceNode {
+  name: string
+  path: string
+  type: 'file' | 'dir'
+  size?: number
+  modified: string
+  children?: WorkspaceNode[]
+}
+
+export interface WorkspaceTreeResponse {
+  workspace: string
+  tree: WorkspaceNode[]
+  truncated: boolean
+}
+
 // ---- Monitoring ----
 
 export interface HealthCheck {

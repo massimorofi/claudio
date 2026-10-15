@@ -128,14 +128,15 @@ function Logs() {
     refetchInterval: 5000,
   })
 
+  // Light text on the dark terminal-style panel — black-on-dark was unreadable.
   const levelColor = (l: string) =>
     l === 'ERROR'
-      ? 'text-red-600'
+      ? 'text-[#f85149]'
       : l === 'WARNING'
-        ? 'text-amber-600'
+        ? 'text-[#d29922]'
         : l === 'DEBUG'
-          ? 'text-black/40'
-          : 'text-black/70'
+          ? 'text-[#8b949e]'
+          : 'text-[#58a6ff]'
 
   return (
     <div className="flex h-full flex-col">
@@ -161,9 +162,9 @@ function Logs() {
       <div className="scroll-thin flex-1 overflow-auto rounded-lg border border-black/10 bg-[#0d1117] p-2 font-mono text-[11px]">
         {(logsQ.data?.logs ?? []).map((l, i) => (
           <div key={i} className="whitespace-pre-wrap break-all">
-            <span className="text-black/40">{l.timestamp} </span>
+            <span className="text-[#8b949e]">{l.timestamp} </span>
             <span className={`${levelColor(l.level)} font-semibold`}>{l.level} </span>
-            <span className="text-black/50">{l.logger}: </span>
+            <span className="text-[#8b949e]">{l.logger}: </span>
             <span className="text-[#e6edf3]">{l.message}</span>
           </div>
         ))}

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from .deps import require_auth, ApiError
 from ..settings import (
     AppConfig,
+    REDACTED,
     validate_candidate,
     write_config_atomic,
     redact_secrets,
@@ -89,7 +90,11 @@ async def validate_config(request: Request, payload: dict) -> dict:
 async def test_llm(request: Request, payload: dict) -> dict:
     """Live connectivity test with candidate LLM settings (not yet saved)."""
     require_auth(request)
+    supervisor = request.app.state.supervisor
     llm = payload.get("llm", payload)
+    # The client only ever sees the redacted key; a '***' means "keep the saved one".
+    if llm.get("api_key") == REDACTED and supervisor.config:
+        llm = {**llm, "api_key": supervisor.config.llm.api_key}
     base_url = llm.get("base_url")
     api_key = llm.get("api_key") or "local"
     model = llm.get("model")

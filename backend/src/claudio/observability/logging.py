@@ -63,6 +63,7 @@ def setup_logging(level: str = "INFO") -> None:
     root.addHandler(stream)
     root.addHandler(RingBufferHandler())
 
-    # Quieten noisy third-party loggers.
-    for noisy in ("httpx", "httpx2", "httpcore", "openai", "uvicorn.access"):
+    # Quieten noisy third-party loggers. httpx2 is left at INFO on purpose: its
+    # per-request lines are the activity the Logs view is meant to surface.
+    for noisy in ("httpcore", "openai", "uvicorn.access"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
