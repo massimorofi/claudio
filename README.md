@@ -8,6 +8,7 @@ a thin client that talks to it.
 ```
 claudio/
 ├── backend/     Python service (FastAPI + OpenAI Agents SDK)
+│   └── skills/  Drop-in Agent Skills (each folder has a SKILL.md)
 ├── frontend/    React + TypeScript + Vite + Tailwind client
 └── claudio_specs_agent.md    Claudio implementation specs inspired by Claude Code
 ```
@@ -106,6 +107,7 @@ Errors use a consistent envelope: `{ "error": { "code", "message", "retryable", 
 |------|-----------|
 | System | `GET /healthz`, `GET /readyz`, `GET /version` |
 | Agent | `POST /agent/start`, `POST /agent/stop`, `POST /agent/restart`, `GET /agent/status`, `GET /agent/tools` |
+| Skills | `GET /skills` (list installed skills with valid/invalid status) |
 | Config | `GET /config`, `PUT /config`, `GET /config/schema`, `POST /config/validate`, `POST /config/llm/test`, `GET /config/history`, `POST /config/restore`, `GET /config/raw` |
 | Chat | `POST /chat/stream` (SSE), `POST /chat` (non-streaming), `POST /chat/runs/{id}/cancel`, `GET /chat/runs/{id}`, `GET /chat/runs/{id}/stream` |
 | Approvals | `GET /approvals/pending`, `POST /approvals/{id}` |
@@ -138,14 +140,63 @@ state.
 Per `claudio_specs_agent.md`: file tools (`read_file`, `write_file`, `edit_file`,
 `list_dir`, `rewind_files`), `run_command`, `web_fetch`, `web_search`,
 `todo_write`, subagent spawning, context compaction with circuit breakers,
-file-history backups, USD budget tracking, input/output guardrails, and
-configurable approval gating.
+file-history backups, USD budget tracking, input/output guardrails,
+configurable approval gating, and **Agent Skills** (see below).
+
+## Skills
+
+Claudio supports [Agent Skills](https://agentskills.io): drop-in folders of
+markdown instructions and reference files — not Python, not a plugin, nothing to
+install or rebuild. Twenty skills ship in `backend/skills/` (docx, pptx, xlsx,
+pdf, canvas-design, frontend-design, mcp-builder, skill-creator, and more).
+
+When `agent.skills_enabled` is `true` (the default), the agent gains three
+read-only tools:
+
+- `list_skills` — names and descriptions of installed skills
+- `load_skill` — a skill's full instructions plus its on-disk directory
+- `read_skill_resource` — a bounded read of a file bundled inside a skill folder
+
+Only names and descriptions go into the system prompt; the full instructions load
+on demand, so the prompt stays small until a skill is actually relevant. Skills
+are **untrusted guidance**: they teach the model *what* to do, never grant
+permissions, and cannot execute anything on their own.
+
+### Adding a skill
+
+1. Create `backend/skills/<skill-name>/`. The folder name must be lowercase words
+   joined by hyphens, e.g. `incident-triage`.
+2. Add `SKILL.md` with YAML frontmatter:
+
+   ```markdown
+   ---
+   name: incident-triage
+   description: Structured triage for engine failures and latency regressions.
+   ---
+
+   # When to use this skill
+   ...instructions the model reads on demand...
+   ```
+
+   `name` and `description` are required; `name` must equal the folder name.
+   `license`, `compatibility` and `allowed-tools` are optional strings, and
+   `metadata` is an optional mapping. Anything else is rejected.
+3. Put any reference files in the same folder. The agent reaches them through
+   `read_skill_resource`, which is confined to that folder.
+4. The skill is picked up on the next agent build. `GET /api/v1/skills` reports
+   every valid skill and every invalid one with the reason, so a typo shows up as
+   an error rather than a silently missing skill.
+
+Skills can be toggled with `agent.skills_enabled` and relocated with
+`agent.skills_dir` (Config → Agent). Note that some shipped skills (docx, pptx,
+pdf) shell out to system tooling — `pandoc`, LibreOffice `soffice`, `pdftoppm`,
+npm `docx` — which must be installed for those workflows to run.
 
 ## Tests
 
 ```bash
 cd backend
-PYTHONPATH=src .venv/bin/python -m pytest -q     # 30 tests
+PYTHONPATH=src .venv/bin/python -m pytest -q     # 81 tests
 ```
 
 ## Production notes

@@ -118,6 +118,7 @@ backend/
 │   │   ├── instructions.py       # system prompt assembly
 │   │   ├── guardrails.py         # input/output guardrails
 │   │   ├── memory.py             # CLAUDE.md-style instruction discovery
+│   │   ├── skill_loader.py       # Agent Skills: SKILL.md discovery + bounded loading
 │   │   ├── subagents.py          # spawn_subagent tool (agents-as-tools)
 │   │   └── tools/
 │   │       ├── registry.py       # tool metadata + approval policy + build_tools
@@ -143,7 +144,17 @@ backend/
 │   └── observability/
 │       ├── metrics.py            # in-process counters + latency samples
 │       └── logging.py            # JSON logs + ring buffer
-└── tests/                        # 50 tests (settings, tools, approval flow, recovery layer)
+├── skills/                       # drop-in Agent Skills (each folder has a SKILL.md)
+│   ├── docx/SKILL.md
+│   ├── pptx/SKILL.md
+│   ├── xlsx/SKILL.md
+│   ├── pdf/SKILL.md
+│   ├── canvas-design/SKILL.md
+│   ├── frontend-design/SKILL.md
+│   ├── mcp-builder/SKILL.md
+│   ├── skill-creator/SKILL.md
+│   └── …                         # 20 skills total (see §3.6.10)
+└── tests/                        # 81 tests (settings, tools, approval flow, recovery, skills)
 ```
 
 ### 3.3 Process lifecycle and shell scripts (actual)
@@ -199,6 +210,8 @@ agent:
   compaction_reserve: 8192
   max_output_chars: 8000           # per-tool output clip
   strict_tools: false              # strict JSON-schema tool mode (off for local models)
+  skills_enabled: true             # expose Agent Skills (list_skills / load_skill / read_skill_resource)
+  skills_dir: ./skills             # skills folder; relative paths anchor to the backend dir (see §3.6.10)
   tools:
     enabled: [read_file, write_file, edit_file, list_dir, run_command, web_fetch, web_search, todo_write]
     disabled: []
@@ -257,6 +270,7 @@ Root `GET /` → `{"service":"claudio-backend","docs":"/docs","api":"/api/v1"}`.
 | POST | `/agent/restart` | 202 `{"state":"running"}`; 409 `agent_start_failed` on error |
 | GET | `/agent/status` | `{"state","started_at","active_runs","uptime_seconds","config_generation"}` |
 | GET | `/agent/tools` | `{"tools":[{"name","is_read_only","is_destructive"}]}` (full inventory) |
+| GET | `/skills` | `{"directory","enabled","skills":[{directory,name?,description?,valid,error?}]}` — every skill folder with valid/invalid status (see §3.6.10) |
 
 #### 3.5.3 Configuration
 
@@ -380,6 +394,11 @@ All tools are plain `async` functions taking `RunContextWrapper[ToolContext]` fi
 | `web_fetch` | `(ctx, url, max_chars?)` → `{ok, url, content}` | read-only |
 | `web_search` | `(ctx, query, max_results=5)` → `{ok, query, results:[{title,url,snippet}]}` | read-only |
 | `todo_write` | `(ctx, items:[{content,status}])` → `{ok, count, items}` | read-only |
+| `list_skills` | `(ctx)` → `{ok, skills:[{name,description}]}` | read-only (Agent Skills, see §3.6.10) |
+| `load_skill` | `(ctx, name)` → `{ok, name, directory, instructions}` | read-only (Agent Skills) |
+| `read_skill_resource` | `(ctx, name, relative_path)` → `{ok, content}` | read-only (Agent Skills) |
+
+The three skill tools are added automatically when `agent.skills_enabled=true` (they are not part of the `tools.enabled` registry); `load_skill` returns the skill's **absolute directory** because skill guides reference their bundled scripts by paths relative to it.
 
 **Approval policy (`registry._make_approval_check`):** `off` → never; `always` → always; `on_request` → destructive tools **or** any file path that resolves outside the workspace require approval.
 
@@ -457,6 +476,38 @@ async def spawn_subagent(ctx, agent_id: str, task: str) -> dict:
   - `max_budget_usd = 0` disables enforcement entirely (unlimited).
   - `BudgetExceededError` is **terminal**: it is not retried, does not trigger fallback, and does not trigger reactive compaction — `_classify_error` returns `("budget_exceeded", retryable=False)`.
   - **Provider caveat:** the mid-run check relies on real token usage. On providers that report zero usage on the streamed path (see §3.6.7), the mid-run cost stays ~0, so the cap effectively only bites on the run-start gate. This is moot for free/local models (price 0) and correct for paid providers that report usage.
+
+#### 3.6.10 Agent Skills (`skill_loader.py`) — ✅ IMPLEMENTED
+
+Drop-in, untrusted instruction packs following the [Agent Skills](https://agentskills.io) convention: a folder of markdown instructions and reference files — not Python, not a plugin, nothing to install or rebuild. Ported from the strixper `skill_loader` and adapted to Claudio's typed-tool conventions.
+
+**What a skill is.** A direct child folder of `agent.skills_dir` (default `./skills`, anchored to the backend directory so it does not depend on the process cwd). The folder name must be lowercase words joined by hyphens (`^[a-z0-9]+(?:-[a-z0-9]+)*$`, ≤64 chars) and must equal the `name` in its `SKILL.md` frontmatter.
+
+**`SKILL.md` format.** YAML frontmatter delimited by `---` lines, then the markdown body (the instructions the model reads on demand):
+
+```markdown
+---
+name: incident-triage
+description: Structured triage for engine failures and latency regressions.
+---
+
+# When to use this skill
+...instructions the model reads on demand...
+```
+
+- `name` and `description` are **required**; `description` ≤ 1024 chars.
+- `license`, `compatibility`, `allowed-tools` are optional **strings**; `metadata` is an optional **mapping**. Any other frontmatter key is rejected.
+- Size caps: 100 KB per manifest, 8 KB frontmatter, 100 KB per resource read.
+
+**Discovery (`scan_skills`).** Runs once per agent build. It never imports or executes anything inside a skill folder — it only reads `SKILL.md`. Each folder resolves strictly and must stay inside the skills root (symlink escapes rejected). Valid folders become `Skill` objects; invalid ones are reported with `valid:false` and the reason, so a typo surfaces as an error rather than a silently missing skill. Duplicate names are rejected.
+
+**Progressive disclosure.** Only skill **names + descriptions** go into the system prompt (rendered by `render_skill_block` with an explicit "untrusted guidance" caveat). The full instructions load only when the model calls `load_skill`, keeping the prompt small until a skill is actually relevant.
+
+**Tools.** `build_skill_tools(scan)` returns three read-only tools — `list_skills`, `load_skill`, `read_skill_resource` (signatures in §3.6.2) — added automatically when `agent.skills_enabled=true`. `read_skill_resource` is confined to the skill folder: it rejects empty/absolute paths and any path that resolves outside the folder. `load_skill` returns the skill's **absolute directory** because skill guides reference their bundled scripts by paths relative to it (the agent runs them via `run_command`).
+
+**Endpoint.** `GET /api/v1/skills` returns `{directory, enabled, skills:[…]}` — every folder with its valid/invalid status (see §3.5.2).
+
+**Shipped skills.** 20 skills copied from strixper into `backend/skills/`: `academy-guide`, `algorithmic-art`, `brand-guidelines`, `canvas-design`, `claude-api`, `discernment-nudge`, `doc-coauthoring`, `docx`, `frontend-design`, `internal-comms`, `mcp-builder`, `pdf`, `pptx`, `research-review`, `skill-creator`, `slack-gif-creator`, `theme-factory`, `web-artifacts-builder`, `webapp-testing`, `xlsx`. Several (docx/pptx/pdf) shell out to system tooling (`pandoc`, LibreOffice `soffice`, `pdftoppm`, npm `docx`); they load regardless but need that tooling installed to actually run.
 
 ### 3.7 Error handling and recovery — ✅ IMPLEMENTED
 
@@ -588,6 +639,7 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 | Subagents (spawn-as-tool) | ✅ Implemented | `subagents.spawn_subagent` |
 | Todo/plan nag | ✅ Implemented | `todo_write` + `TURNS_SINCE_WRITE_NAG=10` |
 | CLAUDE.md / memory | ✅ Implemented | `memory.py` + `instructions.py` |
+| Agent Skills (drop-in SKILL.md) | ✅ Implemented | `skill_loader.py` + `list_skills`/`load_skill`/`read_skill_resource` + `GET /skills` (§3.6.10) |
 | Config hot/restart + history/restore | ✅ Implemented | `settings.py` + `config.py` |
 | Reload-safe run reattach | ✅ Implemented | `active_run` endpoint + `useChat.resumeActiveRun` |
 | Compaction | ✅ Implemented | `compaction.py` wired into `RunManager._run_with_recovery` (proactive + reactive) |
@@ -615,7 +667,7 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 
 ## 7. Implementation status & remaining work
 
-**Done and verified:** backend (50 tests pass), streaming chat, approvals end-to-end, config CRUD + test, sessions, monitoring, full responsive frontend, reload-safe reattach, and the full recovery layer — compaction wiring (proactive + reactive), per-session cumulative USD budget enforcement, app-level retry with exponential backoff, fallback model, and `retry_count` metric — all covered by `tests/test_recovery.py`.
+**Done and verified:** backend (81 tests pass), streaming chat, approvals end-to-end, config CRUD + test, sessions, monitoring, full responsive frontend, reload-safe reattach, the full recovery layer — compaction wiring (proactive + reactive), per-session cumulative USD budget enforcement, app-level retry with exponential backoff, fallback model, and `retry_count` metric (all covered by `tests/test_recovery.py`) — and Agent Skills: drop-in `SKILL.md` discovery with strict validation, the three read-only skill tools, the prompt catalog injection, and `GET /skills` (covered by `tests/test_skill_loader.py`).
 
 **Remaining (each a small, localized change):**
 1. **Schema-driven config form** — optionally render the config form from `GET /config/schema` with react-hook-form + Zod (currently hand-controlled).
@@ -631,7 +683,8 @@ Server state via TanStack Query (status/metrics 5s, config/sessions on demand). 
 1. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` (or just run `./start.sh`, which does this on first run).
 2. `cp config/config.example.yaml config/config.yaml`; set `server.auth_token`, `llm.*` (model/base_url), `agent.workspace_dir`.
 3. `./start.sh` → backend on `http://127.0.0.1:8100`. Verify `curl http://127.0.0.1:8100/healthz`.
-4. Tests: `PYTHONPATH=src .venv/bin/python -m pytest -q` (50 tests).
+4. Tests: `PYTHONPATH=src .venv/bin/python -m pytest -q` (81 tests).
+5. Skills: drop a folder with a `SKILL.md` into `backend/skills/` (or set `agent.skills_dir`); it is picked up on the next agent build. Verify with `GET /api/v1/skills`.
 
 **Frontend:**
 1. `npm install`.
