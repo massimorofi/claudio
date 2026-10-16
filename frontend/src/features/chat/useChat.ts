@@ -163,6 +163,8 @@ export function useChat(
           filesWritten: (r.files_written as string[]) ?? [],
           commandsRun: (r.commands_run as number) ?? 0,
           durationSeconds: (r.duration_seconds as number) ?? 0,
+          inputTokens: (r.input_tokens as number) ?? 0,
+          outputTokens: (r.output_tokens as number) ?? 0,
           error: (r.error_message as string) ?? undefined,
         })
         return

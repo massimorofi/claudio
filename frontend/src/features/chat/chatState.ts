@@ -42,6 +42,8 @@ export type Item =
       filesWritten: string[]
       commandsRun: number
       durationSeconds: number
+      inputTokens?: number
+      outputTokens?: number
       error?: string
     }
 
@@ -254,6 +256,8 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
             filesWritten: summary.files_written ?? [],
             commandsRun: summary.commands_run ?? 0,
             durationSeconds: summary.duration_seconds ?? 0,
+            inputTokens: d.usage?.input_tokens ?? 0,
+            outputTokens: d.usage?.output_tokens ?? 0,
           },
         ],
       }

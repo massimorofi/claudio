@@ -600,6 +600,8 @@ class RunManager:
             commands_run=record.commands_run,
             duration_seconds=round(duration, 1),
             cost_usd=record.cost_usd,
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
         )
         await self._update_session_totals(record, last_context_tokens=last_in)
         self._publish(

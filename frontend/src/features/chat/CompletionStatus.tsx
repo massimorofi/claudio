@@ -1,11 +1,15 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CircleCheck, CircleX, PauseCircle, RotateCcw } from 'lucide-react'
+import { CircleCheck, CircleX, PauseCircle, RotateCcw, Copy, Check } from 'lucide-react'
 
 interface CompletionStatusProps {
   status: 'completed' | 'failed' | 'interrupted'
   filesWritten: string[]
   commandsRun: number
   durationSeconds: number
+  inputTokens?: number
+  outputTokens?: number
+  replyText?: string
   error?: string
   onRetry?: () => void
 }
@@ -22,6 +26,9 @@ export default function CompletionStatus({
   filesWritten,
   commandsRun,
   durationSeconds,
+  inputTokens = 0,
+  outputTokens = 0,
+  replyText,
   error,
   onRetry,
 }: CompletionStatusProps) {
@@ -42,24 +49,33 @@ export default function CompletionStatus({
   const producedText = produced.length > 0 ? produced.join(' · ') : 'no output'
 
   const duration = `${durationSeconds.toFixed(1)}s`
+  // Throughput: generated (output) tokens/sec and prompt (input) tokens/sec over
+  // the turn's wall-clock. Guard the divide so a 0s turn reads 0, not Infinity.
+  const genRate = durationSeconds > 0 ? outputTokens / durationSeconds : 0
+  const promptRate = durationSeconds > 0 ? inputTokens / durationSeconds : 0
 
   if (status === 'completed') {
     return (
-      <div className="my-2 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-xs text-green-800">
+      <div className="my-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-xs text-green-800">
         <CircleCheck size={14} className="shrink-0 text-green-600" />
         <span className="font-semibold">Completed</span>
         <span className="text-black/50">· {producedText} · {duration}</span>
+        <span className="text-black/50">
+          · {genRate.toFixed(1)} tok/s generated · {promptRate.toFixed(1)} tok/s prompt
+        </span>
+        {replyText && replyText.trim() ? <CopyButton text={replyText} /> : null}
       </div>
     )
   }
 
   if (status === 'failed') {
     return (
-      <div className="my-2 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-800">
+      <div className="my-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-800">
         <CircleX size={14} className="shrink-0 text-red-500" />
         <span className="font-semibold">Failed</span>
         {error && <span className="truncate text-black/60">· {error}</span>}
         <span className="text-black/50">· {duration}</span>
+        {replyText && replyText.trim() ? <CopyButton text={replyText} /> : null}
         {onRetry && (
           <button
             onClick={onRetry}
@@ -74,10 +90,11 @@ export default function CompletionStatus({
 
   // interrupted
   return (
-    <div className="my-2 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
+    <div className="my-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
       <PauseCircle size={14} className="shrink-0 text-amber-600" />
       <span className="font-semibold">Interrupted</span>
       <span className="text-black/50">· {duration}</span>
+      {replyText && replyText.trim() ? <CopyButton text={replyText} /> : null}
       {onRetry && (
         <button
           onClick={onRetry}
@@ -87,5 +104,55 @@ export default function CompletionStatus({
         </button>
       )}
     </div>
+  )
+}
+
+/**
+ * Copies the assistant's reply (raw markdown) to the clipboard. Uses the async
+ * Clipboard API where available and falls back to a hidden textarea +
+ * execCommand for non-secure contexts, then shows a brief "Copied" confirmation.
+ */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const doCopy = async () => {
+    let ok = false
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text)
+        ok = true
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.focus()
+        ta.select()
+        ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+    } catch {
+      ok = false
+    }
+    if (ok) {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1800)
+    }
+  }
+
+  return (
+    <button
+      onClick={doCopy}
+      title="Copy reply as Markdown"
+      className={`ml-auto flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 font-medium transition-colors ${
+        copied
+          ? 'border-green-300 bg-green-100 text-green-700'
+          : 'border-black/15 bg-white text-black/60 hover:bg-black/5'
+      }`}
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
   )
 }

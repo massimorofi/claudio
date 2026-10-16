@@ -392,6 +392,12 @@ export default function ChatView() {
                     filesWritten={turn.turnStatus.filesWritten}
                     commandsRun={turn.turnStatus.commandsRun}
                     durationSeconds={turn.turnStatus.durationSeconds}
+                    inputTokens={turn.turnStatus.inputTokens}
+                    outputTokens={turn.turnStatus.outputTokens}
+                    replyText={turn.flow
+                      .filter((f) => f.kind === 'assistant')
+                      .map((f) => f.text)
+                      .join('\n\n')}
                     error={turn.turnStatus.error}
                     onRetry={
                       turn.turnStatus.status === 'completed' ? undefined : handleRetry
