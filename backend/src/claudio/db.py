@@ -294,6 +294,26 @@ class Database:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
+    async def run_totals(self) -> dict[str, Any]:
+        """Cumulative totals across every persisted run.
+
+        Computed from the runs table so the monitoring overview reflects durable
+        reality and survives a backend restart, unlike the in-memory counters
+        which are scoped to the current process uptime.
+        """
+        async with self.conn.execute(
+            "SELECT "
+            "COUNT(*) AS runs_total, "
+            "COALESCE(SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END), 0) AS runs_completed, "
+            "COALESCE(SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END), 0) AS runs_failed, "
+            "COALESCE(SUM(input_tokens), 0) AS tokens_in, "
+            "COALESCE(SUM(output_tokens), 0) AS tokens_out, "
+            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            "FROM claudio_runs"
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else {}
+
     async def fail_interrupted_runs(self) -> int:
         """On boot, mark any run left 'running' by a crash as failed."""
         cur = await self.conn.execute(

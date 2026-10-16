@@ -303,6 +303,92 @@
     </figure>
   </div>
 
+  <h2>The workflow view</h2>
+  <p class="lead">The loop's internal state made visible. Four surfaces turn each turn's events into something the user can read at a glance — and all four reconstruct from disk after a reload.</p>
+
+  <div class="row">
+    <figure>
+      <svg viewBox="0 0 720 360" role="img" aria-label="Four chat surfaces and the backend event that feeds each: todo_write feeds the plan tracker (intent), tool_call and tool_result feed the workflow panel (record), context_usage feeds the context gauge, and turn_status feeds the completion card. All are mirrored to the JSONL transcript so a reload reconstructs them.">
+        <text x="120" y="26" text-anchor="middle" class="box-sub">backend events</text>
+        <text x="580" y="26" text-anchor="middle" class="box-sub">chat surfaces</text>
+
+        <!-- sources -->
+        <rect x="20" y="40" width="200" height="56" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.25"/>
+        <text x="120" y="64" text-anchor="middle" class="box-title mono">todo_write</text>
+        <text x="120" y="82" text-anchor="middle" class="box-sub">intent · checklist</text>
+
+        <rect x="20" y="116" width="200" height="56" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.25"/>
+        <text x="120" y="140" text-anchor="middle" class="box-title mono">tool_call / result</text>
+        <text x="120" y="158" text-anchor="middle" class="box-sub">the actual trace</text>
+
+        <rect x="20" y="192" width="200" height="56" rx="6" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+        <text x="120" y="216" text-anchor="middle" class="box-title mono">context_usage</text>
+        <text x="120" y="234" text-anchor="middle" class="box-sub">tokens this turn</text>
+
+        <rect x="20" y="268" width="200" height="56" rx="6" fill="none" stroke="var(--ok)" stroke-width="1.5"/>
+        <text x="120" y="292" text-anchor="middle" class="box-title mono">turn_status</text>
+        <text x="120" y="310" text-anchor="middle" class="box-sub">outcome + produced</text>
+
+        <!-- surfaces -->
+        <rect x="460" y="40" width="240" height="56" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.25"/>
+        <text x="580" y="64" text-anchor="middle" class="box-title">Plan tracker</text>
+        <text x="580" y="82" text-anchor="middle" class="box-sub">what was planned</text>
+
+        <rect x="460" y="116" width="240" height="56" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.25"/>
+        <text x="580" y="140" text-anchor="middle" class="box-title">Workflow panel</text>
+        <text x="580" y="158" text-anchor="middle" class="box-sub">what was done</text>
+
+        <rect x="460" y="192" width="240" height="56" rx="6" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+        <text x="580" y="216" text-anchor="middle" class="box-title">Context gauge</text>
+        <text x="580" y="234" text-anchor="middle" class="box-sub">free / used · compact trigger</text>
+
+        <rect x="460" y="268" width="240" height="56" rx="6" fill="none" stroke="var(--ok)" stroke-width="1.5"/>
+        <text x="580" y="292" text-anchor="middle" class="box-title">Completion card</text>
+        <text x="580" y="310" text-anchor="middle" class="box-sub">done · failed · interrupted</text>
+
+        <!-- 1:1 mapping arrows -->
+        <line x1="220" y1="68"  x2="456" y2="68"  stroke="var(--muted)" stroke-width="1.5" marker-end="url(#arr)"/>
+        <line x1="220" y1="144" x2="456" y2="144" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#arr)"/>
+        <line x1="220" y1="220" x2="456" y2="220" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arrA)"/>
+        <line x1="220" y1="296" x2="456" y2="296" stroke="var(--ok)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+        <!-- persistence rail -->
+        <rect x="20" y="332" width="680" height="22" rx="4" fill="none" stroke="currentColor" stroke-opacity="0.25"/>
+        <text x="360" y="347" text-anchor="middle" class="box-sub mono">JSONL transcript (append-only) → reload reconstructs all four</text>
+      </svg>
+      <figcaption><strong>Intent vs. record.</strong> The plan tracker shows what the agent <em>said</em> it would do (<span class="mono">todo_write</span>); the workflow panel shows what it <em>actually</em> did (the tool-call trace). Tracking them separately makes drift between the two visible. The gauge and the completion card ride on the same per-turn events, and every one of them is mirrored to the transcript so a reload shows the same picture.</figcaption>
+    </figure>
+
+    <figure>
+      <svg viewBox="0 0 720 360" role="img" aria-label="Context gauge anatomy: a donut ring where the green arc is the used portion of the usable window, the plain track is the free space within the usable window, the amber band is the reserve held back for the model's reply, a tick marks the auto-compact threshold, and the center shows free tokens remaining.">
+        <g transform="translate(210,180)">
+          <!-- full-window track -->
+          <circle r="92" fill="none" stroke="var(--line)" stroke-width="24"/>
+          <!-- used arc: 37.5% of the full ring = 50% of usable, green -->
+          <circle r="92" fill="none" stroke="var(--ok)" stroke-width="24" stroke-dasharray="216.8 578.1" transform="rotate(-90)"/>
+          <!-- reserve band: last quarter of the full window, amber -->
+          <circle r="92" fill="none" stroke="var(--warn)" stroke-width="24" stroke-dasharray="144.5 578.1" stroke-dashoffset="-433.5" transform="rotate(-90)"/>
+          <!-- threshold tick at the usable boundary (75% around) -->
+          <line x1="0" y1="-106" x2="0" y2="-78" stroke="var(--fg)" stroke-width="2" transform="rotate(270)"/>
+          <text x="0" y="-4" text-anchor="middle" class="box-title">12.2k</text>
+          <text x="0" y="16" text-anchor="middle" class="box-sub">free</text>
+        </g>
+        <!-- annotations -->
+        <g class="box-sub">
+          <line x1="360" y1="120" x2="430" y2="120" stroke="var(--ok)" stroke-width="1.5"/>
+          <text x="440" y="124">used · 50% of usable</text>
+          <line x1="360" y1="180" x2="430" y2="180" stroke="var(--line)" stroke-width="1.5"/>
+          <text x="440" y="184">free within usable</text>
+          <line x1="360" y1="240" x2="430" y2="240" stroke="var(--warn)" stroke-width="1.5"/>
+          <text x="440" y="244">reserve · held for the reply</text>
+          <line x1="118" y1="180" x2="118" y2="150" stroke="var(--fg)" stroke-width="1.5"/>
+          <text x="118" y="142" text-anchor="middle">compact threshold</text>
+        </g>
+      </svg>
+      <figcaption><strong>The gauge, and what it pushes.</strong> The arc is the used share of the <em>usable</em> window (<span class="mono">window − reserve</span>); the amber band is the reserve held back for the model's own reply, so "free" never looks like it includes it. The tick marks where auto-compaction fires. Clicking the gauge is the <em>manual</em> push — a confirm popover, then <span class="mono">POST /sessions/{id}/compact</span>, which rewrites history and animates the ring down.</figcaption>
+    </figure>
+  </div>
+
   <h2>Key constants</h2>
   <dl class="constants">
     <div><dt>Compact buffer</dt><dd>window − 13 000 tok</dd></div>

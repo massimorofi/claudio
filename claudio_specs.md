@@ -335,3 +335,64 @@ The SDK is OpenAI-first. Running **Claude** through it means a LiteLLM/Any-LLM t
 5. **Tracing → evals discipline** — every run traced as spans, feeding an eval set: the actual engine for *enhancing* an agent over time.
 
 **Exception:** if Claudio should be **multi-model** (OpenAI + Anthropic + local models) and Claude is accepted as one interchangeable provider rather than the core of the experience, the SDK becomes a viable provider-agnostic orchestrator base.
+
+---
+
+## 10. Execution Plan / Workflow View (implemented)
+
+*Status: **IMPLEMENTED** in Claudio. Detailed design in `claudio_specs_workflow.md`; this section records what actually shipped and how it maps onto the architecture documented above.*
+
+The reverse-engineered spec (§4.1) treats the plan as invisible scaffolding — a `TodoWrite` nag and a plan-mode attachment. Claudio makes the turn's progress a **first-class visible surface**: four components that turn the loop's internal state into something the user can read at a glance, persisted so it survives reload.
+
+### 10.1 The four surfaces
+
+| Surface | Shows | Data source | Persisted |
+|---|---|---|---|
+| **Plan tracker** | The agent's *intent* — a live checklist with per-item status | `todo_write` tool result | session row `todos` JSON |
+| **Workflow panel** | The turn's *record* — one numbered, status-bearing tool-call trace | `tool_call` / `tool_result` events | JSONL transcript (mirrored) |
+| **Context gauge** | Used / free against the usable window, with the compact-threshold tick | `context_usage` event | session row `last_context_tokens` |
+| **Completion card** | The turn's outcome — done / failed / interrupted + what was produced | `turn_status` entry | JSONL transcript |
+
+The plan (intent) and the workflow (record) are deliberately distinct: the plan is what the agent *said it would do*, the workflow is what it *actually did*. Both render per turn; the plan pins at the top, the workflow collapses under the answer.
+
+### 10.2 Backend additions
+
+All additive; none break the existing event contract.
+
+1. **`context_usage` SSE event** — emitted at run start (after the proactive `_maybe_compact`) and after each `response.completed`. Payload built by `_context_usage_payload(used, config, source, auto_disabled)`:
+   ```
+   usable = context_window − compaction_reserve
+   free   = max(0, usable − used)
+   percent = used / usable × 100
+   ```
+   `source` is `"model"` when the provider reported `input_tokens`, `"estimate"` (chars // 4) otherwise. `auto_disabled` reflects the compaction circuit breaker (§5.3).
+2. **`turn_status` transcript entry** — appended at every terminal state by `_append_turn_status`: `completed` (files_written, commands_run, duration_seconds, cost_usd), `failed` (error_code, error_message, duration_seconds), `interrupted` (duration_seconds). This is the bookend that makes an action-only turn legible.
+3. **Tool-event mirroring** — `_mirror_tool_event` appends each `tool_call` / `tool_result` to the JSONL transcript as it streams. `repair_orphans` (§6.7) already understands these entry types, so a run interrupted mid-tool gets a synthesized result on the next read. This is what lets the workflow panel reconstruct on reload.
+4. **Produced-artifact tracking** — `_track_produced` accumulates `record.files_written` (from `write_file` / `edit_file` / `create_file`) and `record.commands_run` (from `run_command`) during the stream, surfaced on the completion card and in `run_completed.summary`.
+5. **`POST /sessions/{id}/compact`** — manual compaction: `require_auth`; `404` if no session; `409` if a run is active (compacting mid-run races the run's appends); `503` if the compactor is unavailable; otherwise runs the shared `Compactor` instance, updates `last_context_tokens`, and returns the fresh `context_usage`. The circuit-breaker state is shared with the RunManager — no second compactor is constructed.
+6. **Prompt support** — `BASE_IDENTITY` now instructs the agent to write a `todo_write` list at the start of any multi-step task, so the plan tracker has real content.
+
+### 10.3 Frontend components
+
+| File | Role |
+|---|---|
+| `WorkflowPanel.tsx` | Collapsible numbered tool-call trace; per-step expand shows full args + output; approvals render inline as steps |
+| `PlanTracker.tsx` | Pinned checklist; ☐ pending / ◐ in-progress / ☑ done; `X/Y done` header; renders nothing when empty |
+| `ContextGauge.tsx` | SVG donut; used arc + reserve band + threshold tick; color bands green/amber/red; click → confirm → compact |
+| `CompletionStatus.tsx` | Done / failed / interrupted card with produced files + command count + duration + Retry |
+| `workflow.ts` | `toolDetail()` (first 3 args as `k=v`) and `groupIntoTurns()` (segments the flat item list into turns) |
+
+State lives in `chatState.ts`: `plan`, `context`, `lastUserText`, and a `turn_status` item kind. `useChat.loadSession` reconstructs all of it from the transcript by mapping each entry on its `type` (`user` / `assistant` / `tool_call` / `tool_result` / `turn_status`), matching tool results back to their call by `call_id`.
+
+### 10.4 What the implementation corrected over the spec
+
+The spec (§3.6, §7.2) assumed tool items were already mirrored to the JSONL transcript and that the transcript was "user + assistant entries only" — those two statements contradict each other, and the second was the actual state. The workflow panel's reload-reconstruction criterion (§3.7) could not be met without mirroring, so **tool-event mirroring was added** (item 3 above).
+
+One spec feature was **dropped** after real use: the Phase 3 floating workflow chip (§5). In practice it occluded the chat it was meant to float over and duplicated the plan tracker without adding glanceable value, so it was removed. The four surfaces above are what shipped; the plan tracker is the single home for live progress, docked in the transcript rather than floating.
+
+### 10.5 Design principles this adds
+
+1. **Progress is observable, not inferred.** The plan and the workflow make the loop's internal state legible without reading prose.
+2. **Intent and record are different objects.** `todo_write` (what was planned) and the tool trace (what was done) are tracked separately so drift between them is visible.
+3. **Every turn ends explicitly.** The completion card guarantees a terminal marker regardless of whether the assistant produced text — "did it finish?" never requires guessing.
+4. **Reload is a first-class path, not an afterthought.** Mirroring tool events to the transcript means the UI reconstructs the full turn from disk, consistent with the write-ahead-persistence principle (§7.4).

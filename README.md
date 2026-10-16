@@ -10,7 +10,8 @@ claudio/
 ├── backend/     Python service (FastAPI + OpenAI Agents SDK)
 │   └── skills/  Drop-in Agent Skills (each folder has a SKILL.md)
 ├── frontend/    React + TypeScript + Vite + Tailwind client
-└── claudio_specs_agent.md    Claudio implementation specs inspired by Claude Code
+├── claudio_specs_agent.md    Claudio implementation specs inspired by Claude Code
+└── claudio_specs_workflow.md Execution plan / workflow view spec (implemented)
 ```
 
 ## Architecture
@@ -111,16 +112,16 @@ Errors use a consistent envelope: `{ "error": { "code", "message", "retryable", 
 | Config | `GET /config`, `PUT /config`, `GET /config/schema`, `POST /config/validate`, `POST /config/llm/test`, `GET /config/history`, `POST /config/restore`, `GET /config/raw` |
 | Chat | `POST /chat/stream` (SSE), `POST /chat` (non-streaming), `POST /chat/runs/{id}/cancel`, `GET /chat/runs/{id}`, `GET /chat/runs/{id}/stream` |
 | Approvals | `GET /approvals/pending`, `POST /approvals/{id}` |
-| Sessions | `GET /sessions`, `GET /sessions/{id}`, `GET /sessions/{id}/messages`, `DELETE /sessions/{id}`, `POST /sessions/{id}/clear` |
+| Sessions | `GET /sessions`, `GET /sessions/{id}`, `GET /sessions/{id}/messages`, `DELETE /sessions/{id}`, `POST /sessions/{id}/clear`, `POST /sessions/{id}/compact` |
 | Monitoring | `GET /monitoring/health`, `GET /monitoring/metrics`, `GET /monitoring/logs`, `GET /monitoring/runs` |
 
 ### Streaming chat
 
 `POST /api/v1/chat/stream` with `{ session_id, message, approval_mode }` returns
 `text/event-stream`. Events: `run_started`, `token`, `reasoning`, `tool_call`,
-`tool_result`, `approval_required`, `usage`, `run_completed`, `run_failed`,
-`heartbeat`. Each event carries an `id`; on disconnect the client resumes with
-`GET /chat/runs/{id}/stream?last_event_id=…` so no events are lost.
+`tool_result`, `approval_required`, `usage`, `context_usage`, `run_completed`,
+`run_failed`, `heartbeat`. Each event carries an `id`; on disconnect the client
+resumes with `GET /chat/runs/{id}/stream?last_event_id=…` so no events are lost.
 
 **Reload-safe:** a run is owned by the backend, not the browser tab. If you close
 or reload the UI while a run is in flight, the agent keeps working. On the next
@@ -142,6 +143,28 @@ Per `claudio_specs_agent.md`: file tools (`read_file`, `write_file`, `edit_file`
 `todo_write`, subagent spawning, context compaction with circuit breakers,
 file-history backups, USD budget tracking, input/output guardrails,
 configurable approval gating, and **Agent Skills** (see below).
+
+## Workflow view
+
+Every turn carries a visible progress surface so the agent's work is legible at a
+glance, not just through its prose (full design in `claudio_specs_workflow.md`):
+
+- **Plan tracker** — a pinned checklist of the agent's intent, fed by `todo_write`
+  and updated live as item statuses change (`☐ pending · ◐ in progress · ☑ done`).
+- **Workflow panel** — one collapsible, numbered trace of every tool call the turn
+  made, with a status icon per step and full args/output on expand. Approvals
+  render inline as steps.
+- **Context gauge** — a donut showing context used vs free against the usable
+  window, with the auto-compact threshold marked. Click it to **compact manually**
+  (`POST /sessions/{id}/compact`); it updates live from the `context_usage` event.
+- **Completion card** — an always-visible bookend on every turn: ✓ Completed /
+  ✗ Failed / ⏸ Interrupted, listing files written and commands run, with Retry on
+  failed/interrupted. This makes an action-only turn (files written, no prose)
+  explicit.
+
+All of it reconstructs after a page reload: tool calls and turn status are
+mirrored to the session's JSONL transcript, so closing the tab mid-run and coming
+back shows the same workflow, plan, and status.
 
 ## Skills
 
@@ -196,7 +219,7 @@ npm `docx` — which must be installed for those workflows to run.
 
 ```bash
 cd backend
-PYTHONPATH=src .venv/bin/python -m pytest -q     # 81 tests
+PYTHONPATH=src .venv/bin/python -m pytest -q     # 98 tests
 ```
 
 ## Production notes

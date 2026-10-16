@@ -76,7 +76,7 @@ async def health(request: Request) -> dict:
     if supervisor.config:
         # Cheap heuristic: if recent LLM errors dominate, mark degraded.
         snap = supervisor.metrics.snapshot()
-        if snap["llm_errors_total"] > 0 and snap["runs_completed_total"] == 0:
+        if snap["llm_errors_total"] > 0 and snap["runs_completed"] == 0:
             llm_status = "degraded"
     checks.append({"name": "llm", "status": llm_status})
     overall = "ok" if all(c["status"] in ("ok", "running") for c in checks) else "degraded"
@@ -94,9 +94,20 @@ async def health(request: Request) -> dict:
 async def metrics(request: Request) -> dict:
     require_auth(request)
     supervisor = request.app.state.supervisor
-    return supervisor.metrics.snapshot(
+    snap = supervisor.metrics.snapshot(
         runs_active=supervisor.run_manager.active_count() if supervisor.run_manager else 0
     )
+    # Overlay the persistent totals from the runs table. The in-memory counters
+    # are uptime-scoped and reset on every restart; the DB is the durable source,
+    # so the overview shows real cumulative numbers regardless of restarts.
+    totals = await supervisor.db.run_totals()
+    snap["runs_total"] = int(totals.get("runs_total") or 0)
+    snap["runs_completed"] = int(totals.get("runs_completed") or 0)
+    snap["runs_failed"] = int(totals.get("runs_failed") or 0)
+    snap["tokens_in"] = int(totals.get("tokens_in") or 0)
+    snap["tokens_out"] = int(totals.get("tokens_out") or 0)
+    snap["cost_usd_total"] = round(float(totals.get("cost_usd") or 0.0), 6)
+    return snap
 
 
 @router.get("/monitoring/logs")

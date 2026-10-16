@@ -227,6 +227,28 @@ export interface RunCompletedEvent {
   run_id: string
   output: string
   usage: UsageInfo
+  summary?: TurnSummary
+}
+
+// ---- Phase 4: context usage ----
+
+export interface ContextUsage {
+  used_tokens: number
+  context_window: number
+  usable_tokens: number
+  free_tokens: number
+  percent_used: number
+  compact_threshold: number
+  source: 'model' | 'estimate' | 'stored'
+  auto_disabled: boolean
+}
+
+// ---- Phase 5: completion status ----
+
+export interface TurnSummary {
+  files_written: string[]
+  commands_run: number
+  duration_seconds: number
 }
 export interface RunFailedEvent {
   run_id: string

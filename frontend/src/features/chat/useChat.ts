@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { api } from '../../api/client'
 import { openChatStream, resumeRunStream, type SseHandle } from '../../api/sse'
-import type { ActiveRunResponse } from '../../api/types'
-import { chatReducer, initialChatState, type ChatState, type Item } from './chatState'
+import type { ActiveRunResponse, ContextUsage } from '../../api/types'
+import {
+  chatReducer,
+  initialChatState,
+  type ChatState,
+  type Item,
+  type PlanItem,
+} from './chatState'
 
 export interface UseChatResult {
   state: ChatState
@@ -13,6 +19,12 @@ export interface UseChatResult {
   clear: () => void
   loadSession: (sessionId: string) => Promise<void>
   resumeActiveRun: (sessionId: string) => Promise<boolean>
+  compactSession: () => Promise<{
+    ok: boolean
+    used_tokens?: number
+    free_tokens?: number
+    error?: string
+  }>
 }
 
 export function useChat(
@@ -131,18 +143,105 @@ export function useChat(
     streamRef.current?.close()
     streamRef.current = null
     sessionRef.current = sid
-    const msgs = await api.get<{ messages: { type?: string; role?: string; content: string }[] }>(
-      `/sessions/${sid}/messages`,
-    )
-    const items: Item[] = (msgs.messages ?? []).map((m, i) => {
-      const isUser = (m.type ?? m.role) === 'user'
-      return {
+    const [msgs, row] = await Promise.all([
+      api.get<{ messages: { type?: string; role?: string; content: string }[] }>(
+        `/sessions/${sid}/messages`,
+      ),
+      api.get<Record<string, unknown>>(`/sessions/${sid}`).catch(() => null),
+    ])
+    const items: Item[] = []
+    // callId -> index of the pending tool item, so a later tool_result can close it.
+    const toolIndex: Record<string, number> = {}
+    ;(msgs.messages ?? []).forEach((m, i) => {
+      const r = m as unknown as Record<string, unknown>
+      const t = m.type ?? m.role
+      if (t === 'turn_status') {
+        items.push({
+          kind: 'turn_status',
+          id: `ts-${i}`,
+          status: (r.status as 'completed' | 'failed' | 'interrupted') ?? 'completed',
+          filesWritten: (r.files_written as string[]) ?? [],
+          commandsRun: (r.commands_run as number) ?? 0,
+          durationSeconds: (r.duration_seconds as number) ?? 0,
+          error: (r.error_message as string) ?? undefined,
+        })
+        return
+      }
+      if (t === 'tool_call') {
+        const callId = (r.call_id as string) ?? `c-${i}`
+        toolIndex[callId] = items.length
+        items.push({
+          kind: 'tool',
+          id: `tc-${i}`,
+          callId,
+          name: (r.name as string) ?? 'tool',
+          args: (r.arguments as string) ?? '',
+          pending: true,
+        })
+        return
+      }
+      if (t === 'tool_result') {
+        const callId = (r.call_id as string) ?? ''
+        const idx = toolIndex[callId]
+        if (idx != null) {
+          const it = items[idx]
+          if (it.kind === 'tool') {
+            items[idx] = {
+              ...it,
+              ok: !(r.is_error as boolean),
+              output: (r.output as string) ?? '',
+              pending: false,
+            }
+          }
+        }
+        return
+      }
+      const isUser = t === 'user'
+      items.push({
         kind: isUser ? ('user' as const) : ('assistant' as const),
         id: `h-${i}`,
         text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-      }
+      })
     })
-    dispatch({ type: 'LOAD_HISTORY', items })
+    // Seed the plan from the session row's stored todos (Phase 2).
+    let plan: PlanItem[] | null = null
+    const todosRaw = row?.todos
+    if (typeof todosRaw === 'string' && todosRaw) {
+      try {
+        const parsed = JSON.parse(todosRaw)
+        if (Array.isArray(parsed) && parsed.length > 0) plan = parsed as PlanItem[]
+      } catch {
+        /* malformed todos; leave plan empty */
+      }
+    }
+    // Seed the context gauge from the persisted last-turn size (Phase 4).
+    const context = (row?.context_usage as ContextUsage) ?? null
+    dispatch({ type: 'LOAD_HISTORY', items, plan, context })
+  }, [])
+
+  const compactSession = useCallback(async () => {
+    const sid = sessionRef.current
+    if (!sid) return { ok: false, error: 'No active session' }
+    try {
+      const res = await api.post<{
+        ok: boolean
+        used_tokens?: number
+        free_tokens?: number
+        error?: string
+        context_usage?: ContextUsage
+      }>(`/sessions/${sid}/compact`)
+      if (res.ok && res.context_usage) {
+        dispatch({ type: 'SSE', ev: { event: 'context_usage', data: res.context_usage } })
+      }
+      return {
+        ok: res.ok,
+        used_tokens: res.used_tokens,
+        free_tokens: res.free_tokens,
+        error: res.error,
+      }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
   }, [])
 
   /**
@@ -184,5 +283,5 @@ export function useChat(
     }
   }, [])
 
-  return { state, send, stop, approve, deny, clear, loadSession, resumeActiveRun }
+  return { state, send, stop, approve, deny, clear, loadSession, resumeActiveRun, compactSession }
 }

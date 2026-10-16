@@ -8,6 +8,8 @@ import type {
   RunCompletedEvent,
   RunFailedEvent,
   UsageInfo,
+  ContextUsage,
+  TurnSummary,
 } from '../../api/types'
 
 export type Item =
@@ -33,6 +35,20 @@ export type Item =
       reason: string
       resolved?: 'approved' | 'denied'
     }
+  | {
+      kind: 'turn_status'
+      id: string
+      status: 'completed' | 'failed' | 'interrupted'
+      filesWritten: string[]
+      commandsRun: number
+      durationSeconds: number
+      error?: string
+    }
+
+export interface PlanItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'done'
+}
 
 export interface ChatState {
   items: Item[]
@@ -41,6 +57,12 @@ export interface ChatState {
   usage: UsageInfo | null
   error: string | null
   pendingApproval: ApprovalRequiredEvent | null
+  /** Latest todo_write plan (Phase 2). Null until the agent writes one. */
+  plan: PlanItem[] | null
+  /** Latest context usage snapshot (Phase 4). */
+  context: ContextUsage | null
+  /** Last user message text, for the completion-card Retry (Phase 5). */
+  lastUserText: string | null
 }
 
 export const initialChatState: ChatState = {
@@ -50,6 +72,9 @@ export const initialChatState: ChatState = {
   usage: null,
   error: null,
   pendingApproval: null,
+  plan: null,
+  context: null,
+  lastUserText: null,
 }
 
 let counter = 0
@@ -65,7 +90,12 @@ export type ChatAction =
   | { type: 'STOPPED' }
   | { type: 'RESOLVE_APPROVAL'; approvalId: string; decision: 'approved' | 'denied' }
   | { type: 'CLEAR' }
-  | { type: 'LOAD_HISTORY'; items: Item[] }
+  | {
+      type: 'LOAD_HISTORY'
+      items: Item[]
+      plan?: PlanItem[] | null
+      context?: ContextUsage | null
+    }
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
@@ -75,6 +105,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         items: [...state.items, { kind: 'user', id: uid('u'), text: action.text }],
         streaming: true,
         error: null,
+        lastUserText: action.text,
       }
 
     case 'SSE':
@@ -102,7 +133,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...initialChatState }
 
     case 'LOAD_HISTORY':
-      return { ...initialChatState, items: action.items }
+      return {
+        ...initialChatState,
+        items: action.items,
+        plan: action.plan ?? null,
+        context: action.context ?? null,
+      }
 
     default:
       return state
@@ -152,7 +188,7 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
     }
     case 'tool_result': {
       const d = ev.data as ToolResultEvent
-      return {
+      const next: ChatState = {
         ...state,
         items: state.items.map((it) =>
           it.kind === 'tool' && it.callId === d.call_id
@@ -160,12 +196,21 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
             : it,
         ),
       }
+      // The todo_write result is the source of truth for the plan (Phase 2).
+      if (d.name === 'todo_write' && !d.is_error) {
+        const plan = parsePlan(d.output)
+        if (plan) next.plan = plan
+      }
+      return next
     }
     case 'approval_required': {
       const d = ev.data as ApprovalRequiredEvent
+      // The run is paused, not finished — keep `streaming` true so the Stop
+      // control stays available and the turn never looks silently dead while it
+      // waits on the user.
       return {
         ...state,
-        streaming: false,
+        streaming: true,
         pendingApproval: d,
         items: [
           ...state.items,
@@ -184,17 +229,57 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
       const d = ev.data as UsageInfo
       return { ...state, usage: d }
     }
+    case 'context_usage': {
+      const d = ev.data as ContextUsage
+      return { ...state, context: d }
+    }
     case 'run_completed': {
       const d = ev.data as RunCompletedEvent
-      return { ...state, streaming: false, usage: d.usage ?? state.usage, runId: null }
+      const summary: TurnSummary = d.summary ?? {
+        files_written: [],
+        commands_run: 0,
+        duration_seconds: 0,
+      }
+      return {
+        ...state,
+        streaming: false,
+        usage: d.usage ?? state.usage,
+        runId: null,
+        items: [
+          ...state.items,
+          {
+            kind: 'turn_status',
+            id: uid('ts'),
+            status: 'completed',
+            filesWritten: summary.files_written ?? [],
+            commandsRun: summary.commands_run ?? 0,
+            durationSeconds: summary.duration_seconds ?? 0,
+          },
+        ],
+      }
     }
     case 'run_failed': {
       const d = ev.data as RunFailedEvent
+      const code = d.code ?? ''
+      const status: 'failed' | 'interrupted' =
+        code === 'cancelled' || code === 'connection_error' ? 'interrupted' : 'failed'
       return {
         ...state,
         streaming: false,
         runId: null,
         error: `${d.code}: ${d.message}`,
+        items: [
+          ...state.items,
+          {
+            kind: 'turn_status',
+            id: uid('ts'),
+            status,
+            filesWritten: [],
+            commandsRun: 0,
+            durationSeconds: 0,
+            error: d.message,
+          },
+        ],
       }
     }
     case 'run_restarting': {
@@ -213,6 +298,7 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
         items: state.items.slice(0, lastUser + 1),
         streaming: true,
         error: null,
+        plan: null,
       }
     }
     case 'heartbeat':
@@ -220,4 +306,28 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
     default:
       return state
   }
+}
+
+/** Parse a todo_write tool result into plan items, or null if not a valid list. */
+function parsePlan(output: string | undefined): PlanItem[] | null {
+  if (!output) return null
+  let parsed: unknown
+  try {
+    parsed = typeof output === 'string' ? JSON.parse(output) : output
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const obj = parsed as Record<string, unknown>
+  if (!obj.ok || !Array.isArray(obj.items)) return null
+  const items: PlanItem[] = []
+  for (const raw of obj.items) {
+    if (!raw || typeof raw !== 'object') continue
+    const content = String((raw as Record<string, unknown>).content ?? '').trim()
+    const status = String((raw as Record<string, unknown>).status ?? 'pending')
+    if (!content) continue
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'done') continue
+    items.push({ content, status })
+  }
+  return items.length > 0 ? items : null
 }

@@ -27,16 +27,36 @@ async def todo_write(
         items: The full task list (replaces any previous list).
     """
     tctx = ctx.context
+    # Local models frequently hand this tool a JSON *string* instead of a list,
+    # or items with the text under a different key. Be permissive: coerce what we
+    # can, skip what we can't, and never hard-fail the turn over malformed
+    # scaffolding — a dropped todo line is far less harmful than a failed step.
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except (ValueError, TypeError):
+            items = []
+    if not isinstance(items, list):
+        items = []
     normalized = []
     for raw in items:
-        if not isinstance(raw, dict):
-            return {"ok": False, "error": "each todo item must be an object"}
-        content = str(raw.get("content", "")).strip()
-        status = str(raw.get("status", "pending"))
+        if isinstance(raw, str):
+            content = raw.strip()
+            status = "pending"
+        elif isinstance(raw, dict):
+            content = ""
+            for key in ("content", "title", "task", "text", "description"):
+                val = raw.get(key)
+                if isinstance(val, str) and val.strip():
+                    content = val.strip()
+                    break
+            status = str(raw.get("status", "pending"))
+        else:
+            continue
         if not content:
-            return {"ok": False, "error": "todo item missing 'content'"}
+            continue
         if status not in ("pending", "in_progress", "done"):
-            return {"ok": False, "error": f"invalid status: {status}"}
+            status = "pending"
         normalized.append({"content": content, "status": status})
     await tctx.db.update_session(tctx.session_id, todos=json.dumps(normalized), turns_since_todo=0)
     return {"ok": True, "count": len(normalized), "items": normalized}

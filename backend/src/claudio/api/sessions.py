@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from ..agent.builder import _make_model
+from ..runs.manager import _estimate_items_tokens, _context_usage_payload
 from .deps import require_auth, ApiError
 
 router = APIRouter()
@@ -35,7 +37,54 @@ async def get_session(request: Request, session_id: str) -> dict:
     row = await supervisor.db.get_session(session_id)
     if not row:
         raise ApiError(404, "not_found", f"No session {session_id}")
-    return row
+    out = dict(row)
+    # Seed the context gauge on page load from the persisted last-turn size.
+    if supervisor.config:
+        last_ctx = int(row.get("last_context_tokens") or 0)
+        auto_off = bool(supervisor.compactor and supervisor.compactor.is_disabled(session_id))
+        out["context_usage"] = _context_usage_payload(
+            last_ctx, supervisor.config, "stored", auto_disabled=auto_off
+        )
+    return out
+
+
+@router.post("/sessions/{session_id}/compact")
+async def compact_session(request: Request, session_id: str) -> dict:
+    """Manually compact a session's context (Phase 4).
+
+    Blocked while a run is active for the session: compacting mid-run races the
+    run's appends to the shared session. Reuses the RunManager's ``Compactor``
+    so the circuit-breaker state stays shared (a second instance would reset it).
+    """
+    require_auth(request)
+    supervisor = request.app.state.supervisor
+    row = await supervisor.db.get_session(session_id)
+    if not row:
+        raise ApiError(404, "not_found", f"No session {session_id}")
+    if supervisor.run_manager and supervisor.run_manager.get_active_run_for_session(
+        session_id
+    ):
+        raise ApiError(409, "busy", "A run is active for this session — finish it first")
+    compactor = supervisor.compactor
+    if compactor is None or supervisor.config is None:
+        raise ApiError(503, "unavailable", "Compactor not initialized")
+    session = supervisor.session_store.make_sdk_session(session_id)
+    ok = await compactor.compact(session, _make_model(supervisor.config), session_id)
+    items = await session.get_items()
+    used = _estimate_items_tokens(items)
+    if not ok:
+        if compactor.is_disabled(session_id):
+            return {"ok": False, "error": "compaction disabled (circuit breaker tripped)"}
+        return {"ok": False, "error": "nothing to compact"}
+    await supervisor.db.update_session(session_id, last_context_tokens=used)
+    return {
+        "ok": True,
+        "used_tokens": used,
+        "free_tokens": max(0, compactor.context_window - compactor.reserve - used),
+        "context_usage": _context_usage_payload(
+            used, supervisor.config, "estimate", auto_disabled=False
+        ),
+    }
 
 
 @router.get("/sessions/{session_id}/messages")

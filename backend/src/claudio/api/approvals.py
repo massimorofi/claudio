@@ -36,8 +36,16 @@ async def resolve_approval(request: Request, approval_id: str) -> dict:
     approval = await supervisor.db.get_approval(approval_id)
     if not approval:
         raise ApiError(404, "not_found", f"No approval {approval_id}")
+    # Idempotent: a second click on an already-resolved approval is a no-op,
+    # not a failure. Returning the stored decision keeps the UI consistent and
+    # stops a double-submit from tearing down the whole run.
     if approval["state"] != "pending":
-        raise ApiError(409, "already_resolved", "This approval was already resolved")
+        return {
+            "resolved": True,
+            "decision": approval.get("decision"),
+            "run_id": approval["run_id"],
+            "already_resolved": True,
+        }
 
     body = await request.json()
     decision = body.get("decision")

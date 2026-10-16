@@ -17,13 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agents import Runner
+from agents import Runner, RawResponsesStreamEvent
 
 from ..db import Database, utcnow
 from ..settings import AppConfig
 from ..agent.builder import build_primary_agent, build_subagent, _make_model
 from ..agent.context import ToolContext
-from .events import translate_stream_event
+from .events import translate_stream_event, _raw_event_type
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,10 @@ class RunRecord:
     error_code: str | None = None
     error_message: str | None = None
     resume_state_json: str | None = None
+    # Phase 5: produced-artifact tracking + wall-clock start for the completion card.
+    started_at: float = 0.0
+    files_written: list[str] = field(default_factory=list)
+    commands_run: int = 0
 
 
 class RunManager:
@@ -92,6 +96,7 @@ class RunManager:
     ) -> RunRecord:
         async with self._lock:
             record = RunRecord(run_id=run_id, session_id=session_id)
+            record.started_at = time.time()
             self._runs[run_id] = record
         await self.db.create_run(run_id, session_id)
         record.task = asyncio.create_task(
@@ -131,12 +136,18 @@ class RunManager:
             if record.task and not record.task.done():
                 record.task.cancel()
         record.state = "cancelled"
+        duration = max(0.0, time.time() - (record.started_at or time.time()))
         await self.db.update_run(
             run_id,
             state="cancelled",
             finished_at=utcnow(),
             error_code="cancelled",
             error_message="Run cancelled by user",
+        )
+        self._append_turn_status(
+            record,
+            "interrupted",
+            duration_seconds=round(duration, 1),
         )
         self._publish(
             record,
@@ -270,7 +281,11 @@ class RunManager:
             agent = build_primary_agent(self.config)
             tctx = self._build_context(record, None)
             session = self.session_store.make_sdk_session(record.session_id)
-            state = await self._load_state(agent, state_json)
+            # Pass the freshly built ToolContext as the override so the resumed
+            # run has a live DB / workspace. Without it the SDK drops the
+            # serialized context ("RunState context requires explicit
+            # restoration") and every tool that touches the context fails.
+            state = await self._load_state(agent, state_json, context_override=tctx)
             # Resolve the pending approval.
             interruptions = state.get_interruptions()
             for item in interruptions:
@@ -288,11 +303,11 @@ class RunManager:
         except Exception as e:  # noqa: BLE001
             await self._finalize_failed(record, e)
 
-    async def _load_state(self, agent, state_json: str):
+    async def _load_state(self, agent, state_json: str, context_override=None):
         from agents import RunState
 
         data = json.loads(state_json) if isinstance(state_json, str) else state_json
-        return await RunState.from_json(agent, data)
+        return await RunState.from_json(agent, data, context_override=context_override)
 
     async def _last_context_tokens(self, session_id: str) -> int:
         """The input-token size of the most recent completed turn (context proxy)."""
@@ -345,7 +360,19 @@ class RunManager:
             raise BudgetExceededError(base_cost, budget)
 
         # Proactive compaction once, before the first attempt.
-        await self._maybe_compact(record, session)
+        est = await self._maybe_compact(record, session)
+        # Seed the context gauge immediately (Phase 4).
+        self._publish(
+            record,
+            {
+                "event": "context_usage",
+                "data": _context_usage_payload(
+                    est,
+                    self.config,
+                    auto_disabled=self.compactor.is_disabled(record.session_id),
+                ),
+            },
+        )
         # Snapshot the session AFTER proactive compaction so a rollback restores
         # the compacted state. The SDK appends the run's input to the session
         # during the run, so a naive retry would otherwise double-append it.
@@ -442,11 +469,38 @@ class RunManager:
                 return
             for sse in translate_stream_event(event):
                 self._publish(record, sse)
+                if sse.get("event") == "tool_call":
+                    _track_produced(record, sse.get("data") or {})
+                    self._mirror_tool_event(record, sse)
+                elif sse.get("event") == "tool_result":
+                    self._mirror_tool_event(record, sse)
             # Mid-run budget check: each response.completed grows raw_responses.
             if budget > 0:
                 spent = base_cost + _compute_cost(_extract_usage(result), self.config)
                 if spent >= budget:
                     raise BudgetExceededError(spent, budget)
+            # Live context usage after each completed model turn (Phase 4).
+            if (
+                isinstance(event, RawResponsesStreamEvent)
+                and _raw_event_type(event) == "response.completed"
+            ):
+                used = _last_response_input_tokens(result, 0)
+                source = "model"
+                if used <= 0:
+                    used = _estimate_items_tokens(await session.get_items())
+                    source = "estimate"
+                self._publish(
+                    record,
+                    {
+                        "event": "context_usage",
+                        "data": _context_usage_payload(
+                            used,
+                            self.config,
+                            source,
+                            auto_disabled=self.compactor.is_disabled(record.session_id),
+                        ),
+                    },
+                )
 
         # After the stream: interruptions (approval) or completion.
         interruptions = getattr(result, "interruptions", None)
@@ -492,23 +546,33 @@ class RunManager:
             )
 
     async def _finalize_completed(self, record: RunRecord, result, session=None) -> None:
+        duration = max(0.0, time.time() - (record.started_at or time.time()))
         usage = _extract_usage(result)
-        record.input_tokens = usage["input_tokens"]
-        record.output_tokens = usage["output_tokens"]
-        record.cost_usd = _compute_cost(usage, self.config)
         record.final_output = str(result.final_output or "")
         record.turns_used = len(getattr(result, "raw_responses", []) or [])
         record.state = "completed"
+        # Prefer the model-reported input size; fall back to a content estimate
+        # when the provider reports 0 (common on the streamed path for local
+        # providers). The same estimate feeds the token metrics so the monitoring
+        # overview is not stuck at zero.
+        last_in = _last_response_input_tokens(result, 0)
+        if last_in <= 0 and session is not None:
+            last_in = _estimate_items_tokens(await session.get_items())
+        record.input_tokens = usage["input_tokens"] or last_in
+        record.output_tokens = usage["output_tokens"] or max(
+            1, len(record.final_output) // 4
+        )
+        record.cost_usd = _compute_cost(
+            {
+                "input_tokens": record.input_tokens,
+                "output_tokens": record.output_tokens,
+            },
+            self.config,
+        )
         self.metrics.inc_run_completed()
         self.metrics.add_usage(
             record.input_tokens, record.output_tokens, record.cost_usd
         )
-        # Persist the post-run context size. Prefer the model-reported input size;
-        # fall back to a content estimate when the provider reports 0 (common on
-        # the streamed path for local providers).
-        last_in = _last_response_input_tokens(result, 0)
-        if last_in <= 0 and session is not None:
-            last_in = _estimate_items_tokens(await session.get_items())
         await self.db.update_run(
             record.run_id,
             state="completed",
@@ -528,6 +592,15 @@ class RunManager:
                 "run_id": record.run_id,
             },
         )
+        # Persist the turn's outcome so the completion card reconstructs on reload.
+        self._append_turn_status(
+            record,
+            "completed",
+            files_written=list(record.files_written),
+            commands_run=record.commands_run,
+            duration_seconds=round(duration, 1),
+            cost_usd=record.cost_usd,
+        )
         await self._update_session_totals(record, last_context_tokens=last_in)
         self._publish(
             record,
@@ -542,6 +615,11 @@ class RunManager:
                         "output_tokens": record.output_tokens,
                         "cost_usd": record.cost_usd,
                     },
+                    "summary": {
+                        "files_written": list(record.files_written),
+                        "commands_run": record.commands_run,
+                        "duration_seconds": round(duration, 1),
+                    },
                 },
             },
         )
@@ -549,6 +627,7 @@ class RunManager:
         self._close_subscribers(record)
 
     async def _finalize_failed(self, record: RunRecord, exc: Exception) -> None:
+        duration = max(0.0, time.time() - (record.started_at or time.time()))
         code, retryable = _classify_error(exc)
         record.state = "failed"
         record.error_code = code
@@ -560,6 +639,13 @@ class RunManager:
             finished_at=utcnow(),
             error_code=code,
             error_message=str(exc),
+        )
+        self._append_turn_status(
+            record,
+            "failed",
+            error_code=code,
+            error_message=str(exc),
+            duration_seconds=round(duration, 1),
         )
         self._publish(
             record,
@@ -580,6 +666,7 @@ class RunManager:
     async def _finalize_cancelled(self, record: RunRecord) -> None:
         if record.state in ("completed", "failed", "cancelled"):
             return
+        duration = max(0.0, time.time() - (record.started_at or time.time()))
         record.state = "cancelled"
         await self.db.update_run(
             record.run_id,
@@ -587,6 +674,11 @@ class RunManager:
             finished_at=utcnow(),
             error_code="cancelled",
             error_message="Run cancelled",
+        )
+        self._append_turn_status(
+            record,
+            "interrupted",
+            duration_seconds=round(duration, 1),
         )
         self._publish(
             record,
@@ -627,6 +719,43 @@ class RunManager:
             except asyncio.QueueFull:
                 pass
 
+    def _append_turn_status(self, record: RunRecord, status: str, **extra: Any) -> None:
+        """Persist a ``turn_status`` entry to the JSONL transcript (Phase 5).
+
+        The completion card reconstructs from these on reload. A transcript
+        write failure must never take the run down, so it is logged and swallowed.
+        """
+        entry: dict[str, Any] = {
+            "type": "turn_status",
+            "status": status,
+            "run_id": record.run_id,
+        }
+        entry.update(extra)
+        try:
+            self.session_store.append(record.session_id, entry)
+        except OSError:
+            logger.warning("failed to persist turn_status for run %s", record.run_id)
+
+    def _mirror_tool_event(self, record: RunRecord, sse: dict[str, Any]) -> None:
+        """Mirror a ``tool_call``/``tool_result`` event into the JSONL transcript.
+
+        The workflow panel reconstructs its numbered trace from these on reload
+        (Phase 1). ``repair_orphans`` already understands these entry types, so a
+        run interrupted mid-tool gets a synthetic result on the next read. As with
+        every transcript write here, an OSError is logged and swallowed rather than
+        taking the live run down.
+        """
+        event = sse.get("event")
+        if event not in ("tool_call", "tool_result"):
+            return
+        entry: dict[str, Any] = dict(sse.get("data") or {})
+        entry["type"] = event
+        entry["run_id"] = record.run_id
+        try:
+            self.session_store.append(record.session_id, entry)
+        except OSError:
+            logger.warning("failed to mirror %s for run %s", event, record.run_id)
+
 
 def _extract_usage(result) -> dict[str, int]:
     """Sum token usage across the run's raw responses."""
@@ -646,6 +775,62 @@ def _compute_cost(usage: dict[str, int], config: AppConfig) -> float:
         tin / 1_000_000 * config.llm.price_input_per_mtok
         + tout / 1_000_000 * config.llm.price_output_per_mtok
     )
+
+
+# Tools that produce a file the user should see listed on the completion card.
+_WRITE_TOOL_NAMES = {"write_file", "edit_file", "create_file"}
+
+
+def _track_produced(record: RunRecord, data: dict[str, Any]) -> None:
+    """Accumulate produced artifacts from a ``tool_call`` event (Phase 5).
+
+    File-writing tools append their target path; ``run_command`` increments the
+    command counter. The completion card renders these so an action-only turn
+    (files written, no prose) is still legible.
+    """
+    name = data.get("name") or ""
+    if name in _WRITE_TOOL_NAMES:
+        args = data.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (ValueError, TypeError):
+                args = {}
+        if isinstance(args, dict):
+            path = args.get("path") or args.get("file_path") or args.get("file")
+            if path:
+                record.files_written.append(str(path))
+    elif name == "run_command":
+        record.commands_run += 1
+
+
+def _context_usage_payload(
+    used_tokens: int,
+    config: AppConfig,
+    source: str = "estimate",
+    auto_disabled: bool = False,
+) -> dict[str, Any]:
+    """Compute the ``context_usage`` payload from a used-token count (Phase 4).
+
+    ``free`` is measured against the *usable* window (``window - reserve``), since
+    the reserve is held back for the model's response. ``auto_disabled`` reflects
+    the compaction circuit-breaker state so the gauge can show "auto off".
+    """
+    window = int(config.agent.context_window)
+    reserve = int(config.agent.compaction_reserve)
+    usable = max(1, window - reserve)
+    free = max(0, usable - used_tokens)
+    percent = round(min(100.0, (used_tokens / usable) * 100.0), 1)
+    return {
+        "used_tokens": used_tokens,
+        "context_window": window,
+        "usable_tokens": usable,
+        "free_tokens": free,
+        "percent_used": percent,
+        "compact_threshold": usable,
+        "source": source,
+        "auto_disabled": auto_disabled,
+    }
 
 
 def _last_response_input_tokens(result, default: int = 0) -> int:
