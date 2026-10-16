@@ -131,3 +131,72 @@ def test_validate_candidate_ok():
 def test_validate_candidate_bad():
     with pytest.raises(Exception):
         validate_candidate({"server": {"port": "not-a-number"}})
+
+
+# ---- autonomous: maintenance / recovery / allowlist config ----
+
+
+def test_maintenance_defaults():
+    cfg = AppConfig()
+    m = cfg.autonomous.maintenance
+    assert m.enabled is False
+    assert m.schedule == "0 3 * * *"
+    assert m.vacuum_size == "200M"
+    assert m.temp_dirs == ["/tmp", "/var/tmp"]
+    assert m.audit_retention_days == 90
+    assert m.apt_update is True
+    assert m.full_upgrade is False
+
+
+def test_recovery_defaults():
+    cfg = AppConfig()
+    r = cfg.autonomous.recovery
+    assert r.enabled is False
+    assert r.expected_services == []
+    assert r.restart_allowlist == []
+
+
+def test_maintenance_valid_cron_accepted():
+    cfg = validate_candidate({"autonomous": {"maintenance": {"schedule": "*/15 2 * * 1-5"}}})
+    assert cfg.autonomous.maintenance.schedule == "*/15 2 * * 1-5"
+
+
+def test_maintenance_invalid_cron_rejected():
+    with pytest.raises(Exception):
+        validate_candidate({"autonomous": {"maintenance": {"schedule": "not a cron"}}})
+
+
+def test_maintenance_invalid_vacuum_size_rejected():
+    with pytest.raises(Exception):
+        validate_candidate({"autonomous": {"maintenance": {"vacuum_size": "lots"}}})
+
+
+def test_command_allowlist_none_by_default():
+    cfg = AppConfig()
+    assert cfg.autonomous.command_allowlist is None
+
+
+def test_command_allowlist_valid_entries():
+    cfg = validate_candidate(
+        {"autonomous": {"command_allowlist": ["/usr/bin/apt-get update", "/usr/bin/df -P"]}}
+    )
+    assert cfg.autonomous.command_allowlist == ["/usr/bin/apt-get update", "/usr/bin/df -P"]
+
+
+def test_command_allowlist_rejects_relative_path():
+    with pytest.raises(Exception):
+        validate_candidate({"autonomous": {"command_allowlist": ["apt-get update"]}})
+
+
+def test_command_allowlist_rejects_shell_metachars():
+    with pytest.raises(Exception):
+        validate_candidate(
+            {"autonomous": {"command_allowlist": ["/usr/bin/foo; rm -rf /"]}}
+        )
+
+
+def test_command_allowlist_rejects_catastrophic():
+    with pytest.raises(Exception):
+        validate_candidate(
+            {"autonomous": {"command_allowlist": ["/usr/bin/mkfs.ext4 /dev/sda1"]}}
+        )

@@ -1,0 +1,14 @@
+[Unit]
+Description=Claudio health check (read-only diagnostics)
+Documentation=https://claude.com/claude-code
+
+[Service]
+Type=oneshot
+User=claudio
+Group=claudio
+WorkingDirectory=/opt/claudio/backend
+Environment=PYTHONPATH=/opt/claudio/backend/src
+# The script runs the deterministic read-only checks, records the result to the
+# database, raises an issue and notifies on WARNING/CRITICAL, then exits with a
+# code mirroring the verdict (0 ok / 1 warning / 2 critical / 3 error).
+ExecStart=/opt/claudio/scripts/run_health_check.sh

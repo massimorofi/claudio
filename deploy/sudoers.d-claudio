@@ -1,0 +1,53 @@
+# /etc/sudoers.d/claudio
+#
+# Scoped sudo for the claudio daemon user. EXACT commands only — no wildcards
+# that could be smuggled into an arbitrary command.
+#
+# >>> REVIEW THIS FILE BEFORE ENABLING. Remove anything you have not reviewed. <<<
+#
+# The commands below are grouped by how the daemon uses them. The exact set is
+# derived from your config; regenerate it any time with:
+#
+#     python -m claudio.autonomous.cli sudoers
+#
+# Validate after editing:   sudo visudo -cf /etc/sudoers.d/claudio
+# Install with mode 0440:  sudo install -m 0440 sudoers.d-claudio /etc/sudoers.d/claudio
+
+# NOTE: no `Defaults !requiretty` here. Modern sudo (and sudo-rs) do not
+# support the requiretty option, and a systemd-run daemon has no controlling
+# TTY anyway — `sudo -n` works without it.
+
+# --- Safe / unattended maintenance -------------------------------------
+# The maintenance handler runs these directly with `sudo -n`, so they must be
+# NOPASSWD. They are low-risk / reversible.
+
+# Refresh the package index (no packages installed).
+claudio ALL=(root) NOPASSWD: /usr/bin/apt-get update
+
+# Trim the journal. NOTE: the size here must match autonomous.maintenance.vacuum_size
+# exactly — sudo matches the literal argv. If you change the config, update this line.
+claudio ALL=(root) NOPASSWD: /usr/bin/journalctl --vacuum-size=200M
+
+# Temp-directory cleanup script.
+claudio ALL=(root) NOPASSWD: /opt/claudio/scripts/cleanup_tmp.sh
+
+# --- Irreversible maintenance (operator-confirmed only) ----------------
+# The maintenance handler NEVER runs these itself — it records them as
+# suggestions awaiting confirmation. The operator reviews each exact command
+# in the cockpit and accepts it, supplying their password (fed to `sudo -S`).
+#
+# They are deliberately NOT NOPASSWD: that is the OS-level backstop that stops
+# the daemon running them unattended even if a bug tried to. Grant NOPASSWD on
+# these only if you are comfortable relying solely on the application gate.
+
+claudio ALL=(root) /usr/bin/apt-get -y upgrade
+claudio ALL=(root) /usr/bin/apt-get -y autoremove
+claudio ALL=(root) /usr/bin/docker system prune -f
+
+# --- Recovery restarts (one line per unit) -----------------------------
+# The recovery handler restarts only units that are BOTH listed here AND in
+# autonomous.recovery.restart_allowlist. Restarting a service is reversible,
+# so these are NOPASSWD. Add one line per unit you want recovery to manage.
+
+claudio ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx
+claudio ALL=(root) NOPASSWD: /usr/bin/systemctl restart postgresql

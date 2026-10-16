@@ -1,0 +1,17 @@
+[Unit]
+Description=Claudio maintenance pass (cleanup + suggestions)
+Documentation=https://claude.com/claude-code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudio
+Group=claudio
+WorkingDirectory=/opt/claudio/backend
+Environment=PYTHONPATH=/opt/claudio/backend/src
+# Runs one maintenance pass: safe cleanup actions execute directly (unless the
+# daemon is in report-only mode), irreversible actions become suggestions for
+# operator confirmation, and the audit log is swept. Exits with a code
+# mirroring the verdict (0 ok / 1 warning / 2 critical / 3 error).
+ExecStart=/opt/claudio/scripts/run_maintenance.sh

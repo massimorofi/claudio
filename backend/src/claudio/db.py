@@ -67,6 +67,88 @@ CREATE TABLE IF NOT EXISTS claudio_runs (
 
 CREATE INDEX IF NOT EXISTS idx_runs_session ON claudio_runs (session_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_state ON claudio_approvals (state);
+
+CREATE TABLE IF NOT EXISTS claudio_health_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    details_json TEXT NOT NULL DEFAULT '[]',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'scheduled'
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_created ON claudio_health_checks (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS claudio_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'health',
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    resolved_at TEXT,
+    resolution TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_issues_status ON claudio_issues (status);
+
+CREATE TABLE IF NOT EXISTS claudio_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id INTEGER,
+    created_at TEXT NOT NULL,
+    command TEXT NOT NULL,
+    explanation TEXT NOT NULL DEFAULT '',
+    risk TEXT NOT NULL DEFAULT 'low',
+    reversible INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    executed_at TEXT,
+    exit_code INTEGER,
+    output TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_suggestions_issue ON claudio_suggestions (issue_id);
+
+CREATE TABLE IF NOT EXISTS claudio_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'operator',
+    action TEXT NOT NULL,
+    command TEXT,
+    exit_code INTEGER,
+    detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS claudio_tasks (
+    key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    schedule TEXT NOT NULL,
+    approval_mode TEXT NOT NULL DEFAULT 'off',
+    report_only INTEGER NOT NULL DEFAULT 1,
+    notify_on TEXT NOT NULL DEFAULT '["warning","critical","failure"]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_verdict TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS claudio_task_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_key TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    verdict TEXT,
+    summary TEXT,
+    output TEXT,
+    exit_code INTEGER,
+    trigger TEXT NOT NULL DEFAULT 'scheduled'
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_runs_task ON claudio_task_runs (task_key, id DESC);
 """
 
 
@@ -103,6 +185,41 @@ class Database:
         if "last_context_tokens" not in scols:
             await self.conn.execute(
                 "ALTER TABLE claudio_sessions ADD COLUMN last_context_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+            await self.conn.commit()
+        # Make suggestions.issue_id nullable: maintenance suggestions are not tied
+        # to a detected issue. SQLite can't drop NOT NULL in place, so rebuild the
+        # table only if the column is still NOT NULL (idempotent on fresh DBs).
+        async with self.conn.execute("PRAGMA table_info(claudio_suggestions)") as cur:
+            sugg = {row["name"]: row for row in await cur.fetchall()}
+        issue_col = sugg.get("issue_id")
+        if issue_col is not None and issue_col["notnull"] == 1:
+            await self.conn.executescript(
+                """
+                CREATE TABLE claudio_suggestions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    explanation TEXT NOT NULL DEFAULT '',
+                    risk TEXT NOT NULL DEFAULT 'low',
+                    reversible INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    executed_at TEXT,
+                    exit_code INTEGER,
+                    output TEXT
+                );
+                INSERT INTO claudio_suggestions_new
+                    (id, issue_id, created_at, command, explanation, risk,
+                     reversible, status, executed_at, exit_code, output)
+                    SELECT id, issue_id, created_at, command, explanation, risk,
+                           reversible, status, executed_at, exit_code, output
+                    FROM claudio_suggestions;
+                DROP TABLE claudio_suggestions;
+                ALTER TABLE claudio_suggestions_new RENAME TO claudio_suggestions;
+                CREATE INDEX IF NOT EXISTS idx_suggestions_issue
+                    ON claudio_suggestions (issue_id);
+                """
             )
             await self.conn.commit()
 
@@ -324,3 +441,345 @@ class Database:
         )
         await self.conn.commit()
         return cur.rowcount or 0
+
+    # ---- health checks --------------------------------------------------
+
+    async def add_health_check(
+        self,
+        verdict: str,
+        summary: str,
+        details: list[dict[str, Any]],
+        duration_ms: int = 0,
+        source: str = "scheduled",
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_health_checks "
+            "(created_at, verdict, summary, details_json, duration_ms, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (utcnow(), verdict, summary, json.dumps(details), duration_ms, source),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def get_latest_health_check(self) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_health_checks ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["details"] = json.loads(d.get("details_json") or "[]")
+        return d
+
+    async def list_health_checks(self, limit: int = 50) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_health_checks ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["details"] = json.loads(d.get("details_json") or "[]")
+            out.append(d)
+        return out
+
+    # ---- issues ---------------------------------------------------------
+
+    async def create_issue(
+        self,
+        severity: str,
+        title: str,
+        detail: str = "",
+        source: str = "health",
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_issues "
+            "(created_at, source, severity, title, detail, status) "
+            "VALUES (?, ?, ?, ?, ?, 'open')",
+            (utcnow(), source, severity, title, detail),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def get_issue(self, issue_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_issues WHERE id = ?", (issue_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_issues(self, status: str | None = None) -> list[dict[str, Any]]:
+        if status:
+            async with self.conn.execute(
+                "SELECT * FROM claudio_issues WHERE status = ? ORDER BY id DESC", (status,)
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.conn.execute(
+                "SELECT * FROM claudio_issues ORDER BY id DESC"
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_issue_status(
+        self, issue_id: int, status: str, resolution: str | None = None
+    ) -> None:
+        if status in ("acknowledged", "resolved"):
+            await self.conn.execute(
+                "UPDATE claudio_issues SET status = ?, resolution = ?, resolved_at = ? "
+                "WHERE id = ?",
+                (status, resolution, utcnow(), issue_id),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE claudio_issues SET status = ? WHERE id = ?", (status, issue_id)
+            )
+        await self.conn.commit()
+
+    async def count_open_issues(self) -> int:
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS n FROM claudio_issues WHERE status = 'open'"
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return 0
+        return int(row["n"] or 0)
+
+    async def find_open_issue_by_title(self, title: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_issues WHERE status = 'open' AND title = ? LIMIT 1",
+            (title,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    # ---- suggestions ----------------------------------------------------
+
+    async def add_suggestion(
+        self,
+        issue_id: int,
+        command: str,
+        explanation: str = "",
+        risk: str = "low",
+        reversible: bool = True,
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_suggestions "
+            "(issue_id, created_at, command, explanation, risk, reversible, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+            (issue_id, utcnow(), command, explanation, risk, 1 if reversible else 0),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def get_suggestion(self, suggestion_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_suggestions WHERE id = ?", (suggestion_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_suggestions_for_issue(self, issue_id: int) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_suggestions WHERE issue_id = ? ORDER BY id DESC",
+            (issue_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_suggestion(self, suggestion_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        await self.conn.execute(
+            f"UPDATE claudio_suggestions SET {cols} WHERE id = ?",
+            (*fields.values(), suggestion_id),
+        )
+        await self.conn.commit()
+
+    # ---- audit ----------------------------------------------------------
+
+    async def add_audit(
+        self,
+        action: str,
+        command: str | None = None,
+        exit_code: int | None = None,
+        detail: str | None = None,
+        actor: str = "operator",
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_audit "
+            "(created_at, actor, action, command, exit_code, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (utcnow(), actor, action, command, exit_code, detail),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def list_audit(
+        self,
+        limit: int = 100,
+        action: str | None = None,
+        actor: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if actor:
+            clauses.append("actor = ?")
+            params.append(actor)
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("created_at <= ?")
+            params.append(until)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        async with self.conn.execute(
+            f"SELECT * FROM claudio_audit {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_audit_older_than(self, cutoff_iso: str) -> int:
+        """Delete audit rows created before ``cutoff_iso``. Returns rows removed."""
+        cur = await self.conn.execute(
+            "DELETE FROM claudio_audit WHERE created_at < ?", (cutoff_iso,)
+        )
+        await self.conn.commit()
+        return cur.rowcount or 0
+
+    # ---- tasks ----------------------------------------------------------
+
+    @staticmethod
+    def _task_from_row(row: Any) -> dict[str, Any]:
+        d = dict(row)
+        d["report_only"] = bool(d.get("report_only"))
+        d["enabled"] = bool(d.get("enabled"))
+        d["notify_on"] = json.loads(d.get("notify_on") or '["warning","critical","failure"]')
+        return d
+
+    async def create_task(
+        self,
+        key: str,
+        name: str,
+        prompt: str,
+        schedule: str,
+        approval_mode: str = "off",
+        report_only: bool = True,
+        notify_on: list[str] | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        now = utcnow()
+        notify = json.dumps(notify_on if notify_on is not None else ["warning", "critical", "failure"])
+        await self.conn.execute(
+            "INSERT INTO claudio_tasks "
+            "(key, name, prompt, schedule, approval_mode, report_only, notify_on, "
+            "enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                key,
+                name,
+                prompt,
+                schedule,
+                approval_mode,
+                1 if report_only else 0,
+                notify,
+                1 if enabled else 0,
+                now,
+                now,
+            ),
+        )
+        await self.conn.commit()
+        return await self.get_task(key)  # type: ignore[return-value]
+
+    async def get_task(self, key: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_tasks WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+        return self._task_from_row(row) if row else None
+
+    async def list_tasks(self) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_tasks ORDER BY created_at ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._task_from_row(r) for r in rows]
+
+    async def list_enabled_tasks(self) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_tasks WHERE enabled = 1 ORDER BY created_at ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._task_from_row(r) for r in rows]
+
+    async def update_task(self, key: str, **fields: Any) -> dict[str, Any] | None:
+        if not fields:
+            return await self.get_task(key)
+        if "report_only" in fields:
+            fields["report_only"] = 1 if fields["report_only"] else 0
+        if "enabled" in fields:
+            fields["enabled"] = 1 if fields["enabled"] else 0
+        if "notify_on" in fields and not isinstance(fields["notify_on"], str):
+            fields["notify_on"] = json.dumps(fields["notify_on"])
+        fields["updated_at"] = utcnow()
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        await self.conn.execute(
+            f"UPDATE claudio_tasks SET {cols} WHERE key = ?",
+            (*fields.values(), key),
+        )
+        await self.conn.commit()
+        return await self.get_task(key)
+
+    async def delete_task(self, key: str) -> None:
+        await self.conn.execute("DELETE FROM claudio_tasks WHERE key = ?", (key,))
+        await self.conn.commit()
+
+    # ---- task runs ------------------------------------------------------
+
+    async def add_task_run(self, task_key: str, trigger: str = "scheduled") -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_task_runs (task_key, started_at, trigger) VALUES (?, ?, ?)",
+            (task_key, utcnow(), trigger),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def update_task_run(self, run_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        await self.conn.execute(
+            f"UPDATE claudio_task_runs SET {cols} WHERE id = ?",
+            (*fields.values(), run_id),
+        )
+        await self.conn.commit()
+
+    async def get_task_run(self, run_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_task_runs WHERE id = ?", (run_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_task_runs(
+        self, task_key: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        if task_key:
+            async with self.conn.execute(
+                "SELECT * FROM claudio_task_runs WHERE task_key = ? ORDER BY id DESC LIMIT ?",
+                (task_key, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.conn.execute(
+                "SELECT * FROM claudio_task_runs ORDER BY id DESC LIMIT ?", (limit,)
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]

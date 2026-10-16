@@ -1,0 +1,13 @@
+[Unit]
+Description=Claudio health check every 10 minutes
+Documentation=https://claude.com/claude-code
+
+[Timer]
+# First run 2 minutes after boot, then every 10 minutes while active.
+OnBootSec=2min
+OnUnitActiveSec=10min
+# Don't fire missed checks in a burst after the machine wakes from suspend.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

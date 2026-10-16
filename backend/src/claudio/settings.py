@@ -25,8 +25,34 @@ BACKEND_RESTART_KEYS = {"server.host", "server.port"}
 # Keys that require an agent-runtime restart to take effect.
 AGENT_RESTART_KEYS = {"mcp"}
 
-SECRET_FIELDS = {("llm", "api_key"), ("server", "auth_token")}
+# Dotted paths to secret fields, redacted on read and preserved on save.
+SECRET_PATHS = [
+    "llm.api_key",
+    "server.auth_token",
+    "autonomous.notification.email.password",
+]
 REDACTED = "***"
+
+
+def _get_path(d: dict, dotted: str):
+    cur = d
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _set_path(d: dict, dotted: str, value) -> None:
+    parts = dotted.split(".")
+    cur = d
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
 
 
 class ServerConfig(BaseModel):
@@ -107,12 +133,113 @@ class MonitoringConfig(BaseModel):
     metrics_snapshot_interval_seconds: int = 5
 
 
+class EmailNotifyConfig(BaseModel):
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    username: str = ""
+    password: str = ""
+    from_addr: str = ""
+    to_addr: str = ""
+    use_tls: bool = True
+
+
+class WebhookNotifyConfig(BaseModel):
+    enabled: bool = False
+    url: str = ""
+
+
+class NotificationConfig(BaseModel):
+    enabled: bool = False
+    email: EmailNotifyConfig = Field(default_factory=EmailNotifyConfig)
+    webhook: WebhookNotifyConfig = Field(default_factory=WebhookNotifyConfig)
+
+
+class HealthCheckConfig(BaseModel):
+    enabled: bool = True
+    interval_minutes: int = 10
+    # Thresholds for the read-only diagnostics (see claudio.autonomous.health).
+    disk_warn_percent: float = 85.0
+    disk_crit_percent: float = 95.0
+    mem_crit_percent: float = 95.0
+    swap_warn_percent: float = 80.0
+    load_warn_factor: float = 1.0
+    load_crit_factor: float = 2.0
+    # Backup freshness (see §9.1). Empty backup_path disables the check.
+    backup_path: str = ""
+    backup_max_age_hours: float = 26.0
+
+
+class MaintenanceConfig(BaseModel):
+    """Scheduled maintenance (spec §8). Safe actions run automatically; the
+    irreversible ones (autoremove, full upgrade, docker prune) are always routed
+    through the suggestion/accept flow regardless of these toggles (spec §3.4)."""
+
+    enabled: bool = False
+    schedule: str = "0 3 * * *"          # cron, evaluated in UTC
+    vacuum_size: str = "200M"            # journalctl --vacuum-size value
+    temp_dirs: list[str] = Field(default_factory=lambda: ["/tmp", "/var/tmp"])
+    audit_retention_days: int = 90       # how long to keep audit rows
+    # Per-action toggles.
+    apt_update: bool = True
+    vacuum_logs: bool = True
+    temp_cleanup: bool = True
+    autoremove: bool = True
+    full_upgrade: bool = False
+    docker_prune: bool = False
+
+    @field_validator("schedule")
+    @classmethod
+    def _check_schedule(cls, v: str) -> str:
+        from croniter import croniter
+
+        if not croniter.is_valid(v):
+            raise ValueError(f"invalid cron schedule: {v!r}")
+        return v
+
+    @field_validator("vacuum_size")
+    @classmethod
+    def _check_vacuum_size(cls, v: str) -> str:
+        from .autonomous.allowlist import validate_vacuum_size
+
+        return validate_vacuum_size(v)
+
+
+class RecoveryConfig(BaseModel):
+    """Boot-time disaster recovery (spec §9). Safe, reversible actions only."""
+
+    enabled: bool = False
+    expected_services: list[str] = Field(default_factory=list)
+    restart_allowlist: list[str] = Field(default_factory=list)
+
+
+class AutonomousConfig(BaseModel):
+    enabled: bool = False
+    report_only: bool = True
+    health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+    recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
+    notification: NotificationConfig = Field(default_factory=NotificationConfig)
+    # When set, replaces the built-in command allowlist (see autonomous/allowlist).
+    command_allowlist: list[str] | None = None
+
+    @field_validator("command_allowlist")
+    @classmethod
+    def _check_command_allowlist(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        from .autonomous.allowlist import validate_command_entry
+
+        return [validate_command_entry(e) for e in v]
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    autonomous: AutonomousConfig = Field(default_factory=AutonomousConfig)
 
 
 def _env_overrides() -> dict[str, Any]:
@@ -171,9 +298,9 @@ def validate_candidate(candidate: dict[str, Any]) -> AppConfig:
 def redact_secrets(cfg_dict: dict[str, Any]) -> dict[str, Any]:
     """Return a copy with secret fields replaced by '***'."""
     out = copy.deepcopy(cfg_dict)
-    for section, key in SECRET_FIELDS:
-        if isinstance(out.get(section), dict) and out[section].get(key):
-            out[section][key] = REDACTED
+    for path in SECRET_PATHS:
+        if _get_path(out, path):
+            _set_path(out, path, REDACTED)
     return out
 
 
@@ -186,11 +313,11 @@ def restore_redacted_secrets(candidate: dict[str, Any], current: dict[str, Any])
     as "unchanged".
     """
     out = copy.deepcopy(candidate)
-    for section, key in SECRET_FIELDS:
-        if isinstance(out.get(section), dict) and out[section].get(key) == REDACTED:
-            cur = current.get(section)
-            if isinstance(cur, dict) and cur.get(key):
-                out[section][key] = cur[key]
+    for path in SECRET_PATHS:
+        if _get_path(out, path) == REDACTED:
+            cur = _get_path(current, path)
+            if cur:
+                _set_path(out, path, cur)
     return out
 
 

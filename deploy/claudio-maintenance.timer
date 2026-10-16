@@ -1,0 +1,12 @@
+[Unit]
+Description=Claudio maintenance timer (daily cleanup)
+Documentation=https://claude.com/claude-code
+
+[Timer]
+# Daily at 03:00. Persistent=true makes a missed run (machine was off) fire
+# shortly after the machine comes back up.
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

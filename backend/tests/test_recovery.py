@@ -78,15 +78,36 @@ def make_record(run_id="r1", session_id="s1"):
     return mgr.RunRecord(run_id=run_id, session_id=session_id)
 
 
+# Every Database opened via make_manager is tracked here so it can be closed
+# in teardown. An aiosqlite connection runs a background worker thread; if
+# the connection is still open when the test's event loop closes, that thread
+# tries to call back into the dead loop and raises "Event loop is closed",
+# which pytest surfaces as an unhandled-thread warning. Closing in teardown
+# stops the worker before the loop goes away.
+_open_dbs: list[Database] = []
+
+
 async def make_manager(tmp_path, **agent_overrides):
     db = Database(tmp_path / "test.db")
     await db.connect()
+    _open_dbs.append(db)
     await db.create_session("s1", title="test")
     if agent_overrides:
         await db.update_session("s1", **agent_overrides)
     config = AppConfig()
     metrics = Metrics()
     return db, config, metrics
+
+
+@pytest.fixture(autouse=True)
+async def _close_open_dbs():
+    yield
+    while _open_dbs:
+        db = _open_dbs.pop()
+        try:
+            await db.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
 
 
 # ---- helper function tests ----------------------------------------------

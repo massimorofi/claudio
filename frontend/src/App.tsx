@@ -5,6 +5,7 @@ import {
   Settings,
   Activity,
   FolderOpen,
+  Shield,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
@@ -12,12 +13,14 @@ import ChatView from './features/chat/ChatView'
 import ConfigView from './features/config/ConfigView'
 import MonitoringView from './features/monitoring/MonitoringView'
 import WorkspaceView from './features/workspace/WorkspaceView'
+import AutonomousView from './features/autonomous/AutonomousView'
 
 const navItems = [
   { to: '/chat', label: 'Chat', icon: MessageSquare },
   { to: '/config', label: 'Config', icon: Settings },
   { to: '/workspace', label: 'Workspace', icon: FolderOpen },
   { to: '/monitor', label: 'Monitor', icon: Activity },
+  { to: '/autonomous', label: 'Autonomous', icon: Shield },
 ]
 
 const COLLAPSE_KEY = 'claudio.sidebar.collapsed'
@@ -99,6 +102,7 @@ export default function App() {
           <Route path="/config" element={<ConfigView />} />
           <Route path="/workspace" element={<WorkspaceView />} />
           <Route path="/monitor" element={<MonitoringView />} />
+          <Route path="/autonomous" element={<AutonomousView />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
       </main>

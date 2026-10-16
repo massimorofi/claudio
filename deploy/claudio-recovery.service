@@ -1,0 +1,23 @@
+[Unit]
+Description=Claudio boot disaster recovery
+Documentation=https://claude.com/claude-code
+# Run as early as the local filesystems are up — recovery is about catching a
+# degraded boot (failed services, full disk, FS errors) before anything else
+# piles on top of it.
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+User=claudio
+Group=claudio
+WorkingDirectory=/opt/claudio/backend
+Environment=PYTHONPATH=/opt/claudio/backend/src
+# Runs one disaster-recovery pass: verifies backups, restarts allowlisted failed
+# units, cleans a full disk, restarts expected services, and alerts on kernel
+# filesystem errors. Exits with a code mirroring the verdict
+# (0 ok / 1 warning / 2 critical / 3 error).
+ExecStart=/opt/claudio/scripts/run_recovery.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -65,3 +65,60 @@ monitoring:
   log_level: INFO            # hot-reloadable
   log_retention_days: 7
   metrics_snapshot_interval_seconds: 5
+
+# Autonomous daemon. report_only: true means the daemon only observes and reports
+# — it never mutates the system. Configure via this file or the cockpit Autonomous
+# view; never from the chat box.
+autonomous:
+  enabled: false             # master switch for the daemon
+  report_only: true          # safe default; flip to false only when you trust it
+  health_check:
+    enabled: true
+    interval_minutes: 10
+    disk_warn_percent: 85.0
+    disk_crit_percent: 95.0
+    mem_crit_percent: 95.0
+    swap_warn_percent: 80.0
+    load_warn_factor: 1.0    # warning when load1 > cores * this
+    load_crit_factor: 2.0    # critical when load1 > cores * this
+    backup_path: ""          # directory to check for backup freshness
+    backup_max_age_hours: 26.0
+  # Scheduled maintenance (spec §8). Safe actions run automatically; the
+  # irreversible ones (autoremove, full_upgrade, docker_prune) are always routed
+  # through the suggestion/accept flow regardless of these toggles.
+  maintenance:
+    enabled: false           # enable in Phase 2
+    schedule: "0 3 * * *"   # cron, evaluated in UTC
+    vacuum_size: "200M"      # journalctl --vacuum-size value
+    temp_dirs: ["/tmp", "/var/tmp"]
+    audit_retention_days: 90
+    apt_update: true
+    vacuum_logs: true
+    temp_cleanup: true
+    autoremove: true         # irreversible -> proposed as a suggestion
+    full_upgrade: false      # irreversible -> proposed as a suggestion
+    docker_prune: false      # irreversible -> proposed as a suggestion
+  # Boot-time disaster recovery (spec §9). Safe, reversible actions only.
+  recovery:
+    enabled: false           # enable in Phase 3
+    expected_services: []    # units that must be running after boot
+    restart_allowlist: []    # units the daemon may restart (mirror in sudoers)
+  # Positive allowlist of exact elevated commands. When omitted, the built-in
+  # defaults are used. Set this to override; each entry is validated at load.
+  # command_allowlist:
+  #   - "/usr/bin/apt-get update"
+  #   - "/usr/bin/journalctl --vacuum-size=200M"
+  notification:
+    enabled: false
+    email:
+      enabled: false
+      smtp_host: ""
+      smtp_port: 587
+      username: ""
+      password: ""           # redacted in API responses
+      from_addr: ""
+      to_addr: ""
+      use_tls: true
+    webhook:
+      enabled: false
+      url: ""                # generic webhook; POSTs JSON on WARNING/CRITICAL

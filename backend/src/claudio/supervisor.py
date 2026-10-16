@@ -13,6 +13,11 @@ from .observability.metrics import Metrics
 from .sessions.store import SessionStore
 from .sessions.compaction import Compactor
 from .runs.manager import RunManager
+from .autonomous.notifier import Notifier
+from .autonomous.service import HealthService
+from .autonomous.scheduler import HealthScheduler
+from .autonomous.task_runner import TaskRunner
+from .autonomous.task_scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,11 @@ class Supervisor:
         self.metrics = Metrics()
         self.compactor: Compactor | None = None
         self.run_manager: RunManager | None = None
+        self.notifier: Notifier | None = None
+        self.health_service: HealthService | None = None
+        self.health_scheduler: HealthScheduler | None = None
+        self.task_runner: TaskRunner | None = None
+        self.task_scheduler: TaskScheduler | None = None
         self._mcp_servers: list[Any] = []
         self._config_generation = 0
 
@@ -57,6 +67,25 @@ class Supervisor:
                 metrics=self.metrics,
                 compactor=self.compactor,
             )
+            # Autonomous watch layer: health service + scheduler. The scheduler
+            # is always started; it gates itself on the enabled flag each cycle,
+            # so toggling autonomous.enabled takes effect without a restart.
+            self.notifier = Notifier(self.config)
+            self.health_service = HealthService(
+                config=self.config, db=self.db, notifier=self.notifier
+            )
+            self.health_scheduler = HealthScheduler(self.health_service)
+            await self.health_scheduler.start()
+            # Task system: user-defined cron tasks + built-in maintenance. Like
+            # the health scheduler, it gates itself on autonomous.enabled each
+            # cycle, so toggling it needs no restart.
+            self.task_runner = TaskRunner(
+                config=self.config, db=self.db, notifier=self.notifier
+            )
+            self.task_scheduler = TaskScheduler(
+                task_runner=self.task_runner, db=self.db, config=self.config
+            )
+            await self.task_scheduler.start()
             await self._start_mcp()
             self.state = "running"
             from .db import utcnow
@@ -72,6 +101,11 @@ class Supervisor:
             return
         self.state = "stopping"
         try:
+            # Stop the autonomous scheduler first so no new check fires during teardown.
+            if self.health_scheduler:
+                await self.health_scheduler.stop()
+            if self.task_scheduler:
+                await self.task_scheduler.stop()
             # Cancel active runs.
             if self.run_manager:
                 for run_id in list(self.run_manager._runs.keys()):
@@ -102,6 +136,15 @@ class Supervisor:
         if self.compactor:
             self.compactor.context_window = self.config.agent.context_window
             self.compactor.reserve = self.config.agent.compaction_reserve
+        # The autonomous components read config live; point them at the new one.
+        if self.health_service:
+            self.health_service.config = self.config
+        if self.notifier:
+            self.notifier.config = self.config
+        if self.task_runner:
+            self.task_runner.config = self.config
+        if self.task_scheduler:
+            self.task_scheduler.config = self.config
 
     @property
     def config_generation(self) -> int:

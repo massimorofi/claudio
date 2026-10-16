@@ -99,12 +99,58 @@ export interface MonitoringCfg {
   metrics_snapshot_interval_seconds: number
 }
 
+export interface HealthCheckCfg {
+  enabled: boolean
+  interval_minutes: number
+  disk_warn_percent: number
+  disk_crit_percent: number
+  mem_crit_percent: number
+  swap_warn_percent: number
+  load_warn_factor: number
+  load_crit_factor: number
+  backup_path: string
+  backup_max_age_hours: number
+}
+
+export interface EmailNotifyCfg {
+  enabled: boolean
+  smtp_host: string
+  smtp_port: number
+  username: string
+  password: string
+  from_addr: string
+  to_addr: string
+  use_tls: boolean
+}
+
+export interface WebhookNotifyCfg {
+  enabled: boolean
+  url: string
+}
+
+export interface NotificationCfg {
+  enabled: boolean
+  email: EmailNotifyCfg
+  webhook: WebhookNotifyCfg
+}
+
+export interface AutonomousCfg {
+  enabled: boolean
+  report_only: boolean
+  health_check: HealthCheckCfg
+  maintenance: MaintenanceCfg
+  recovery: RecoveryCfg
+  notification: NotificationCfg
+  command_allowlist: string[] | null
+}
+
 export interface AppConfig {
   server: ServerCfg
   llm: LlmCfg
   agent: AgentCfg
   mcp: { servers: McpServerEntry[] }
   monitoring: MonitoringCfg
+  autonomous: AutonomousCfg
 }
 
 export interface ConfigResponse {
@@ -347,4 +393,191 @@ export interface LogEntry {
   level: string
   logger: string
   message: string
+}
+
+// ---- Autonomous / daemon (Phase 1: Watch) ----
+
+export type HealthVerdict = 'ok' | 'warning' | 'critical'
+
+export interface HealthCheckItem {
+  name: string
+  status: 'ok' | 'warning' | 'critical' | 'skipped'
+  message: string
+  value?: number | null
+  threshold?: number | null
+  detail?: string
+}
+
+export interface HealthCheckRecord {
+  id: number
+  created_at: string
+  verdict: HealthVerdict
+  summary: string
+  details: HealthCheckItem[]
+  duration_ms: number
+  source: string
+}
+
+export interface AutonomousStatus {
+  enabled: boolean
+  report_only: boolean
+  health_check_enabled: boolean
+  interval_minutes: number
+  notification_enabled: boolean
+  notification_channels: string[]
+  last_check: HealthCheckRecord | null
+  open_issues_count: number
+  scheduler_running: boolean
+  last_run_at: string | null
+  next_run_at: string | null
+  maintenance_enabled: boolean
+  recovery_enabled: boolean
+  task_count: number
+  task_scheduler_running: boolean
+  next_task_fire_at: string | null
+}
+
+// ---- Tasks (user-defined scheduled playbooks) ----
+
+export type TaskVerdict = 'ok' | 'warning' | 'critical' | 'skipped'
+
+export interface Task {
+  key: string
+  name: string
+  prompt: string
+  schedule: string
+  approval_mode: string
+  report_only: boolean
+  notify_on: string[]
+  enabled: boolean
+  last_run_at: string | null
+  next_run_at: string | null
+  last_verdict: string | null
+  created_at: string
+  updated_at: string
+  // Computed by the API on read.
+  next_run?: string | null
+}
+
+export interface TaskCreate {
+  key: string
+  name: string
+  prompt: string
+  schedule: string
+  notify_on?: string[]
+  report_only?: boolean
+  enabled?: boolean
+}
+
+export interface TaskUpdate {
+  name?: string
+  prompt?: string
+  schedule?: string
+  notify_on?: string[]
+  report_only?: boolean
+  enabled?: boolean
+}
+
+export interface TaskRun {
+  id: number
+  task_key: string
+  started_at: string
+  finished_at: string | null
+  verdict: string | null
+  summary: string | null
+  output: string | null
+  exit_code: number | null
+  trigger: string
+}
+
+export interface TaskReport {
+  verdict: TaskVerdict
+  summary: string
+  report: string
+  details: Record<string, unknown>
+}
+
+// ---- Maintenance / recovery config ----
+
+export interface MaintenanceCfg {
+  enabled: boolean
+  schedule: string
+  vacuum_size: string
+  temp_dirs: string[]
+  audit_retention_days: number
+  apt_update: boolean
+  vacuum_logs: boolean
+  temp_cleanup: boolean
+  autoremove: boolean
+  full_upgrade: boolean
+  docker_prune: boolean
+}
+
+export interface RecoveryCfg {
+  enabled: boolean
+  expected_services: string[]
+  restart_allowlist: string[]
+}
+
+export interface HealthRunResult {
+  id: number
+  verdict: HealthVerdict
+  summary: string
+  duration_ms: number
+  checks: HealthCheckItem[]
+  new_issue: number | null
+}
+
+export type IssueStatus = 'open' | 'acknowledged' | 'resolved'
+
+export interface Issue {
+  id: number
+  created_at: string
+  source: string
+  severity: 'warning' | 'critical'
+  title: string
+  detail: string
+  status: IssueStatus
+  resolved_at: string | null
+  resolution: string | null
+}
+
+export interface NotifyTestResult {
+  enabled: boolean
+  channels: Record<string, { ok: boolean; error: string }>
+  ok: boolean
+  message: string
+}
+
+// ---- Fix suggestions (agent proposes, operator approves each command) ----
+
+export type SuggestionStatus = 'pending' | 'executed' | 'failed' | 'dismissed'
+export type FixRisk = 'low' | 'medium' | 'high'
+
+export interface FixSuggestion {
+  id: number
+  issue_id: number
+  created_at: string
+  command: string
+  explanation: string
+  risk: FixRisk
+  reversible: number
+  status: SuggestionStatus
+  executed_at: string | null
+  exit_code: number | null
+  output: string | null
+}
+
+export interface FixExecutionResult {
+  ok: boolean
+  exit_code: number | null
+  stdout: string
+  stderr: string
+  duration_ms: number
+}
+
+export interface AcceptFixResult {
+  executed: FixExecutionResult
+  recheck: { verdict: HealthVerdict; summary: string }
+  issue_resolved: boolean
 }

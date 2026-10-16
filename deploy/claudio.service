@@ -1,0 +1,32 @@
+[Unit]
+Description=Claudio autonomous server agent
+Documentation=https://claude.com/claude-code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claudio
+Group=claudio
+WorkingDirectory=/opt/claudio/backend
+# The backend serves the chat, the cockpit, and the in-process health scheduler.
+# PYTHONPATH points at the package source; the venv carries the dependencies.
+Environment=PYTHONPATH=/opt/claudio/backend/src
+ExecStart=/opt/claudio/backend/.venv/bin/uvicorn claudio.main:app --host 127.0.0.1 --port 8100
+Restart=always
+RestartSec=5
+
+# Resource ceilings so a runaway run cannot starve the host.
+CPUQuota=200%
+MemoryMax=2G
+
+# Hardening. NoNewPrivileges is false ONLY because the daemon uses scoped sudo;
+# everything else is locked down. ReadWritePaths lists the only writable locations.
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/claudio/data /var/lib/claudio
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
