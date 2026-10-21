@@ -50,6 +50,7 @@ from claudio_core import Database
 from claudio_core.context import ToolContext, context_usage_payload
 from claudio_core.engine import EngineError, ModelSpec, RunRequest
 from claudio_core.events import EventName
+from claudio_core.instructions import build_static_instructions, render_nudges
 from claudio_core.settings import AppConfig
 from claudio_core.tools.registry import TOOL_FUNCTIONS, TOOL_META, needs_approval_for
 
@@ -341,9 +342,27 @@ class AdkEngine:
                 continue
             needs = needs_approval_for(TOOL_META[name], request.tools.approval_mode)
             tools.append(make_adk_tool(name, ctx, require_confirmation=needs))
+
+        # The instruction is supplied as a provider rather than a fixed string so
+        # the per-turn nudges (todo nag, write-first nudge) are re-evaluated on
+        # every turn from the live context. A frozen string computed at run start
+        # locks them to their initial values, which is why the todo nag never
+        # fired and the plan never updated mid-run. The static text is built once
+        # and kept first so the prompt prefix stays cacheable.
+        static_instruction = build_static_instructions(
+            self.config, request.session_id, skill_entries=None
+        )
+
+        def _instruction_provider(_callback_context: Any) -> str:
+            return static_instruction + render_nudges(
+                turns_since_todo=ctx.turns_since_todo,
+                reads_since_write=ctx.reads_since_write,
+                deliverable_written=ctx.deliverable_written,
+            )
+
         return LlmAgent(
             name=request.metadata.get("agent_name", "claudio"),
-            instruction=request.instructions,
+            instruction=_instruction_provider,
             model=self._model(request.model),
             tools=tools,
         )
@@ -397,7 +416,7 @@ class AdkEngine:
         new_message = types.Content(
             role="user", parts=[types.Part(text=request.user_input)]
         )
-        async for evt in self._drive(runner, request, new_message):
+        async for evt in self._drive(runner, request, new_message, ctx):
             yield evt
 
     async def resume(
@@ -430,7 +449,7 @@ class AdkEngine:
                 )
             ],
         )
-        async for evt in self._drive(runner, request, new_message):
+        async for evt in self._drive(runner, request, new_message, ctx):
             yield evt
 
     async def cancel(self, run_id: str) -> None:
@@ -443,6 +462,7 @@ class AdkEngine:
         runner: Runner,
         request: RunRequest,
         new_message: Any,
+        ctx: ToolContext,
     ) -> AsyncIterator[dict[str, Any]]:
         input_tokens = 0
         output_tokens = 0
@@ -465,6 +485,11 @@ class AdkEngine:
                 input_tokens += tin
                 output_tokens += tout
                 if tin:
+                    # One LLM turn has completed. Bump the live counter the
+                    # instruction provider reads, so the todo nag can fire when
+                    # the agent has gone too long without updating its plan.
+                    # (todo_write itself resets this to 0 when it runs.)
+                    ctx.turns_since_todo += 1
                     # The engine is the only layer that knows how large the
                     # prompt actually was, so it publishes the gauge; the
                     # RunManager persists it.

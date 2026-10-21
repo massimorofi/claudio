@@ -5,8 +5,12 @@ import json
 
 from ..context import ToolContext
 
-# Turns without a todo update before the harness nags (Claudio §4.1).
-TURNS_SINCE_WRITE_NAG = 10
+# Turns without a todo update before the harness nags (Claudio §4.1). Kept
+# short so the plan the user watches ticks along at roughly one update per step.
+# This was 10 when the nag was computed once at run start and never actually
+# fired; now that the instruction is re-evaluated every turn the value is live,
+# so it is tuned for visible progress rather than left at its original guess.
+TURNS_SINCE_WRITE_NAG = 4
 
 
 async def todo_write(

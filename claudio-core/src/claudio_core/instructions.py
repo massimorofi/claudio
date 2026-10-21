@@ -73,15 +73,17 @@ and analyzing and never actually make the thing. Follow these rules:
    yourself and note assumptions rather than pausing to ask questions."""
 
 
-def build_instructions(
+def build_static_instructions(
     config: AppConfig,
     session_id: str,
-    turns_since_todo: int = 0,
     skill_entries: list[dict[str, Any]] | None = None,
-    reads_since_write: int = 0,
-    deliverable_written: bool = False,
 ) -> str:
-    """Assemble the full system prompt for a run."""
+    """Assemble the parts of the system prompt that never change during a run.
+
+    Split out from :func:`render_nudges` so an engine can build this once and
+    reuse it across every turn, appending only the nudges as the run progresses.
+    Keeping the static text first also lets the model cache the prompt prefix.
+    """
     workspace = Path(config.agent.workspace_dir).resolve()
     config_dir = workspace.parent.parent if workspace.parent else workspace
 
@@ -108,13 +110,31 @@ def build_instructions(
     if memory_block:
         sections.append(memory_block)
 
+    return "\n\n".join(sections)
+
+
+def render_nudges(
+    turns_since_todo: int = 0,
+    reads_since_write: int = 0,
+    deliverable_written: bool = False,
+) -> str:
+    """The reminder blocks that change as a run progresses.
+
+    Returns the empty string when there is nothing to say, so a caller can append
+    this straight onto the static instruction. These are deliberately kept apart
+    from the static text because they must be re-evaluated every turn: a prompt
+    assembled once at run start freezes them at their initial (silent) values,
+    which is exactly why the todo nag used never fire mid-run.
+    """
+    blocks: list[str] = []
+
     # Write-first nudge (§3.6.14): the agent has spent many read/lookup calls and
     # still has produced no file. This is the read-forever spiral — interrupt it
     # with a direct instruction to create the deliverable now. Suppressed once any
     # file has been written, and worded so a genuinely read-only task can ignore
     # it.
     if not deliverable_written and reads_since_write >= READS_SINCE_WRITE_NAG:
-        sections.append(
+        blocks.append(
             "<system-reminder>\n"
             f"You have made {reads_since_write} read/lookup calls and have not "
             "created any output file yet. If this task has a deliverable (a file, "
@@ -127,7 +147,7 @@ def build_instructions(
 
     # Todo nag (Claudio §4.1).
     if turns_since_todo >= TURNS_SINCE_WRITE_NAG:
-        sections.append(
+        blocks.append(
             "<system-reminder>\n"
             f"You have gone {turns_since_todo} turns without updating your task "
             "list. Call `todo_write` NOW and mark every step you have actually "
@@ -139,4 +159,30 @@ def build_instructions(
             "</system-reminder>"
         )
 
-    return "\n\n".join(sections)
+    if not blocks:
+        return ""
+    return "\n\n" + "\n\n".join(blocks)
+
+
+def build_instructions(
+    config: AppConfig,
+    session_id: str,
+    turns_since_todo: int = 0,
+    skill_entries: list[dict[str, Any]] | None = None,
+    reads_since_write: int = 0,
+    deliverable_written: bool = False,
+) -> str:
+    """Assemble the full system prompt for a run.
+
+    Equivalent to the static instruction plus the current nudges. Engines that
+    drive a multi-turn loop should prefer :func:`build_static_instructions` with
+    :func:`render_nudges` re-evaluated per turn, rather than calling this once
+    and freezing the nudges.
+    """
+    return build_static_instructions(
+        config, session_id, skill_entries
+    ) + render_nudges(
+        turns_since_todo=turns_since_todo,
+        reads_since_write=reads_since_write,
+        deliverable_written=deliverable_written,
+    )
