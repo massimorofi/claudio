@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { CircleCheck, CircleX, PauseCircle, RotateCcw, Copy, Check } from 'lucide-react'
 
@@ -17,6 +18,24 @@ interface CompletionStatusProps {
 const MAX_FILES_SHOWN = 3
 
 /**
+ * Collapse repeated writes down to each distinct file and how often it was
+ * written, keeping first-seen order. The agent commonly re-writes one file
+ * across many turns; listing it five times reads as noise.
+ */
+function tallyFiles(files: string[]): { name: string; count: number }[] {
+  const order: string[] = []
+  const counts = new Map<string, number>()
+  for (const f of files) {
+    if (!counts.has(f)) {
+      order.push(f)
+      counts.set(f, 0)
+    }
+    counts.set(f, (counts.get(f) ?? 0) + 1)
+  }
+  return order.map((name) => ({ name, count: counts.get(name) ?? 1 }))
+}
+
+/**
  * Always-visible completion bookend (Phase 5): states the outcome of every turn
  * — done / failed / interrupted — and what was produced, even when the assistant
  * emitted no prose. Status is carried by icon + word, never color alone.
@@ -32,21 +51,47 @@ export default function CompletionStatus({
   error,
   onRetry,
 }: CompletionStatusProps) {
-  const shown = filesWritten.slice(0, MAX_FILES_SHOWN)
-  const extra = filesWritten.length - shown.length
+  const tallied = tallyFiles(filesWritten)
+  const shown = tallied.slice(0, MAX_FILES_SHOWN)
+  const extra = tallied.length - shown.length
 
-  const produced: string[] = []
-  if (filesWritten.length > 0) {
-    produced.push(
-      `wrote ${shown.map((f) => (
-        <Link key={f} to="/workspace" className="font-mono underline decoration-black/20 hover:decoration-brand">
-          {f}
-        </Link>
-      )).join(', ')}${extra > 0 ? ` + ${extra} more` : ''}`,
-    )
+  // Built as real JSX. Interpolating React elements into a template literal
+  // stringifies them, which is how "wrote [object Object]" used to render.
+  const wroteNode: ReactNode = (
+    <>
+      wrote{' '}
+      {shown.map((f, i) => (
+        <span key={`${f.name}-${i}`}>
+          {i > 0 ? ', ' : ''}
+          <Link
+            to="/workspace"
+            className="font-mono underline decoration-black/20 hover:decoration-brand"
+          >
+            {f.name}
+            {f.count > 1 ? ` ×${f.count}` : ''}
+          </Link>
+        </span>
+      ))}
+      {extra > 0 ? ` + ${extra} more` : ''}
+    </>
+  )
+
+  const parts: ReactNode[] = []
+  if (tallied.length > 0) parts.push(wroteNode)
+  if (commandsRun > 0) {
+    parts.push(`${commandsRun} command${commandsRun === 1 ? '' : 's'} run`)
   }
-  if (commandsRun > 0) produced.push(`${commandsRun} command${commandsRun === 1 ? '' : 's'} run`)
-  const producedText = produced.length > 0 ? produced.join(' · ') : 'no output'
+  const producedNode: ReactNode =
+    parts.length > 0 ? (
+      parts.map((p, i) => (
+        <span key={i}>
+          {i > 0 ? ' · ' : ''}
+          {p}
+        </span>
+      ))
+    ) : (
+      'no output'
+    )
 
   const duration = `${durationSeconds.toFixed(1)}s`
   // Throughput: generated (output) tokens/sec and prompt (input) tokens/sec over
@@ -59,7 +104,9 @@ export default function CompletionStatus({
       <div className="my-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-xs text-green-800">
         <CircleCheck size={14} className="shrink-0 text-green-600" />
         <span className="font-semibold">Completed</span>
-        <span className="text-black/50">· {producedText} · {duration}</span>
+        <span className="text-black/50">
+          · {producedNode} · {duration}
+        </span>
         <span className="text-black/50">
           · {genRate.toFixed(1)} tok/s generated · {promptRate.toFixed(1)} tok/s prompt
         </span>

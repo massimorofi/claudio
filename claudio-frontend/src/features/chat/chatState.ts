@@ -207,7 +207,7 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
     }
     case 'tool_call': {
       const d = ev.data as ToolCallEvent
-      return {
+      const next: ChatState = {
         ...state,
         items: [
           ...state.items,
@@ -221,6 +221,14 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
           },
         ],
       }
+      // Show the plan the moment the agent calls todo_write, rather than waiting
+      // for the result to come back. The result handler below overwrites this
+      // with the authoritative copy a beat later.
+      if (d.name === 'todo_write') {
+        const plan = parsePlan(d.arguments)
+        if (plan) next.plan = plan
+      }
+      return next
     }
     case 'tool_result': {
       const d = ev.data as ToolResultEvent
@@ -354,23 +362,32 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
   }
 }
 
-/** Parse a todo_write tool result into plan items, or null if not a valid list. */
-function parsePlan(output: string | undefined): PlanItem[] | null {
-  if (!output) return null
+/**
+ * Parse a todo_write payload into plan items, or null if it isn't a valid list.
+ *
+ * Called with both shapes the tool produces: the call arguments, which carry
+ * `{items: [...]}` directly, and the tool result, which wraps the same list in
+ * `{ok, count, items}`. Only `items` is required — demanding `ok` here would
+ * drop the plan at call time, which is exactly when we want to show it.
+ */
+function parsePlan(raw: string | unknown): PlanItem[] | null {
+  if (raw == null) return null
   let parsed: unknown
   try {
-    parsed = typeof output === 'string' ? JSON.parse(output) : output
+    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
   } catch {
     return null
   }
-  if (!parsed || typeof parsed !== 'object') return null
-  const obj = parsed as Record<string, unknown>
-  if (!obj.ok || !Array.isArray(obj.items)) return null
+  let list: unknown = parsed
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    list = (parsed as Record<string, unknown>).items
+  }
+  if (!Array.isArray(list)) return null
   const items: PlanItem[] = []
-  for (const raw of obj.items) {
-    if (!raw || typeof raw !== 'object') continue
-    const content = String((raw as Record<string, unknown>).content ?? '').trim()
-    const status = String((raw as Record<string, unknown>).status ?? 'pending')
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue
+    const content = String((entry as Record<string, unknown>).content ?? '').trim()
+    const status = String((entry as Record<string, unknown>).status ?? 'pending')
     if (!content) continue
     if (status !== 'pending' && status !== 'in_progress' && status !== 'done') continue
     items.push({ content, status })
