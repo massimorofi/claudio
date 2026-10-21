@@ -1,0 +1,431 @@
+# claudio-backend
+
+The Google ADK deployable. It wires `claudio_core` to ADK and exposes the HTTP
+API the frontend consumes.
+
+The architectural point of this package is confinement. ADK is a dependency of
+exactly one subpackage — `engine/`. Everything above it (HTTP routes, run
+orchestration) talks to the framework-neutral `RunEngine` protocol defined in
+core. A second import-linter contract enforces that, so replacing the engine
+later is a change to one package rather than a hunt through the backend.
+
+- **Package:** `claudio_backend`
+- **Python:** ≥ 3.11
+- **Deps:** `claudio-core`, `google-adk[openai]>=2.0,<3`, `fastapi`,
+  `uvicorn`, `pydantic`, `pyyaml`, `aiosqlite`, `httpx`, `croniter`
+- **Status:** engine complete; orchestration and routes **not yet ported**.
+  See [`../refactoring_status.md`](../refactoring_status.md).
+
+---
+
+## Capabilities
+
+### 1. ADK engine — `engine/adk_engine.py`
+
+Implements `claudio_core.engine.RunEngine` over Google ADK 2.12. Takes a
+framework-neutral `RunRequest`, drives one ADK agent run, and translates ADK
+events into Claudio SSE events.
+
+Three design decisions, each established by probing ADK directly rather than
+from its documentation.
+
+**Tool wrapping.** Every Claudio tool takes `ToolContext` as its first argument.
+ADK builds its tool declaration from the callable's signature, so a bound `ctx`
+would leak into the schema as a required model-facing parameter. Each tool is
+wrapped in a `**kwargs` closure that is then given a synthetic `__signature__`
+listing only the model-facing parameters. ADK reads `__signature__` when
+building the declaration, so the schema comes out correct and `ctx` stays
+invisible to the model.
+
+Verified output for `write_file`:
+
+```json
+{"name": "core_write",
+ "parameters_json_schema": {
+   "properties": {"path": {...}, "content": {...}, "append": {...}},
+   "required": ["path", "content", "append"],
+   "title": "core_writeParams", "type": "object"}}
+```
+
+Note: `FunctionDeclaration` has **no `.required` attribute** in this version —
+`required` lives inside `parameters_json_schema`.
+
+**Approval and pause.** `require_confirmation=True` is inert unless the `App` is
+built with `ResumabilityConfig(is_resumable=True)`. When it is, ADK emits three
+events and stops:
+
+1. the model's original `function_call` (id `c1`, name `write_file`), with
+   `long_running_tool_ids: []`
+2. an injected `adk_request_confirmation` call with its **own** id
+   (`adk-<uuid>`), args `{"originalFunctionCall": {...}, "toolConfirmation":
+   {"hint": "...", "confirmed": false}}`, and
+   `long_running_tool_ids: ["adk-<uuid>"]` ← this is the pause signal
+3. a `function_response` for the **original** id `c1` carrying
+   `{"error": "This tool call requires confirmation..."}`, with
+   `actions.requested_tool_confirmations = {"c1": {...}}` and
+   `actions.skip_summarization = true`
+
+Resuming requires a `function_response` keyed by the **confirmation call's** id,
+not the original tool-call id:
+
+```python
+types.Content(role="user", parts=[types.Part(
+    function_response=types.FunctionResponse(
+        id=conf_id, name="adk_request_confirmation",
+        response={"confirmed": True}))])
+```
+
+Using the original `c1` id produces **zero events** — a silent no-op. This is
+the single most important thing in the file, and it is not documented anywhere in
+ADK's own material.
+
+**Cross-process resume verified.** A completely fresh Python process with a new
+`SqliteSessionService`, new `FunctionTool`s, new `App` and new `Runner`
+successfully resumed a run that a *different, already-exited* process had
+paused. That property is what makes Claudio's "pause → HTTP approval → resume"
+flow work on ADK: the approval round-trip can span a process restart.
+
+**Text delivery.** ADK delivers text per-response, not token-by-token, so a
+`token` event from this engine is a chunk of model output rather than a
+streamed token. The contract permits that and the frontend appends.
+
+#### Public symbols
+
+| Symbol | Purpose |
+|---|---|
+| `AdkEngine` | the `RunEngine` implementation |
+| `AdkEngine.stream(request)` | drive a run, yield SSE events |
+| `AdkEngine.resume(request, state)` | continue a paused run |
+| `AdkEngine.cancel(run_id)` | cooperative cancellation |
+| `AdkPauseState` | the pause checkpoint: `confirmation_id`, `original_call_id`, `tool_name`, `arguments`, `hint`, `approved`, `rejection_reason` |
+| `AdkPauseState.to_json()` / `.from_json()` / `.from_dict()` | round-trip through SQLite |
+| `normalise_state(state)` | accept the pause state in any of its shapes |
+| `make_adk_tool(name, ctx, require_confirmation=)` | build one wrapped `FunctionTool` |
+| `translate_event(event)` | one ADK event → zero or more Claudio events |
+| `find_confirmation(event)` | extract `AdkPauseState` if present |
+| `usage_from_event(event)` | `(input_tokens, output_tokens)` |
+| `adk_state_path(request)` | where ADK keeps its session DB |
+| `CONFIRMATION_TOOL` | `"adk_request_confirmation"` |
+| `create_engine(config, db, kind=None)` | factory; `kind` defaults to `$CLAUDIO_ENGINE`, then `"adk"` |
+
+#### Event translation
+
+ADK mixes function calls, function responses and text within a single event, so
+`translate_event` fans out rather than mapping one-to-one.
+
+| ADK | Claudio |
+|---|---|
+| `part.function_call` (not the confirmation tool) | `tool_call` |
+| `part.function_response` | `tool_result` (error detected from `response.error` / `ok: false`) |
+| `part.text` with `thought=True` | `reasoning` |
+| `part.text` from a non-user author | `token` |
+| `adk_request_confirmation` call | `approval_required` (handled by the driver, which also captures the pause state) |
+| `event.usage_metadata` | `context_usage` |
+
+The driver loop (`_drive`) additionally enforces `max_turns`, checks the
+cancellation set on every event, accumulates usage and cost, converts any
+unexpected exception into `run_failed`, and emits `run_completed` at the end.
+
+### 2. Run orchestration — `runs/`
+
+**Not yet ported.** Upstream `runs/manager.py` is 1718 lines. When written it
+will own everything that is not about the model:
+
+- `RunRecord` — per-run state: a 2000-entry ring buffer of `(seq, sse)` pairs,
+  the subscriber queue set, cancel event, task handle, token/cost accumulators,
+  `files_written`, `commands_run`, `resume_state_json`
+- `start_run(run_id, session_id, message, approval_mode=None)`
+- `resume_run(run_id, session_id, state_json, approval_id, decision,
+  rejection_message=None)`
+- `cancel_run(run_id) -> bool`, `get_record(run_id)`,
+  `get_active_run_for_session(session_id)`, `active_count()`
+- `request_compact(session_id) -> dict`
+- `subscribe(run_id, after_seq=0)` / `open_stream(...)` / `close_stream(...)` —
+  the reconnection machinery
+- budget gate against session `total_cost_usd` before any work starts
+- the recovery loop: proactive compaction, mid-run compaction capped at
+  `MAX_MID_RUN_COMPACTIONS = 5`, exponential-backoff retry up to
+  `llm.retry_attempts`, then one fallback-model attempt
+- `_finalize_completed` — deliverable verification, todo reconciliation, session
+  totals, the `run_completed` summary
+- exceptions `BudgetExceededError`, `ContextThresholdReached`,
+  `DeliveryFailureError`
+
+The port is largely mechanical because the engine now supplies the events. The
+one genuinely new piece is **persisting `ToolContext`'s mutable accumulators**
+(`cost_usd`, `turns_since_todo`, `deliverable_written`, `reads_since_write`) to
+SQLite alongside the run record and rebuilding them on resume, so a resumed run
+continues the counters instead of resetting them.
+
+### 3. HTTP API — `api/`
+
+**Not yet ported.** The required surface is specified in full below, since it is
+a frontend contract and does not change with the engine.
+
+All routes are under `/api/v1`. All except `GET /healthz` require
+`Authorization: Bearer <server.auth_token>`.
+
+#### Error envelope
+
+Every non-2xx response uses:
+
+```json
+{"error": {"code": "...", "message": "...", "retryable": false, "details": {}}}
+```
+
+Raised as `ApiError(status, code, message, retryable, details)`.
+
+#### Chat
+
+| Method | Path | Request | Response |
+|---|---|---|---|
+| `POST` | `/chat/stream` | `{session_id, message, approval_mode?, files?}` | SSE stream |
+| `POST` | `/chat` | `{session_id, message, approval_mode?, files?}` | `{run_id, session_id, final_output, usage}` |
+| `POST` | `/chat/runs/{run_id}/cancel` | — | `{cancelled: bool}` |
+| `GET` | `/chat/runs/{run_id}` | — | run record |
+| `GET` | `/chat/runs/{run_id}/stream?last_event_id=N` | — | SSE stream (replay + live) |
+
+`POST /chat/stream` creates the session if it does not exist (title = first 60
+characters of the message), mirrors the user message to the session store with a
+`📎 <names>` suffix when files are attached, starts the run, then streams replay
+followed by live events. `HEARTBEAT_SECONDS = 15`.
+
+`POST /chat` is the blocking variant: it waits on `record.task` with a timeout
+of `llm.timeout_seconds * 2`, and raises **409** `approval_required` if the run
+pauses, or **504** `timeout`.
+
+`GET /chat/runs/{run_id}/stream` is the reconnection endpoint. It replays
+everything after `last_event_id` from the ring buffer and then continues live, so
+a dropped connection loses nothing.
+
+#### Approvals
+
+| Method | Path | Request | Response |
+|---|---|---|---|
+| `GET` | `/approvals/pending` | — | `{approvals: [{approval_id, run_id, session_id, tool, arguments, reason, requested_at}]}` |
+| `POST` | `/approvals/{approval_id}` | `{decision: "approve"\|"deny", reason}` | `{resolved, decision, run_id}` |
+
+Resolving an approval resumes the paused run from its persisted
+`resume_state_json`. The endpoint is **idempotent**: a second click on an
+already-resolved approval returns the stored decision with
+`already_resolved: true` rather than failing, so a double-submit cannot tear down
+the run.
+
+#### Sessions
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/sessions` | list sessions |
+| `GET` | `/sessions/{id}` | session detail, plus `context_usage` computed from stored `last_context_tokens` |
+| `POST` | `/sessions/{id}/compact` | manual compaction |
+| `GET` | `/sessions/{id}/messages?limit=200` | transcript; runs `repair_orphans` first |
+| `GET` | `/sessions/{id}/active_run` | the in-flight run for this session, if any |
+| `DELETE` | `/sessions/{id}` | delete one session |
+| `POST` | `/sessions/{id}/clear` | clear transcript, keep the session |
+
+#### Config
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/config` | current config, secrets redacted, plus `generation` |
+| `GET` | `/config/schema` | JSON schema for the settings UI |
+| `PUT` | `/config` | replace config; returns changed keys and restart requirements |
+| `POST` | `/config/validate` | validate a candidate without saving |
+| `POST` | `/config/llm/test` | live connectivity test → `{ok, latency_ms, model, error}` |
+| `GET` | `/config/history` | saved versions |
+| `POST` | `/config/restore` | restore a version |
+| `GET` | `/config/raw` | unredacted; gated by `server.expose_raw_config` |
+
+#### Files and workspace
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/files/upload` | multipart upload |
+| `GET` | `/workspace/files` | list files |
+| `GET` | `/workspace/tree` | tree view |
+| `POST` | `/workspace/files/delete` | delete |
+| `GET` | `/workspace/files/download` | single-file download |
+| `POST` | `/workspace/files/download` | multi-file download (zip) |
+
+#### Agent management
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/agent/start` | 202 accepted |
+| `POST` | `/agent/stop` | graceful stop |
+| `POST` | `/agent/restart` | 202 accepted |
+| `GET` | `/agent/status` | `{state, started_at, active_runs, uptime_seconds, config_generation}` |
+| `GET` | `/agent/tools` | tool inventory from core |
+| `GET` | `/skills` | discovered skills |
+
+#### Monitoring
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/monitoring/health` | system health |
+| `GET` | `/monitoring/metrics` | metrics snapshot |
+| `GET` | `/monitoring/logs` | ring-buffer logs |
+| `GET` | `/monitoring/runs` | run history |
+
+#### Autonomous daemon
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/autonomous/status` | daemon state |
+| `GET` | `/autonomous/health` | latest health check |
+| `GET` | `/autonomous/health/history` | history |
+| `POST` | `/autonomous/health/run` | run a health check now |
+| `POST` | `/autonomous/maintenance/run` | run maintenance |
+| `POST` | `/autonomous/recovery/run` | run boot recovery |
+| `GET` | `/autonomous/issues` | open issues |
+| `POST` | `/autonomous/issues/{id}/acknowledge` | |
+| `POST` | `/autonomous/issues/{id}/resolve` | |
+| `POST` | `/autonomous/issues/{id}/propose-fix` | |
+| `GET` | `/autonomous/issues/{id}/suggestions` | |
+| `POST` | `/autonomous/suggestions/{id}/accept` | |
+| `POST` | `/autonomous/suggestions/{id}/dismiss` | |
+| `POST` | `/autonomous/notify/test` | test email/webhook |
+| `GET` | `/autonomous/audit` | audit trail |
+| `GET` | `/autonomous/tasks` | list scheduled tasks |
+| `POST` | `/autonomous/tasks` | create |
+| `PUT` | `/autonomous/tasks/{key}` | update |
+| `DELETE` | `/autonomous/tasks/{key}` | delete |
+| `POST` | `/autonomous/tasks/{key}/enable` | |
+| `POST` | `/autonomous/tasks/{key}/disable` | |
+| `POST` | `/autonomous/tasks/{key}/run` | run now |
+| `GET` | `/autonomous/tasks/{key}/runs` | execution history |
+
+#### System
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/healthz` | liveness, **no auth** |
+| `GET` | `/readyz` | readiness |
+| `GET` | `/version` | backend version, protocol version |
+
+---
+
+## File structure
+
+```
+claudio-backend/
+├── pyproject.toml                  deps + "only the engine knows ADK" contract
+└── src/claudio_backend/
+    ├── __init__.py
+    ├── engine/
+    │   ├── __init__.py             exports AdkEngine, create_engine
+    │   └── adk_engine.py           ★ the ADK implementation (519 lines)
+    ├── runs/
+    │   └── __init__.py             placeholder — manager.py not yet ported
+    ├── api/
+    │   └── __init__.py             placeholder — routes not yet ported
+    └── (nothing else yet)
+```
+
+Planned layout once the port is complete:
+
+```
+src/claudio_backend/
+├── engine/          ADK engine            ← the ONLY package importing ADK
+├── runs/            RunManager, budgets, fan-out
+├── api/
+│   ├── deps.py      require_auth, ApiError
+│   ├── system.py    healthz / readyz / version
+│   ├── chat.py      chat stream + run control
+│   ├── approvals.py human-in-the-loop
+│   ├── sessions.py
+│   ├── config.py
+│   ├── files.py
+│   ├── workspace.py
+│   ├── management.py
+│   ├── monitoring.py
+│   ├── tasks.py
+│   └── autonomous.py
+├── daemon/          health checks, maintenance, cron
+└── app.py           FastAPI assembly
+```
+
+---
+
+## Development
+
+```bash
+cd claudio-backend
+python -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+
+# The engine imports against core's source tree:
+PYTHONPATH=src:../claudio-core/src python -c "
+from claudio_backend.engine import create_engine
+from claudio_core import AppConfig, Database
+import pathlib, tempfile
+db = Database(pathlib.Path(tempfile.mkdtemp()) / 't.db')
+print(type(create_engine(AppConfig(), db)).__name__)   # AdkEngine
+"
+
+.venv/bin/lint-imports    # only the engine knows about ADK
+```
+
+---
+
+## ADK integration notes
+
+Facts established empirically against `google-adk` 2.12.0. Several contradict
+the documentation and cost real time to discover.
+
+| Thing | Reality |
+|---|---|
+| `ResumabilityConfig` location | `google.adk.apps._configs` — **not** `google.adk.apps.resumability_config`, which does not exist |
+| `App` fields | `name`, `root_agent`, `plugins`, `events_compaction_config`, `context_cache_config`, `resumability_config` |
+| OpenAI chat-completions model | `google.adk.integrations.openai.OpenAILlm` |
+| `OpenAILlm` fields | `model` (default `gpt-4o`), `max_tokens` (4096), `api_key` (str \| Callable \| AsyncCallable \| None), `base_url`, `client` |
+| Extras | `OpenAILlm` needs the `[openai]` extra. `LiteLlm` needs `[extensions]` and raises `ImportError` otherwise |
+| `Runner.__init__` | `(*, app, app_name, agent, node, plugins, artifact_service, session_service, memory_service, credential_service, plugin_close_timeout=5.0, auto_create_session=False)` |
+| `Runner.run_async` | `(*, user_id, session_id, invocation_id, new_message, state_delta, run_config, yield_user_message, abort_signal)` |
+| `SqliteSessionService` | `SqliteSessionService(db_path: str)`; `create_session`, `get_session`, `append_event`, `close`, `flush`, `get_user_state`, `list_sessions` |
+| `EventActions` | `skip_summarization`, `state_delta`, `artifact_delta`, `transfer_to_agent`, `transfer_reason`, `escalate`, `requested_auth_configs`, `requested_tool_confirmations`, `compaction`, `end_of_agent`, `agent_state`, `rewind_before_invocation_id`, `route`, `render_ui_widgets`, `set_model_response` |
+| `ToolConfirmation` | `hint: str`, `confirmed: bool`, `payload: Any` |
+| `google.adk.workflow` | `BaseNode`, `START`, `DEFAULT_ROUTE`, `Edge`, `FunctionNode`, `JoinNode`, `Node`, `node`, `RetryConfig`, `Workflow`, `NodeTimeoutError` |
+| `@node(...)` kwargs | `node_like`, `name`, `rerun_on_resume`, `retry_config`, `timeout`, `parallel_worker`, `max_parallel_workers`, `auth_config`, `require_confirmation`, `parameter_binding='state'` |
+| `BaseLlm` | abstract `async def generate_content_async(self, llm_request, stream=False)`; subclassing requires declaring `capabilities` outright — the name-based fallback emits `FutureWarning` |
+| `LlmResponse` | `content`, `partial`, `turn_complete`, `finish_reason`, `error_code`, `error_message`, `interrupted`, `usage_metadata`, `custom_metadata` |
+| `google.genai.types.Part` | `text`, `function_call`, `function_response`, `thought`, `thought_signature`, `tool_call`, `tool_response`, `inline_data`, `media_resolution` |
+| `FunctionDeclaration` | no `.required` attribute; `required` lives inside `parameters_json_schema` |
+| `openai` version range | `google-adk[openai]` requires `openai>=2.20,<3`. `openai-agents 0.23.1` requires `openai>=3.0.0,<4`. The two are mutually exclusive on paper. |
+
+### The `openai` version conflict
+
+`claudio-backend` depends on `google-adk[openai]`, which pins `openai<3`. The
+legacy engine being replaced depends on `openai-agents`, which pins `openai>=3`.
+A clean dependency resolve therefore cannot install both.
+
+This matters only during the transition, for the A/B harness, which needs both
+engines in one interpreter. In practice `claudio-backend/.venv` resolves to
+`openai 2.54.0` and the legacy `openai-agents` path still works — the conflict
+is over-cautious metadata rather than a real runtime incompatibility, because
+`openai-agents` uses chat-completions APIs that exist in both. But pip will
+report a conflict, and a fresh `pip install` of a project that requires both will
+refuse to resolve.
+
+Once step 2b replaces the legacy `Runner` calls with `RunEngine.stream()`, the
+`openai-agents` dependency disappears and so does the conflict.
+
+Warnings to expect and ignore:
+
+- `[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled`
+  (from `llm_request.py`)
+- `Skipping missing token usage metadata for agent X and model Y` — emitted when
+  a stub model returns no usage
+
+### Durability caveat
+
+ADK's own `ResumabilityConfig` docstring states: *"ADK resumes the invocation
+in a best-effort manner: tool call to resume needs to be idempotent because we
+only guarantee an at-least-once behavior... Any temporary / in-memory state
+will be lost upon resumption."*
+
+That is **less** than the `RunState` persistence Claudio already hand-rolled.
+ADK is not a durability upgrade. The reasons for the migration are the workflow
+primitives and the vendor neutrality, not durability — and Claudio's own
+budget, allowlist, input-filter and compaction layers must be kept because ADK
+supplies none of them.

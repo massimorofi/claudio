@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudio-backend"
+version = "0.1.0"
+description = "Claudio's ADK-based backend: wires claudio-core to Google ADK and FastAPI."
+requires-python = ">=3.11"
+dependencies = [
+    "claudio-core",
+    "google-adk[openai]>=2.0,<3",
+    "fastapi>=0.133",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.12",
+    "pyyaml>=6.0",
+    "aiosqlite>=0.21",
+    "httpx>=0.27",
+    "croniter>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "import-linter>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# --- Contract enforcement -------------------------------------------------
+# Only the engine may touch ADK. Everything else (API routes, run
+# orchestration) goes through claudio_core's neutral protocol, so swapping the
+# engine later touches one package rather than the whole backend.
+[tool.importlinter]
+root_packages = ["claudio_backend"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "only the engine knows about ADK"
+type = "forbidden"
+source_modules = ["claudio_backend.api", "claudio_backend.runs"]
+forbidden_modules = ["google", "litellm", "langgraph", "semantic_kernel"]

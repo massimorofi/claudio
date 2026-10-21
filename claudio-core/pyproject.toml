@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudio-core"
+version = "0.1.0"
+description = "Claudio's framework-free core: storage, settings, tools, safety, event protocol."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.8",
+    "pyyaml>=6.0",
+    "aiosqlite>=0.20",
+    "httpx>=0.27",
+    "croniter>=2.0",
+    "pypdf>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "import-linter>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# --- Contract enforcement -------------------------------------------------
+# The one rule this whole refactor rests on: claudio_core must not know that any
+# agent framework exists. `lint-imports` fails the build if it catches one.
+[tool.importlinter]
+root_packages = ["claudio_core"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "core is framework-free"
+type = "forbidden"
+source_modules = ["claudio_core"]
+# Top-level module names only: import-linter rejects subpackages of external
+# packages. `google` is enough — core has no legitimate use of any namespace
+# under it, and ADK lives at google.adk.
+forbidden_modules = [
+    "agents",
+    "google",
+    "openai",
+    "litellm",
+    "langgraph",
+    "semantic_kernel",
+]

@@ -1,0 +1,245 @@
+"""Fix proposal + execution for the autonomous action layer.
+
+The agent reads a detected issue and proposes ONE specific shell command that
+should fix it, with an explanation and a risk assessment. The operator reviews
+the *exact* command and accepts or dismisses it. On accept the command runs (as
+the backend's user), is recorded in the audit log, and the health check is
+re-run so the operator can see whether the issue is actually resolved.
+
+Safety model (the operator chose "agent proposes each command"):
+  * The human reviews the literal command string before it runs — that review is
+    the primary gate.
+  * A small catastrophic blocklist is a backstop: commands that are unambiguously
+    destructive to the whole system are refused even if approved. This is a net
+    under the human review, not a substitute for it.
+  * Every execution is written to the audit log with its exit code and output.
+
+The proposal call goes through ``claudio_core.openai_chat_completion`` — a
+framework-free chat-completions client — rather than a bound SDK client, so this
+module carries no agent-framework dependency.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from dataclasses import dataclass, asdict
+from typing import Any
+
+from claudio_core.llm import openai_chat_completion
+from claudio_core.settings import AppConfig
+
+logger = logging.getLogger(__name__)
+
+# Commands that are refused outright regardless of approval. This is a backstop
+# against the worst hallucinations, not a complete safety story — the operator's
+# review of the exact command is the real gate.
+_CATASTROPHIC_PATTERNS = [
+    r"\brm\s+-[a-z]*r[a-z]*f\s+/(\s|$)",   # rm -rf /
+    r"\brm\s+-[a-z]*f[a-z]*r\s+/(\s|$)",   # rm -fr /
+    r"\bmkfs(\.\w+)?\b",                    # mkfs.*
+    r"\bdd\b.*\bof=/dev/[a-z]+\b",          # dd of=/dev/sdX
+    r":\(\)\s*\{\s*:\|:\&\s*\}\s*;",       # fork bomb
+    r"\bchmod\s+-R\s+777\s+/(\s|$)",        # chmod -R 777 /
+    r"\bshutdown\b",
+    r"\binit\s+0\b",
+    r">\s*/dev/sd[a-z]\b",                  # redirect onto a raw disk
+]
+_CATASTROPHIC_RE = [re.compile(p) for p in _CATASTROPHIC_PATTERNS]
+
+
+@dataclass
+class FixProposal:
+    command: str
+    explanation: str
+    risk: str = "low"          # low | medium | high
+    reversible: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _is_catastrophic(command: str) -> bool:
+    return any(rx.search(command) for rx in _CATASTROPHIC_RE)
+
+
+def _ensure_sudo_stdin(command: str) -> str:
+    """Make a leading ``sudo`` read its password from stdin (``-S``).
+
+    The agent proposes a command like ``sudo journalctl --vacuum-size=100M``.
+    Run non-interactively, plain ``sudo`` demands a TTY and fails. ``-S`` tells
+    sudo to read the password from stdin instead, which is where we pipe it.
+    Commands that don't start with sudo are returned unchanged.
+    """
+    s = command.lstrip()
+    if s.startswith("sudo "):
+        rest = s[5:].lstrip()
+        first = rest.split(None, 1)[0] if rest else ""
+        if first == "-S":  # already has it
+            return command
+        return f"sudo -S {rest}"
+    return command
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    """Parse a JSON object out of a model response that may be fenced or padded."""
+    text = text.strip()
+    # Strip common markdown fences.
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Fall back to the first {...} block.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+    raise ValueError("model did not return a JSON object")
+
+
+_PROMPT = """You are a Linux server repair assistant. A health check found this issue on an Ubuntu host.
+
+Issue title: {title}
+Severity: {severity}
+Evidence:
+{detail}
+
+Propose exactly ONE shell command that will fix this issue. Think about what the evidence actually shows and pick the single most appropriate, safe remediation.
+
+Respond with ONLY a JSON object, no prose, in this exact shape:
+{{"command": "<the exact shell command>", "explanation": "<what it does and why it fixes this issue>", "risk": "<low|medium|high>", "reversible": <true or false>}}
+
+Rules:
+- One command only. No chained destructive operations.
+- If the fix needs elevated privileges, prefix with sudo.
+- Prefer reversible, low-risk actions. If no safe automated fix exists, set risk to "high" and explain that a human should handle it manually.
+"""
+
+
+async def propose_fix(issue: dict[str, Any], config: AppConfig) -> FixProposal:
+    """Ask the LLM for a single fix command for the given issue."""
+    prompt = _PROMPT.format(
+        title=issue.get("title", ""),
+        severity=issue.get("severity", ""),
+        detail=issue.get("detail", "") or issue.get("summary", ""),
+    )
+    raw = await openai_chat_completion(
+        base_url=config.llm.base_url,
+        model=config.llm.model,
+        api_key=config.llm.api_key or "local",
+        messages=[
+            {"role": "system", "content": "You propose safe, specific Linux remediation commands and nothing else."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=1024,
+        timeout=float(config.llm.timeout_seconds),
+    )
+    data = _extract_json(raw)
+    command = str(data.get("command", "")).strip()
+    if not command:
+        raise ValueError("proposal contained no command")
+    if _is_catastrophic(command):
+        raise ValueError(f"refused catastrophic command: {command}")
+    risk = str(data.get("risk", "low")).lower()
+    if risk not in ("low", "medium", "high"):
+        risk = "medium"
+    reversible = bool(data.get("reversible", True))
+    return FixProposal(
+        command=command,
+        explanation=str(data.get("explanation", "")).strip(),
+        risk=risk,
+        reversible=reversible,
+    )
+
+
+async def execute_fix(
+    command: str,
+    password: str | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """Run the approved command and capture its result. No interpretation — the
+    operator already approved this exact string.
+
+    If ``password`` is given and the command starts with ``sudo``, the command is
+    rewritten to ``sudo -S`` and the password is fed through stdin so sudo can
+    authenticate without a TTY. The password is never logged, never stored, and
+    never written into the returned output: ``sudo -S`` reads it from stdin
+    without echoing it back.
+    """
+    if _is_catastrophic(command):
+        return {
+            "ok": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": f"Refused: command matches a catastrophic pattern: {command}",
+            "duration_ms": 0,
+        }
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+
+    # Only feed a password when the command actually starts with sudo; otherwise
+    # the password would just sit in the command's stdin (or worse, be consumed
+    # by a command that reads stdin for its own reasons).
+    feed: bytes | None = None
+    run_cmd = command
+    if password:
+        if command.lstrip().startswith("sudo "):
+            run_cmd = _ensure_sudo_stdin(command)
+            feed = (password + "\n").encode()
+        # No leading sudo: ignore the password rather than risk leaking it into
+        # an unrelated stdin.
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            run_cmd,
+            stdin=asyncio.subprocess.PIPE if feed is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as e:
+        return {
+            "ok": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": f"Failed to start command: {e}",
+            "duration_ms": int((loop.time() - start) * 1000),
+        }
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=feed), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return {
+            "ok": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout}s",
+            "duration_ms": int((loop.time() - start) * 1000),
+        }
+    out = stdout.decode(errors="replace") if stdout else ""
+    err = stderr.decode(errors="replace") if stderr else ""
+    # Keep the audit/output bounded.
+    max_chars = 8000
+    if len(out) > max_chars:
+        out = out[:max_chars] + f"\n[clipped: {len(out) - max_chars} chars omitted]"
+    if len(err) > max_chars:
+        err = err[:max_chars] + f"\n[clipped: {len(err) - max_chars} chars omitted]"
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "stdout": out,
+        "stderr": err,
+        "duration_ms": int((loop.time() - start) * 1000),
+    }
