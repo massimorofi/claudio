@@ -7,6 +7,8 @@ import {
   ChevronRight,
   Loader2,
   Paperclip,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Send,
   Trash2,
@@ -26,6 +28,8 @@ const PLAN_SPLIT_KEY = 'claudio.planSplitPct'
 const SPLIT_MIN_PCT = 20
 const SPLIT_MAX_PCT = 80
 const SPLIT_DEFAULT_PCT = 45
+// localStorage key remembering whether the chat sidebar is collapsed.
+const CHAT_SIDEBAR_COLLAPSED_KEY = 'claudio.chatSidebar.collapsed'
 import CompletionStatus from './CompletionStatus'
 import ApprovalCard from './ApprovalCard'
 
@@ -70,6 +74,26 @@ export default function ChatView() {
   })
   const splitRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
+  // Whether the chat sidebar is collapsed to a thin strip, mirroring the app's
+  // main navigation sidebar. The choice is remembered across reloads.
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(CHAT_SIDEBAR_COLLAPSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      const next = !c
+      try {
+        localStorage.setItem(CHAT_SIDEBAR_COLLAPSED_KEY, next ? '1' : '0')
+      } catch {
+        /* storage may be unavailable; collapse still works for the session */
+      }
+      return next
+    })
 
   useEffect(() => {
     try {
@@ -339,65 +363,98 @@ export default function ChatView() {
 
   return (
     <div className="flex h-full">
-      {/* Sidebar (desktop): sessions on top, current plan below */}
-      <div className="hidden lg:flex w-72 flex-col border-r border-black/10 bg-white">
-        <div className="p-3">
-          <button
-            onClick={newChat}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white"
-          >
-            <Plus size={16} /> New chat
-          </button>
-        </div>
-
-        <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-          {/* Top panel: session list */}
-          <div
-            className="scroll-thin min-h-0 overflow-y-auto px-2 pb-3 space-y-1"
-            style={{ flexGrow: 100 - planPct }}
-          >
-            {(sessionsQ.data?.sessions ?? []).map((s) => (
-              <div
-                key={s.id}
-                className={`group flex items-center gap-2 rounded-lg px-3 py-2 text-sm cursor-pointer ${
-                  s.id === sessionId ? 'bg-brand/10 text-brand' : 'hover:bg-black/5'
-                }`}
-                onClick={() => openSession(s.id)}
+      {/* Sidebar (desktop): sessions on top, current plan below. Collapsible
+          like the app's main navigation sidebar; the choice is remembered. */}
+      <div
+        className={`hidden lg:flex flex-col border-r border-black/10 bg-white transition-[width] duration-200 ${
+          collapsed ? 'w-14' : 'w-72'
+        }`}
+      >
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-2 p-2">
+            <button
+              onClick={toggleCollapsed}
+              title="Expand sidebar"
+              className="rounded-lg p-2 text-black/40 hover:bg-black/5 hover:text-black/70"
+            >
+              <PanelLeftOpen size={18} />
+            </button>
+            <button
+              onClick={newChat}
+              title="New chat"
+              className="rounded-lg p-2 text-black/50 hover:bg-black/5 hover:text-black/70"
+            >
+              <Plus size={18} />
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 p-3">
+              <button
+                onClick={newChat}
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white"
               >
-                <span className="flex-1 truncate">{s.title || 'Untitled'}</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    deleteSession(s.id)
-                  }}
-                  className="opacity-0 group-hover:opacity-100 text-black/30 hover:text-red-500"
-                >
-                  <Trash2 size={14} />
-                </button>
+                <Plus size={16} /> New chat
+              </button>
+              <button
+                onClick={toggleCollapsed}
+                title="Collapse sidebar"
+                className="rounded-lg p-1.5 text-black/40 hover:bg-black/5 hover:text-black/70"
+              >
+                <PanelLeftClose size={18} />
+              </button>
+            </div>
+
+            <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
+              {/* Top panel: session list */}
+              <div
+                className="scroll-thin min-h-0 overflow-y-auto px-2 pb-3 space-y-1"
+                style={{ flexGrow: 100 - planPct }}
+              >
+                {(sessionsQ.data?.sessions ?? []).map((s) => (
+                  <div
+                    key={s.id}
+                    className={`group flex items-center gap-2 rounded-lg px-3 py-2 text-sm cursor-pointer ${
+                      s.id === sessionId ? 'bg-brand/10 text-brand' : 'hover:bg-black/5'
+                    }`}
+                    onClick={() => openSession(s.id)}
+                  >
+                    <span className="flex-1 truncate">{s.title || 'Untitled'}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        deleteSession(s.id)
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-black/30 hover:text-red-500"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
 
-          {/* Draggable divider */}
-          <div
-            onPointerDown={onSplitDown}
-            onPointerMove={onSplitMove}
-            onPointerUp={onSplitUp}
-            onPointerCancel={onSplitUp}
-            className="relative h-2 shrink-0 cursor-row-resize bg-black/[0.03] hover:bg-brand/20"
-            title="Drag to resize"
-          >
-            <div className="absolute left-1/2 top-1/2 h-0.5 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/15" />
-          </div>
+              {/* Draggable divider */}
+              <div
+                onPointerDown={onSplitDown}
+                onPointerMove={onSplitMove}
+                onPointerUp={onSplitUp}
+                onPointerCancel={onSplitUp}
+                className="relative h-2 shrink-0 cursor-row-resize bg-black/[0.03] hover:bg-brand/20"
+                title="Drag to resize"
+              >
+                <div className="absolute left-1/2 top-1/2 h-0.5 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/15" />
+              </div>
 
-          {/* Bottom panel: current plan */}
-          <div
-            className="min-h-0 bg-black/[0.015]"
-            style={{ flexGrow: planPct }}
-          >
-            <PlanPanel items={state.plan} streaming={state.streaming} />
-          </div>
-        </div>
+              {/* Bottom panel: current plan */}
+              <div
+                className="min-h-0 bg-black/[0.015]"
+                style={{ flexGrow: planPct }}
+              >
+                <PlanPanel items={state.plan} streaming={state.streaming} />
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Chat column */}
