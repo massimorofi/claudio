@@ -333,7 +333,10 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
     case 'run_restarting': {
       // The failed attempt is being retried (or compacted / fallen back).
       // Discard its partial output so the retry re-streams into a clean slate:
-      // keep everything up to and including the last user message.
+      // keep everything up to and including the last user message. The plan is
+      // NOT cleared here -- it is durable task state (persisted in the session's
+      // todos), not partial output. Wiping it left the plan panel empty until
+      // the next todo_write, which read as "the plan stopped updating".
       let lastUser = -1
       for (let i = state.items.length - 1; i >= 0; i--) {
         if (state.items[i].kind === 'user') {
@@ -346,7 +349,6 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
         items: state.items.slice(0, lastUser + 1),
         streaming: true,
         error: null,
-        plan: null,
       }
     }
     case 'run_compacted': {
@@ -382,14 +384,37 @@ function parsePlan(raw: string | unknown): PlanItem[] | null {
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     list = (parsed as Record<string, unknown>).items
   }
+  // Local models sometimes hand the items array as a JSON *string* rather than
+  // a real array. Try to parse that too before giving up, so the call-time plan
+  // preview doesn't silently drop a perfectly good list.
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list)
+    } catch {
+      return null
+    }
+  }
   if (!Array.isArray(list)) return null
   const items: PlanItem[] = []
   for (const entry of list) {
     if (!entry || typeof entry !== 'object') continue
-    const content = String((entry as Record<string, unknown>).content ?? '').trim()
-    const status = String((entry as Record<string, unknown>).status ?? 'pending')
+    const rec = entry as Record<string, unknown>
+    // Match the backend's permissive content extraction (planning.py): try the
+    // canonical key first, then the aliases the backend accepts.
+    let content = ''
+    for (const key of ['content', 'title', 'task', 'text', 'description']) {
+      const val = rec[key]
+      if (typeof val === 'string' && val.trim()) {
+        content = val.trim()
+        break
+      }
+    }
     if (!content) continue
-    if (status !== 'pending' && status !== 'in_progress' && status !== 'done') continue
+    // Coerce an unknown status to 'pending' rather than dropping the item, so
+    // the preview matches the normalized list the tool persists.
+    const rawStatus = String(rec.status ?? 'pending')
+    const status =
+      rawStatus === 'in_progress' || rawStatus === 'done' ? rawStatus : 'pending'
     items.push({ content, status })
   }
   return items.length > 0 ? items : null

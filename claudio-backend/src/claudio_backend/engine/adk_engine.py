@@ -52,6 +52,7 @@ from claudio_core.engine import EngineError, ModelSpec, RunRequest
 from claudio_core.events import EventName
 from claudio_core.instructions import build_static_instructions, render_nudges
 from claudio_core.settings import AppConfig
+from claudio_core.skill_loader import build_skill_functions, scan_skills
 from claudio_core.tools.registry import TOOL_FUNCTIONS, TOOL_META, needs_approval_for
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,22 @@ def adk_state_path(request: RunRequest) -> Path:
     return parent / f"adk-{request.session_id}.db"
 
 
+def resolve_skills_dir(config: AppConfig) -> Path:
+    """Resolve ``agent.skills_dir`` to an absolute path.
+
+    A relative ``skills_dir`` is anchored to the backend base directory (the
+    folder that contains ``src/``), derived from this module's own location so
+    it does not depend on the process cwd. An absolute ``skills_dir`` is used
+    as-is. Mirrors ``api.management._resolve_skills_dir`` so the engine and the
+    ``/skills`` endpoint agree on where skills live.
+    """
+    p = Path(config.agent.skills_dir).expanduser()
+    if p.is_absolute():
+        return p
+    backend_base = Path(__file__).resolve().parents[3]
+    return (backend_base / p).resolve()
+
+
 class AdkEngine:
     """A :class:`claudio_core.engine.RunEngine` backed by Google ADK."""
 
@@ -329,10 +346,17 @@ class AdkEngine:
     def _model(self, spec: ModelSpec) -> Any:
         from google.adk.integrations.openai import OpenAILlm
 
+        # max_tokens MUST be passed explicitly. OpenAILlm defaults to 4096, and
+        # a reasoning model spends that budget on its reasoning before any
+        # answer text — so a large write_file gets truncated mid-tool-call, the
+        # truncated call arrives as plain text (not a parsed tool call), and the
+        # agent mistakes it for a final answer and stops. The configured value
+        # lives in ModelSpec; forward it to the client.
         return OpenAILlm(
             model=spec.model,
             base_url=spec.base_url,
             api_key=spec.api_key or "local",
+            max_tokens=spec.max_tokens,
         )
 
     def _build_agent(self, request: RunRequest, ctx: ToolContext) -> LlmAgent:
@@ -343,6 +367,29 @@ class AdkEngine:
             needs = needs_approval_for(TOOL_META[name], request.tools.approval_mode)
             tools.append(make_adk_tool(name, ctx, require_confirmation=needs))
 
+        # Skills use a two-tier loading strategy so the always-on prompt stays
+        # small. Tier 1 is the catalog -- skill names and one-line descriptions --
+        # which goes into the static system prompt every turn. Tier 2 is the full
+        # skill body, pulled only when the agent judges a skill relevant, via the
+        # read-only skill tools (list_skills / load_skill / read_skill_resource).
+        # The scan runs per request rather than once at startup so a skill added or
+        # edited on disk is picked up without a backend restart. If the scan
+        # fails we run with no skills rather than failing the whole run.
+        skill_entries: list[dict[str, Any]] | None = None
+        if self.config.agent.skills_enabled:
+            try:
+                scan = scan_skills(resolve_skills_dir(self.config))
+            except (OSError, ValueError) as exc:
+                logger.warning("skill scan failed: %s", exc)
+            else:
+                skill_entries = scan.entries
+                # Skill tools only read files inside the skills directory, so they
+                # never need approval regardless of the run's approval mode.
+                for skill_fn in build_skill_functions(scan).values():
+                    tools.append(
+                        FunctionTool(skill_fn, require_confirmation=False)
+                    )
+
         # The instruction is supplied as a provider rather than a fixed string so
         # the per-turn nudges (todo nag, write-first nudge) are re-evaluated on
         # every turn from the live context. A frozen string computed at run start
@@ -350,7 +397,7 @@ class AdkEngine:
         # fired and the plan never updated mid-run. The static text is built once
         # and kept first so the prompt prefix stays cacheable.
         static_instruction = build_static_instructions(
-            self.config, request.session_id, skill_entries=None
+            self.config, request.session_id, skill_entries=skill_entries
         )
 
         def _instruction_provider(_callback_context: Any) -> str:

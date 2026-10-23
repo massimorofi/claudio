@@ -33,6 +33,16 @@ AREA_SLUGS = [
     "information-gathering",
 ]
 
+# Claudio's own operational self-management skills (renamed from super-* to
+# claudio-*). These are a distinct set from the seven merged area skills: they
+# describe how Claudio checks, configures and schedules himself.
+CLAUDIO_OPERATIONAL_SLUGS = [
+    "claudio-autonomy",
+    "claudio-self-check",
+    "claudio-self-config",
+    "claudio-self-scheduling",
+]
+
 # Frontmatter keys Claudio's loader accepts.
 ALLOWED_FRONTMATTER_KEYS = {
     "name",
@@ -69,6 +79,14 @@ def _installed_area_slugs() -> list[str]:
         return []
     present = {p.name for p in SKILLS_DIR.iterdir() if p.is_dir()}
     return [slug for slug in AREA_SLUGS if slug in present]
+
+
+def _installed_claudio_slugs() -> list[str]:
+    """claudio-* operational slugs actually present as folders."""
+    if not SKILLS_DIR.is_dir():
+        return []
+    present = {p.name for p in SKILLS_DIR.iterdir() if p.is_dir()}
+    return [slug for slug in CLAUDIO_OPERATIONAL_SLUGS if slug in present]
 
 
 def _require_skills() -> None:
@@ -147,6 +165,60 @@ def test_skill_description_present() -> None:
         desc = fm.get("description")
         assert isinstance(desc, str) and desc.strip(), f"{slug}: empty description"
         assert len(desc) <= 1024, f"{slug}: description exceeds 1024 chars"
+
+
+# --------------------------------------------------------------------------
+# Claudio operational self-management skills (claudio-*)
+# --------------------------------------------------------------------------
+
+def _require_claudio_skills() -> None:
+    """Skip the claudio-* tests when none of those skills are installed."""
+    if not _installed_claudio_slugs():
+        pytest.skip("No claudio-* operational skills installed.")
+
+
+def test_claudio_operational_skills_installed() -> None:
+    """All four claudio-* self-management skills are present and load."""
+    _require_claudio_skills()
+    scan = scan_skills(SKILLS_DIR)
+    missing = [s for s in CLAUDIO_OPERATIONAL_SLUGS if s not in scan.skills]
+    assert not missing, f"missing claudio-* skills: {missing}"
+
+
+def test_claudio_operational_name_matches_folder() -> None:
+    _require_claudio_skills()
+    scan = scan_skills(SKILLS_DIR)
+    for slug in _installed_claudio_slugs():
+        sk = scan.skills[slug]
+        assert sk.name == sk.directory.name, (
+            f"{slug}: skill name '{sk.name}' != folder '{sk.directory.name}'"
+        )
+
+
+def test_claudio_operational_description_present() -> None:
+    _require_claudio_skills()
+    for slug in _installed_claudio_slugs():
+        fm = _read_frontmatter(SKILLS_DIR / slug / "SKILL.md")
+        desc = fm.get("description")
+        assert isinstance(desc, str) and desc.strip(), f"{slug}: empty description"
+        assert len(desc) <= 1024, f"{slug}: description exceeds 1024 chars"
+
+
+def test_claudio_operational_frontmatter_keys_allowed() -> None:
+    _require_claudio_skills()
+    for slug in _installed_claudio_slugs():
+        fm = _read_frontmatter(SKILLS_DIR / slug / "SKILL.md")
+        unknown = set(fm) - ALLOWED_FRONTMATTER_KEYS
+        assert not unknown, f"{slug}: disallowed frontmatter keys {unknown}"
+
+
+def test_claudio_operational_no_super_prefix_remains() -> None:
+    """The rename from super-* to claudio-* left no 'super' branding behind."""
+    _require_claudio_skills()
+    for slug in _installed_claudio_slugs():
+        text = (SKILLS_DIR / slug / "SKILL.md").read_text(encoding="utf-8")
+        assert "super-" not in text, f"{slug}: still contains 'super-'"
+        assert "Super" not in text, f"{slug}: still contains 'Super'"
 
 
 # --------------------------------------------------------------------------

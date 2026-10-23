@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shlex
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,11 @@ class AgentConfig(BaseModel):
     instructions_file: str | None = "instructions.md"
     instructions: str | None = None
     max_turns: int = 50
+    # When a run finishes but its task list still has open items, the agent is
+    # nudged to keep going until the plan is done. This caps how many times that
+    # auto-continuation fires in one user turn — the backstop against a model
+    # that keeps "finishing" without making progress. 0 disables it.
+    max_auto_continues: int = 10
     max_budget_usd: float = 5.0
     approval_mode: str = "on_request"  # off | on_request | always
     workspace_dir: str = "./data/workspace"
@@ -128,6 +134,25 @@ class MCPServerEntry(BaseModel):
     command: list[str] = Field(default_factory=list)
     url: str | None = None
     enabled: bool = True
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _coerce_command(cls, v: Any) -> Any:
+        """Accept a command line as a string and store it as an argv list.
+
+        The UI edits ``command`` as a single string, and sends an empty string
+        for HTTP/SSE servers where no command applies. Both arrive here as a
+        ``str``; the schema is ``list[str]``. Normalize so an empty/blank string
+        becomes ``[]`` and a populated one is split into argv tokens (quoted
+        arguments preserved). A value that is already a list passes through.
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            if not v.strip():
+                return []
+            return shlex.split(v)
+        return v
 
 
 class MCPConfig(BaseModel):

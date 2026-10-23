@@ -1,0 +1,31 @@
+# SkillMD Research: Best Audited Skills for Planning, Coding & Linux Admin
+
+**Date:** 2026-10-23
+**Source:** SkillMD registry via MCP (`https://api.skillmd.com/mcp`), 860,000+ indexed SKILL.md files
+**Method:** 40+ targeted `skillmd_search` queries + `skillmd_trending` + `skillmd_get` on 42 shortlisted skills.
+**Filter:** Only skills with `ai_audit_verdict = pass` and `audits_passed = 3` were treated as "best audited."
+
+> **Important caveat about this install:** the MCP server itself works perfectly, but
+> `claudio-backend/src/claudio_backend/supervisor.py:176` (`_warn_if_mcp_configured`)
+> states the current ADK engine **does not load MCP tools**. All SkillMD access in this
+> research was done by calling the streamable-HTTP JSON-RPC endpoint directly
+> (`smd.py`), not through the agent's tool chain.
+
+---
+
+## How SkillMD scores a skill
+
+| Field | Meaning |
+|---|---|
+| `ai_audit_verdict` | `pass` / `caution` / `warning` / `fail` / `inconclusive` |
+| `audits_passed` | Number of audit passes (3 = fully audited) |
+| `security_flags` | `docs_only`, `network_calls`, `executes_scripts`, `reads_secrets`, `untrusted_install` |
+| `craft_score` | Quality of the skill writing itself (0-100) |
+| `repo_stars` | GitHub stars of the upstream source repo (popularity proxy) |
+| `avg_rating` | Community rating (0-5) |
+| `commit_sha` | Pinned upstream commit (supply-chain provenance) |
+
+**Key finding:** 213 of the ~558 skills surfaced across all queries had `pass` + 3 audits.
+Popularity and craft are only weakly correlated — some of the best-written skills
+(craft 90-100) come from tiny repos with no stars, while some mega-star repos ship
+thin, generic skills. The rankings below weight **audit status and craft first, stars second.**

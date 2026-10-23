@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Tiny JSON-RPC client for the SkillMD streamable-HTTP MCP endpoint."""
+import json
+import sys
+import urllib.request
+
+URL = "https://api.skillmd.com/mcp"
+
+
+def call(tool, args):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args},
+    }
+    req = urllib.request.Request(
+        URL,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "User-Agent": "curl/8.5.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        raw = r.read().decode()
+    # handle SSE framing if present
+    if raw.lstrip().startswith("event:") or "\ndata: " in raw:
+        chunks = []
+        for line in raw.splitlines():
+            if line.startswith("data: "):
+                chunks.append(line[6:])
+        raw = "".join(chunks)
+    d = json.loads(raw)
+    if "error" in d:
+        return {"__error__": d["error"]}
+    res = d.get("result", {})
+    # prefer structuredContent
+    if isinstance(res, dict) and "structuredContent" in res:
+        return res["structuredContent"]
+    texts = [c.get("text", "") for c in res.get("content", []) if c.get("type") == "text"]
+    joined = "\n".join(texts)
+    try:
+        return json.loads(joined)
+    except Exception:
+        return {"__text__": joined}
+
+
+if __name__ == "__main__":
+    tool = sys.argv[1]
+    args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+    out = call(tool, args)
+    print(json.dumps(out, indent=2))

@@ -134,6 +134,21 @@ export function useChat(
         }
         return
       }
+      if (t === 'reasoning') {
+        // Reasoning is persisted to the transcript as one entry per streamed
+        // delta. Merge consecutive reasoning entries back into a single block
+        // so a restored transcript renders the same way the live stream did
+        // (the live reducer merges at chatState.ts).
+        const text = (r.content as string) ?? ''
+        if (!text) return
+        const last = items[items.length - 1]
+        if (last && last.kind === 'reasoning') {
+          items[items.length - 1] = { ...last, text: last.text + text }
+        } else {
+          items.push({ kind: 'reasoning', id: `r-${i}`, text })
+        }
+        return
+      }
       const isUser = t === 'user'
       items.push({
         kind: isUser ? ('user' as const) : ('assistant' as const),

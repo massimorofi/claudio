@@ -11,6 +11,14 @@ type TestMut = {
   data?: LlmTestResult
 }
 
+// The MCP ``command`` is an argv list on the wire but a single editable string in
+// the form. Normalize at both boundaries: join the list into a string on load,
+// split the string back into a list on save.
+const commandToString = (cmd: unknown): string =>
+  Array.isArray(cmd) ? cmd.join(' ') : ((cmd as string | undefined) ?? '')
+
+const stringToCommand = (s: string): string[] => s.split(/\s+/).filter(Boolean)
+
 export default function ConfigView() {
   const [tab, setTab] = useState<'llm' | 'agent' | 'mcp' | 'danger'>('llm')
   const [draft, setDraft] = useState<AppConfig | null>(null)
@@ -24,12 +32,35 @@ export default function ConfigView() {
   })
 
   useEffect(() => {
-    if (configQ.data && !draft) setDraft(configQ.data.config)
+    if (configQ.data && !draft) {
+      const cfg = configQ.data.config
+      setDraft({
+        ...cfg,
+        mcp: {
+          ...cfg.mcp,
+          servers: (cfg.mcp.servers ?? []).map((s) => ({
+            ...s,
+            command: commandToString(s.command),
+          })),
+        },
+      })
+    }
   }, [configQ.data, draft])
 
   const saveMut = useMutation({
-    mutationFn: (cfg: AppConfig) =>
-      api.put<{ restart_required: string[]; changed_keys: string[] }>('/config', cfg),
+    mutationFn: (cfg: AppConfig) => {
+      const payload = {
+        ...cfg,
+        mcp: {
+          ...cfg.mcp,
+          servers: (cfg.mcp.servers ?? []).map((s) => ({
+            ...s,
+            command: stringToCommand(s.command ?? ''),
+          })),
+        },
+      }
+      return api.put<{ restart_required: string[]; changed_keys: string[] }>('/config', payload)
+    },
     onSuccess: (res) => {
       const needs = (res.restart_required ?? []).length > 0
       setRestartNeeded(needs)

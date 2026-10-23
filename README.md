@@ -321,4 +321,6 @@ even though the second implementation does not.
 | [doc/core.md](./doc/core.md) | core capabilities, module-by-module API, file structure |
 | [doc/backend.md](./doc/backend.md) | engine internals, complete endpoint reference, ADK integration notes |
 | [doc/frontend.md](./doc/frontend.md) | views, SSE handling, contract mirror, build |
+| [doc/skills-and-workspace.md](./doc/skills-and-workspace.md) | where the skills directory and workspace live, path resolution, skill folder format |
+| [doc/skills-refresh-prompt.md](./doc/skills-refresh-prompt.md) | reusable prompt to refresh the curated skill set from skillmd.com, with owner/repo/credits manifest |
 | [claudio_refactoring.md](./claudio_refactoring.md) | the original migration analysis and framework comparison |

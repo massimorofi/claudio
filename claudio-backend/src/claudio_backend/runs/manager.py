@@ -79,6 +79,19 @@ CONTINUE_PROMPT = (
     "Act on what you already know; do not re-analyze it."
 )
 
+# Fed as the input when a run completed but its task list still has open items.
+# Unlike CONTINUE_PROMPT (which follows a compaction), this is a plain "you are
+# not done, keep going" nudge: the conversation is intact, the work so far is
+# real, and the agent should resume at the first unfinished step.
+AUTO_CONTINUE_PROMPT = (
+    "Your last turn ended but the task is not finished — these items are still "
+    "open: {outstanding}. Do not re-explain, re-summarize, or re-read what you "
+    "have already done. Take the next concrete action toward the first open "
+    "item right now: write the file, run the command, make the change. Keep "
+    "working through the list until every item is done, then update your task "
+    "list to mark them done."
+)
+
 WRAPUP_MAX_CHARS = 20000
 
 WRAPUP_INSTRUCTIONS = (
@@ -454,11 +467,60 @@ class RunManager:
         fallback = self.config.llm.fallback_model
         attempt = 0
         used_fallback = False
+        # Auto-continue bookkeeping. Usage is accumulated across every
+        # continuation so the single final completion reports the true total;
+        # progress is tracked so a model that keeps "finishing" without moving
+        # the task forward stops instead of looping forever.
+        budget = float(self.config.agent.max_budget_usd or 0.0)
+        max_continues = max(0, int(self.config.agent.max_auto_continues or 0))
+        total_input = 0
+        total_output = 0
+        total_cost = 0.0
+        auto_continues = 0
+        prev_outstanding: int | None = None
+        prev_files_written = 0
         while True:
             kind, data = await self._consume(record, request)
             if kind == "completed":
-                await self._finalize_completed(record, data)
-                return
+                usage = data.get("usage") or {}
+                total_input += int(usage.get("input_tokens") or 0)
+                total_output += int(usage.get("output_tokens") or 0)
+                total_cost += float(usage.get("cost_usd") or 0.0)
+                merged = {
+                    **data,
+                    "usage": {
+                        "input_tokens": total_input,
+                        "output_tokens": total_output,
+                        "cost_usd": total_cost,
+                    },
+                }
+                outstanding = await self._outstanding_todos(record.session_id)
+                if not outstanding:
+                    await self._finalize_completed(record, merged)
+                    return
+                # The model stopped with items still on its task list. Keep it
+                # going until the plan is done, stopping only on a guard: the
+                # continuation cap, no progress since the last check, or the
+                # session budget running out.
+                files_now = len(record.files_written)
+                made_progress = (
+                    prev_outstanding is None
+                    or len(outstanding) < prev_outstanding
+                    or files_now > prev_files_written
+                )
+                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                if auto_continues >= max_continues or not made_progress or over_budget:
+                    await self._finalize_completed(record, merged)
+                    return
+                auto_continues += 1
+                prev_outstanding = len(outstanding)
+                prev_files_written = files_now
+                request = self._build_request(
+                    record,
+                    AUTO_CONTINUE_PROMPT.format(outstanding=", ".join(outstanding)),
+                    None,
+                )
+                continue
             if kind == "approval":
                 await self._handle_approval(record, data)
                 return
@@ -534,11 +596,53 @@ class RunManager:
         attempt = 0
         used_fallback = False
         state = state_json
+        budget = float(self.config.agent.max_budget_usd or 0.0)
+        max_continues = max(0, int(self.config.agent.max_auto_continues or 0))
+        total_input = 0
+        total_output = 0
+        total_cost = 0.0
+        auto_continues = 0
+        prev_outstanding: int | None = None
+        prev_files_written = 0
         while True:
             kind, data = await self._consume_resume(record, request, state)
             if kind == "completed":
-                await self._finalize_completed(record, data)
-                return
+                usage = data.get("usage") or {}
+                total_input += int(usage.get("input_tokens") or 0)
+                total_output += int(usage.get("output_tokens") or 0)
+                total_cost += float(usage.get("cost_usd") or 0.0)
+                merged = {
+                    **data,
+                    "usage": {
+                        "input_tokens": total_input,
+                        "output_tokens": total_output,
+                        "cost_usd": total_cost,
+                    },
+                }
+                outstanding = await self._outstanding_todos(record.session_id)
+                if not outstanding:
+                    await self._finalize_completed(record, merged)
+                    return
+                files_now = len(record.files_written)
+                made_progress = (
+                    prev_outstanding is None
+                    or len(outstanding) < prev_outstanding
+                    or files_now > prev_files_written
+                )
+                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                if auto_continues >= max_continues or not made_progress or over_budget:
+                    await self._finalize_completed(record, merged)
+                    return
+                auto_continues += 1
+                prev_outstanding = len(outstanding)
+                prev_files_written = files_now
+                request = self._build_request(
+                    record,
+                    AUTO_CONTINUE_PROMPT.format(outstanding=", ".join(outstanding)),
+                    None,
+                )
+                state = None
+                continue
             if kind == "approval":
                 await self._handle_approval(record, data)
                 return
@@ -654,6 +758,27 @@ class RunManager:
                 record.turns_since_todo = 0
         elif name == EventName.TOOL_RESULT.value:
             self._mirror_tool_event(record, {"event": name, "data": data})
+        elif name == EventName.REASONING.value:
+            # Persist reasoning to the JSONL transcript so it survives a view
+            # remount (tab switch / reload). Without this the live reasoning is
+            # only in the SSE stream and disappears when the chat view remounts
+            # while the run is still going. Consecutive deltas are appended as
+            # separate entries and merged back into one block on the client.
+            text = data.get("text") or ""
+            if text:
+                try:
+                    self.session_store.append(
+                        record.session_id,
+                        {
+                            "type": "reasoning",
+                            "content": text,
+                            "run_id": record.run_id,
+                        },
+                    )
+                except OSError:
+                    logger.warning(
+                        "failed to persist reasoning for run %s", record.run_id
+                    )
         elif name == EventName.CONTEXT_USAGE.value:
             used = int(data.get("used_tokens") or 0)
             if used:
@@ -908,6 +1033,15 @@ class RunManager:
         except (ValueError, TypeError):
             return []
         return todos if isinstance(todos, list) else []
+
+    async def _outstanding_todos(self, session_id: str) -> list[str]:
+        """The contents of every task-list item that is not yet done."""
+        todos = await self._load_todos(session_id)
+        return [
+            t.get("content", "")
+            for t in todos
+            if isinstance(t, dict) and t.get("status") != "done"
+        ]
 
     def _close_subscribers(self, record: RunRecord) -> None:
         for q in list(record.subscribers):

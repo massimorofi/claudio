@@ -305,6 +305,81 @@ the run.
 
 ---
 
+## Skills
+
+Claudio ships a curated set of Agent Skills in `claudio-backend/skills/` — one
+merged skill per core area, plus the `claudio-*` self-management skills. The
+discovery/loading mechanism lives in `claudio_core.skill_loader`; the backend's
+job is to connect it to the running agent.
+
+### Two-tier loading strategy
+
+Loading every skill's full text into every request would burn tens of thousands
+of tokens of context whether or not any of it is relevant. Instead the prompt
+uses two tiers:
+
+- **Tier 1 — the catalog (always on).** Skill *names* and one-line
+  *descriptions* are rendered into the system prompt every turn
+  (`render_skill_block`). For the current 11-skill set this is ~2.5k tokens.
+  The model sees what exists and when each applies, without any of the body.
+- **Tier 2 — the full body (on demand).** When the agent judges a skill
+  relevant to the task at hand, it calls `load_skill(name)` and receives that
+  skill's full instructions plus its on-disk directory. Only then does the body
+  enter the context. Skills that never get called never cost anything.
+
+This keeps the always-on cost to the catalog and makes the expensive full text
+conditional on actual relevance — the minimize-context answer.
+
+### How the engine wires it
+
+In `AdkEngine._build_agent` (`engine/adk_engine.py`), on every request:
+
+1. If `agent.skills_enabled` is true, the engine scans the configured skills
+   directory (`resolve_skills_dir(config)` — a relative `agent.skills_dir` is
+   anchored to the backend base) with `scan_skills`.
+2. The scan's `entries` are passed to `build_static_instructions(...,
+   skill_entries=...)`, which renders the Tier-1 catalog into the system
+   prompt.
+3. The three read-only skill tools from `build_skill_functions(scan)` —
+   `list_skills`, `load_skill`, `read_skill_resource` — are registered on the
+   agent as ADK `FunctionTool`s with `require_confirmation=False`. They only
+   read files inside the skills directory, so they never gate on the run's
+   approval mode.
+
+The scan runs per request rather than once at startup, so a skill added or
+edited on disk is picked up without restarting the backend. If the scan fails,
+the run proceeds with no skills rather than failing.
+
+Note: the engine builds its own system instruction (static prefix + per-turn
+nudges + the skill catalog) as an ADK instruction *provider*, so the catalog
+and the nudges are re-evaluated every turn. The `RunRequest.instructions`
+field is **not** the live prompt path for the ADK engine.
+
+### The skill tools
+
+| Tool | Args | Returns |
+|---|---|---|
+| `list_skills` | — | `{ok, skills: [{name, description}]}` |
+| `load_skill` | `name` | `{ok, name, directory, instructions}` |
+| `read_skill_resource` | `name, relative_path` | `{ok, content}` — a file bundled in the skill folder |
+
+`load_skill` returns the skill's absolute `directory` because skill guides
+reference their bundled scripts by paths relative to that directory; the agent
+runs them through `run_command`. Discovery never imports or executes anything
+inside a skill folder — it only reads `SKILL.md`.
+
+### Reasoning is persisted to the transcript
+
+Reasoning (`part.thought`) is mirrored into the JSONL session transcript
+(`session_store`) as `{"type": "reasoning", "content": ...}` entries in
+`RunManager._track`. Previously reasoning lived only in the live SSE stream, so
+it vanished from the chat view on a tab switch or reload while the run was
+still going. Persisting it means a remounted view restores the reasoning that
+has streamed so far; consecutive deltas are stored as separate entries and
+merged back into one block on the client.
+
+---
+
 ## File structure
 
 ```

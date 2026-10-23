@@ -75,3 +75,6 @@ claudio-backend/config/config.yaml
 # would land in this repo as a broken gitlink, so it stays out. Delete it
 # outright once the migration is finished.
 _upstream/
+
+# --- To-do list -------------------------------------------------------
+todo/

@@ -1183,6 +1183,13 @@ reconstructs items, pairing each `tool_call` with its later `tool_result` by
 `call_id` (a map from call_id to item index), seeds `plan` from `todos`, and
 seeds the context gauge from the stored size.
 
+Reasoning is part of the transcript too: the RunManager mirrors every
+`reasoning` event into the JSONL store as `{"type": "reasoning", "content":
+...}` entries, so a remounted view (tab switch or reload while a run is still
+going) restores the reasoning that has streamed so far instead of losing it.
+Consecutive reasoning entries are merged back into a single reasoning block on
+load, matching how the live stream merges consecutive deltas.
+
 A 404 on load means the session is gone — drop the saved pointer. Any other error
 is transient — keep the saved session so a later retry can restore it.
 
@@ -1270,6 +1277,33 @@ are rejected.
 into the system prompt. The full instructions are loaded on demand by the agent
 via `load_skill`. This keeps the prompt small regardless of how many skills are
 installed.
+
+**Two tiers.** The strategy is best understood as two tiers with very different
+cost profiles:
+
+- **Tier 1 — the catalog (always on).** Names + one-line descriptions,
+  rendered into the system prompt every turn. For the current 11-skill set this
+  is ~2.5k tokens. It is the only skill content that is ever always present.
+- **Tier 2 — the full body (on demand).** A skill's full `SKILL.md` body,
+  pulled by `load_skill` only when the agent judges that skill relevant. Bodies
+  that are never requested never enter the context, so the always-on cost stays
+  at the catalog regardless of how large or numerous the skills become.
+
+The design goal is to minimize always-on context: the catalog is cheap and
+informative; the expensive full text is conditional on actual relevance rather
+than loaded up front.
+
+**Engine wiring (ADK).** In `AdkEngine._build_agent`, on every request: if
+`agent.skills_enabled` is true, the engine scans the skills directory with
+`scan_skills`, passes the scan's `entries` into `build_static_instructions(...,
+skill_entries=...)` (Tier 1), and registers the three read-only skill tools
+from `build_skill_functions(scan)` — `list_skills`, `load_skill`,
+`read_skill_resource` — as ADK `FunctionTool`s with `require_confirmation=False`
+(Tier 2). The scan runs per request, so a skill added or edited on disk is
+picked up without a backend restart; if the scan fails the run proceeds with no
+skills rather than failing. Because the engine supplies the instruction as a
+per-turn *provider*, the catalog and the dynamic nudges are re-evaluated every
+turn; `RunRequest.instructions` is not the live prompt path for the ADK engine.
 
 Caps:
 | Cap | Value |

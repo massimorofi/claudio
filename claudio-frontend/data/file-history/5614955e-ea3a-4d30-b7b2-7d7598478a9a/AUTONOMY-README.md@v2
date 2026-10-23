@@ -1,0 +1,79 @@
+# Claudio Autonomy Kit
+
+Skills and scripts that let Claudio manage himself: read and change his own
+configuration, create and schedule recurring tasks, run self-checks, and record
+what he learns.
+
+**Everything here was verified against the live backend on 2026-10-23**
+(`backend 0.1.0`, engine `adk`, protocol 1, `http://127.0.0.1:8100/api/v1`).
+
+## Start here
+
+```bash
+python3 scripts/autonomy.py        # one self-check sweep, writes a journal entry
+python3 scripts/claudio_api.py snapshot   # raw dump of all operator state
+```
+
+## The four autonomy skills
+
+| Skill | What it's for |
+|---|---|
+| **super-autonomy** | The whole loop: check → interpret → act → verify → record → learn. The authority ladder. Bootstrap procedure. |
+| **super-self-check** | Seven-check health sweep: backend, components, autonomous state, host, issues, skills, cost. |
+| **super-self-config** | Read / validate / change / roll back config via the API. Restart semantics. The `***` redaction trap. |
+| **super-self-scheduling** | Create and manage cron tasks. The invalid-cron-500 trap. The `autonomous.enabled` gate. Timeouts. |
+
+Plus the nine general skills from the earlier research pass (planning, coding,
+Linux admin) — see `SKILLMD-FINDINGS.md`.
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/claudio_api.py` | Thin API client: `get` / `post` / `put` / `delete` / `token` / `snapshot` |
+| `scripts/autonomy.py` | One sweep → report → `autonomy/journal.jsonl`. `--json`, `--check` (exit 1 on non-ok). |
+
+## Verified facts about this install
+
+These are not assumptions — they were read from the running backend:
+
+- `autonomous.enabled = **false**` → **scheduled tasks do not fire.**
+- `autonomous.report_only = **true**` → no mutations occur anywhere.
+- `agent.skills_dir = /run/media/briggen/DEV/code/ai/claudio/claudio-backend/skills` → **currently empty (0 skills loaded)**.
+- `server.expose_raw_config = false` → raw secrets not readable via API.
+- `agent.approval_mode = off`
+- 1 open issue: `apport-autoreport.service` failed + 159 journal error entries.
+- 2 failed runs recorded.
+
+**Consequence:** creating a task right now will not make it run. You must set
+`autonomous.enabled = true` first. That is a rung-5 change — ask before doing it.
+
+## Two API traps worth knowing
+
+1. **Invalid cron returns HTTP 500, not 422.** The backend's `ValueError` isn't
+   JSON-serializable. Validate cron with `croniter.is_valid()` *before* posting.
+2. **`/config` PUT is a merge-patch and `***` means "unchanged".** Secrets are
+   redacted on read and restored on save. Never hand-edit `config.yaml` while the
+   backend is running — the API writes atomically and records history; you won't.
+
+## Installing the skills
+
+Writing to the workspace does **not** make skills available to the agent. The
+backend loads from `agent.skills_dir`:
+
+```bash
+cp -r skills/* /run/media/briggen/DEV/code/ai/claudio/claudio-backend/skills/
+python3 scripts/claudio_api.py get /skills    # verify count went from 0 to 13
+```
+
+All 13 pass `claudio_core.skill_loader.scan_skills()` validation.
+
+## What is NOT done
+
+- **Skills are not installed** into the backend's skills dir (rung-4 change — left
+  for you to approve).
+- **No tasks created.** `autonomous.enabled` is false; creating tasks now would
+  produce a schedule that never fires.
+- **No config changed.** Everything above was read-only.
+- **Not covered:** notification channels (email/webhook are both disabled and were
+  not tested), the fixer/`propose-fix` flow end-to-end, and any real restore drill.
