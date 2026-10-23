@@ -17,6 +17,7 @@ from fastapi import APIRouter, File, Request, UploadFile
 from claudio_core.extract import extract_text
 
 from .deps import ApiError, require_auth
+from ..paths import resolve_workspace_dir
 
 router = APIRouter()
 
@@ -52,7 +53,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> dict:
             f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
         )
 
-    ws = Path(supervisor.config.agent.workspace_dir).resolve()
+    ws = resolve_workspace_dir(supervisor.config)
     uploads = ws / "uploads"
     uploads.mkdir(parents=True, exist_ok=True)
 

@@ -48,6 +48,7 @@ from claudio_core.settings import AppConfig
 from claudio_core.tools.registry import select_tool_names
 
 from ..errors import ApiError
+from ..paths import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +368,7 @@ class RunManager:
         *,
         model_override: str | None = None,
     ) -> RunRequest:
-        workspace = Path(self.config.agent.workspace_dir).resolve()
+        workspace = resolve_workspace_dir(self.config)
         workspace.mkdir(parents=True, exist_ok=True)
         instructions = build_instructions(
             self.config,
@@ -376,6 +377,7 @@ class RunManager:
             skill_entries=None,
             reads_since_write=record.reads_since_write,
             deliverable_written=record.deliverable_written,
+            workspace=workspace,
         )
         return RunRequest(
             run_id=record.run_id,
@@ -875,7 +877,7 @@ class RunManager:
         ]
         deliverable_written = bool(record.files_written)
         if record.files_written:
-            workspace = Path(self.config.agent.workspace_dir).resolve()
+            workspace = resolve_workspace_dir(self.config)
             deliverable_ok, deliverable_bytes, deliverable_details = _verify_deliverable(
                 list(record.files_written), workspace
             )

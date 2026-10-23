@@ -16,6 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from .deps import require_auth, ApiError
+from ..paths import resolve_workspace_dir
 
 router = APIRouter()
 
@@ -32,7 +33,7 @@ def _workspace(request: Request) -> Path:
     supervisor = request.app.state.supervisor
     if not supervisor.config:
         raise ApiError(503, "not_ready", "Configuration not loaded")
-    ws = Path(supervisor.config.agent.workspace_dir).resolve()
+    ws = resolve_workspace_dir(supervisor.config)
     ws.mkdir(parents=True, exist_ok=True)
     return ws
 

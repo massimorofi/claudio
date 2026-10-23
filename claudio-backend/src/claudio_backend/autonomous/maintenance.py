@@ -29,6 +29,7 @@ from claudio_core.safety import allowlist
 from .health import HealthChecker, CommandRunner
 from .report import TaskReport
 from .tools import DaemonContext, _elevated_exec
+from ..paths import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,7 @@ async def _run_maintenance_script(
             summary="maintenance script requires report_only=false",
         )
 
-    workspace = config.agent.workspace_dir
+    workspace = str(resolve_workspace_dir(config))
     rc, out, err = await run_shell_script(script, workspace, timeout=600.0)
 
     if rc is None:

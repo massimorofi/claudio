@@ -34,6 +34,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -44,20 +45,37 @@ from google.adk.apps._configs import ResumabilityConfig
 from google.adk.runners import Runner
 from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from google.adk.tools.function_tool import FunctionTool
+from google.adk.tools.mcp_tool import (
+    McpToolset,
+    SseConnectionParams,
+    StdioConnectionParams,
+    StreamableHTTPConnectionParams,
+)
 from google.genai import types
+from mcp import StdioServerParameters
 
 from claudio_core import Database
 from claudio_core.context import ToolContext, context_usage_payload
 from claudio_core.engine import EngineError, ModelSpec, RunRequest
 from claudio_core.events import EventName
-from claudio_core.instructions import build_static_instructions, render_nudges
-from claudio_core.settings import AppConfig
+from claudio_core.instructions import (
+    build_static_instructions,
+    render_mcp_block,
+    render_nudges,
+)
+from claudio_core.settings import AppConfig, MCPServerEntry
 from claudio_core.skill_loader import build_skill_functions, scan_skills
 from claudio_core.tools.registry import TOOL_FUNCTIONS, TOOL_META, needs_approval_for
 
 logger = logging.getLogger(__name__)
 
 CONFIRMATION_TOOL = "adk_request_confirmation"
+
+# Per-call timeout applied to MCP connections (connect + each tool/resource call).
+# ADK's own default is 5s, which is tight for a remote server that may be cold;
+# give it a more forgiving budget so a slow first connect does not drop the
+# server from the catalog.
+MCP_CONNECT_TIMEOUT_SECONDS = 30.0
 
 
 # --------------------------------------------------------------------------
@@ -333,6 +351,54 @@ def resolve_skills_dir(config: AppConfig) -> Path:
     return (backend_base / p).resolve()
 
 
+def _sanitize_mcp_prefix(raw: str) -> str:
+    """Turn a server id into a safe tool-name prefix.
+
+    Model-facing function names must match ``[A-Za-z0-9_-]``; a server id like
+    ``SkillMD.com`` is folded to lowercase with runs of other characters
+    collapsed to a single underscore.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_")
+    return cleaned or "mcp"
+
+
+def _mcp_connection_params(entry: MCPServerEntry) -> Any:
+    """Map a configured transport to the matching ADK connection params.
+
+    ``stdio`` uses the entry's command argv; ``sse`` and ``streamable_http`` use
+    its url. A bad transport or missing field raises ``ValueError`` so the
+    caller can skip that server rather than pass a malformed config to ADK.
+    """
+    transport = (entry.transport or "stdio").strip().lower()
+    if transport == "stdio":
+        if not entry.command:
+            raise ValueError(f"MCP server {entry.id!r}: stdio transport needs a command")
+        return StdioConnectionParams(
+            server_params=StdioServerParameters(
+                command=entry.command[0],
+                args=entry.command[1:],
+            ),
+            timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+        )
+    if transport == "sse":
+        if not entry.url:
+            raise ValueError(f"MCP server {entry.id!r}: sse transport needs a url")
+        return SseConnectionParams(
+            url=entry.url,
+            timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+        )
+    if transport in ("streamable_http", "streamable-http", "streamablehttp", "http"):
+        if not entry.url:
+            raise ValueError(
+                f"MCP server {entry.id!r}: streamable_http transport needs a url"
+            )
+        return StreamableHTTPConnectionParams(
+            url=entry.url,
+            timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+        )
+    raise ValueError(f"MCP server {entry.id!r}: unknown transport {entry.transport!r}")
+
+
 class AdkEngine:
     """A :class:`claudio_core.engine.RunEngine` backed by Google ADK."""
 
@@ -340,6 +406,14 @@ class AdkEngine:
         self.config = config
         self.db = db
         self._cancelled: set[str] = set()
+        # MCP toolsets are built once per (mcp-config, approval-mode) pair and
+        # reused across runs so connections pool rather than being re-opened per
+        # request. ``_mcp_key`` records what the cached toolsets were built for;
+        # ``_mcp_entries`` is the catalog (server id -> tool/resource names) that
+        # goes into the system prompt.
+        self._mcp_toolsets: list[McpToolset] = []
+        self._mcp_entries: list[dict[str, Any]] = []
+        self._mcp_key: tuple | None = None
 
     # -- construction helpers -------------------------------------------
 
@@ -360,7 +434,7 @@ class AdkEngine:
         )
 
     def _build_agent(self, request: RunRequest, ctx: ToolContext) -> LlmAgent:
-        tools: list[FunctionTool] = []
+        tools: list[Any] = []
         for name in request.tools.enabled:
             if name not in TOOL_FUNCTIONS:
                 continue
@@ -390,6 +464,12 @@ class AdkEngine:
                         FunctionTool(skill_fn, require_confirmation=False)
                     )
 
+        # MCP toolsets: each enabled server contributes its tools, which ADK
+        # injects into the model's function declarations. They are built once per
+        # (config, approval-mode) by ``_ensure_mcp`` (called from stream/resume)
+        # and reused here.
+        tools.extend(self._mcp_toolsets)
+
         # The instruction is supplied as a provider rather than a fixed string so
         # the per-turn nudges (todo nag, write-first nudge) are re-evaluated on
         # every turn from the live context. A frozen string computed at run start
@@ -397,7 +477,11 @@ class AdkEngine:
         # fired and the plan never updated mid-run. The static text is built once
         # and kept first so the prompt prefix stays cacheable.
         static_instruction = build_static_instructions(
-            self.config, request.session_id, skill_entries=skill_entries
+            self.config,
+            request.session_id,
+            skill_entries=skill_entries,
+            mcp_entries=self._mcp_entries,
+            workspace=request.workspace,
         )
 
         def _instruction_provider(_callback_context: Any) -> str:
@@ -437,9 +521,120 @@ class AdkEngine:
             run_id=request.run_id,
         )
 
+    # -- MCP -------------------------------------------------------------
+
+    def _mcp_signature(self) -> tuple:
+        """A hashable snapshot of the enabled MCP servers.
+
+        Used to decide whether the cached toolsets still match the live config:
+        if the set of enabled servers (id / transport / url / command) changes,
+        the toolsets must be rebuilt.
+        """
+        servers = [s for s in self.config.mcp.servers if s.enabled]
+        return tuple(
+            (s.id, s.transport, s.url or "", tuple(s.command)) for s in servers
+        )
+
+    async def _ensure_mcp(self, approval_mode: str) -> None:
+        """Build (or reuse) the MCP toolsets for the current config + approval.
+
+        Each enabled server becomes one ``McpToolset`` whose tools ADK injects
+        into the model's function declarations automatically. ``use_mcp_resources``
+        adds the ``load_mcp_resource`` tool; the resource names we list here go
+        into the prompt so the model knows what it can read. Tool names in the
+        catalog are prefixed to match what the model actually sees (ADK prefixes
+        the function declarations). A server whose tools fail to load is logged
+        and skipped rather than failing the run; a server that simply has no
+        readable resources keeps its tools.
+        """
+        key = (self._mcp_signature(), approval_mode)
+        if self._mcp_key == key:
+            return
+
+        # Release the previous toolsets before building the replacement set.
+        for ts in self._mcp_toolsets:
+            try:
+                await ts.close()
+            except Exception as exc:  # noqa: BLE001 - teardown is best-effort
+                logger.warning("MCP toolset close failed: %s", exc)
+
+        require = approval_mode == "always"
+        toolsets: list[McpToolset] = []
+        entries: list[dict[str, Any]] = []
+        for entry in self.config.mcp.servers:
+            if not entry.enabled:
+                continue
+            try:
+                params = _mcp_connection_params(entry)
+                prefix = _sanitize_mcp_prefix(entry.id)
+                toolset = McpToolset(
+                    connection_params=params,
+                    use_mcp_resources=True,
+                    require_confirmation=require,
+                    tool_name_prefix=prefix,
+                )
+                tools = await toolset.get_tools()
+            except Exception as exc:  # noqa: BLE001 - one bad server must not sink the run
+                logger.warning("MCP server %s failed to load: %s", entry.id, exc)
+                try:
+                    await toolset.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            # Resource listing is best-effort. A server that does not implement
+            # the resources capability answers resources/list with "Method not
+            # found"; that must not discard the server's working tools — only the
+            # catalog of readable resource names is lost.
+            try:
+                resources = await toolset.list_resources()
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "MCP server %s exposes no readable resources: %s",
+                    entry.id,
+                    exc,
+                )
+                resources = []
+            # The catalog must list the names the model actually sees. ADK
+            # prefixes every tool with ``tool_name_prefix`` when building the
+            # function declarations (``get_tools_with_prefix``), so the raw
+            # names from ``get_tools`` are not what the model can call. Mirror
+            # that prefixing here so the prompt never names a tool the model
+            # cannot invoke.
+            tool_names = [f"{prefix}_{getattr(t, 'name', '')}" for t in tools]
+            toolsets.append(toolset)
+            entries.append(
+                {
+                    "id": entry.id,
+                    "tools": tool_names,
+                    "resources": list(resources or []),
+                }
+            )
+
+        self._mcp_toolsets = toolsets
+        self._mcp_entries = entries
+        self._mcp_key = key
+        if entries:
+            logger.info(
+                "Loaded %d MCP server(s): %s",
+                len(entries),
+                ", ".join(e["id"] for e in entries),
+            )
+
+    async def close(self) -> None:
+        """Release any open MCP sessions. Safe to call repeatedly."""
+        for ts in self._mcp_toolsets:
+            try:
+                await ts.close()
+            except Exception as exc:  # noqa: BLE001 - teardown is best-effort
+                logger.warning("MCP toolset close failed: %s", exc)
+        self._mcp_toolsets = []
+        self._mcp_entries = []
+        self._mcp_key = None
+
     # -- RunEngine API ---------------------------------------------------
 
     async def stream(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
+        await self._ensure_mcp(request.tools.approval_mode)
         ctx = self._make_context(request)
         agent = self._build_agent(request, ctx)
         app_name = f"claudio-{request.session_id}"
@@ -470,6 +665,7 @@ class AdkEngine:
         self, request: RunRequest, state: Any
     ) -> AsyncIterator[dict[str, Any]]:
         pause = normalise_state(state)
+        await self._ensure_mcp(request.tools.approval_mode)
         ctx = self._make_context(request)
         agent = self._build_agent(request, ctx)
         app_name = f"claudio-{request.session_id}"

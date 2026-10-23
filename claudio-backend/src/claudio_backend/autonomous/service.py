@@ -22,6 +22,7 @@ from claudio_core.db import Database
 from .health import run_health_checks
 from .notifier import Notifier
 from .script import first_line, run_shell_script, verdict_from_exit
+from ..paths import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ class HealthService:
         record, raise an issue on warning/critical unless one is already open,
         notify only on a newly-recorded problem.
         """
-        workspace = self.config.agent.workspace_dir
+        workspace = str(resolve_workspace_dir(self.config))
         t0 = time.monotonic()
         rc, out, err = await run_shell_script(
             script, workspace, timeout=HEALTH_SCRIPT_TIMEOUT_SECONDS

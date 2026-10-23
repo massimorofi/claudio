@@ -42,6 +42,7 @@ from .tools import DaemonContext, build_daemon_tools, effective_report_only, _cl
 from .maintenance import run_maintenance
 from .recovery import run_recovery
 from .fixer import _extract_json
+from ..paths import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ class TaskRunner:
                 summary=f"task {task['key']} has no script content",
             )
 
-        workspace = Path(self.config.agent.workspace_dir).resolve()
+        workspace = resolve_workspace_dir(self.config)
         workspace.mkdir(parents=True, exist_ok=True)
         fd, script_path = tempfile.mkstemp(
             prefix=f"claudio_task_{task['key']}_", suffix=".sh", dir=str(workspace)

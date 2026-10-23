@@ -34,6 +34,7 @@ pnpm-debug.log*
 # --- Runtime data (created by Claudio while it runs) ------------------
 # SQLite database, JSONL transcripts, backend logs, pid file.
 claudio-backend/data/
+claudio-frontend/data/
 
 # Agent workspace: deliverables the agent writes, per-session file
 # backups under file-history/, and ADK session databases under .claudio/.

@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from claudio_core.file_context import compose_message_with_files
 
 from .deps import require_auth, ApiError
+from ..paths import resolve_workspace_dir
 
 router = APIRouter()
 
@@ -68,7 +69,7 @@ async def chat_stream(request: Request) -> StreamingResponse:
 
     # Build the model-facing message with any attached file contents.
     model_message, file_names = _resolve_files(
-        message, files, supervisor.config.agent.workspace_dir
+        message, files, resolve_workspace_dir(supervisor.config)
     )
 
     # Create a session if none provided.
@@ -154,7 +155,7 @@ async def chat(request: Request) -> dict:
     files = body.get("files") or []
 
     model_message, file_names = _resolve_files(
-        message, files, supervisor.config.agent.workspace_dir
+        message, files, resolve_workspace_dir(supervisor.config)
     )
 
     if not session_id:

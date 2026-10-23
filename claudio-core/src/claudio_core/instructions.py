@@ -73,18 +73,52 @@ and analyzing and never actually make the thing. Follow these rules:
    yourself and note assumptions rather than pausing to ask questions."""
 
 
+def render_mcp_block(mcp_entries: list[dict[str, Any]] | None) -> str:
+    """Render the connected-MCP-servers catalog block for the system prompt.
+
+    Each entry is ``{"id": str, "tools": list[str], "resources": list[str]}``.
+    The tool names here are advisory -- the model also receives them as real
+    function declarations -- but the resource list is genuinely useful, since
+    MCP resources are not otherwise visible to the model.
+    """
+    valid = [e for e in (mcp_entries or []) if e.get("id")]
+    if not valid:
+        return ""
+    lines = []
+    for e in valid:
+        tools = e.get("tools") or []
+        resources = e.get("resources") or []
+        tools_txt = ", ".join(tools) if tools else "(none)"
+        res_txt = ", ".join(resources) if resources else "(none)"
+        lines.append(f"- {e['id']}: tools: {tools_txt}; resources: {res_txt}")
+    return (
+        "Connected MCP servers (call their tools directly; read a resource with "
+        "the server's load_mcp_resource tool, whose name is prefixed in the tool "
+        "list below):\n" + "\n".join(lines)
+    )
+
+
 def build_static_instructions(
     config: AppConfig,
     session_id: str,
     skill_entries: list[dict[str, Any]] | None = None,
+    mcp_entries: list[dict[str, Any]] | None = None,
+    workspace: Path | None = None,
 ) -> str:
     """Assemble the parts of the system prompt that never change during a run.
 
     Split out from :func:`render_nudges` so an engine can build this once and
     reuse it across every turn, appending only the nudges as the run progresses.
     Keeping the static text first also lets the model cache the prompt prefix.
+
+    ``workspace`` is the already-resolved absolute workspace path. When omitted
+    it falls back to resolving ``agent.workspace_dir`` against the process cwd
+    (the legacy behaviour); callers that anchor the workspace themselves should
+    pass it in so the prompt's environment block and memory discovery agree
+    with the workspace the tools actually use.
     """
-    workspace = Path(config.agent.workspace_dir).resolve()
+    if workspace is None:
+        workspace = Path(config.agent.workspace_dir).resolve()
     config_dir = workspace.parent.parent if workspace.parent else workspace
 
     sections: list[str] = [BASE_IDENTITY, OPERATING_PROCEDURE]
@@ -103,6 +137,12 @@ def build_static_instructions(
     skill_block = render_skill_block(skill_entries)
     if skill_block:
         sections.append(skill_block)
+
+    # MCP servers catalog (tool names are advisory; resource names are the
+    # discovery the model actually needs).
+    mcp_block = render_mcp_block(mcp_entries)
+    if mcp_block:
+        sections.append(mcp_block)
 
     # Memory files.
     memory_files = discover_memory_files(workspace, Path(config_dir))
@@ -171,6 +211,8 @@ def build_instructions(
     skill_entries: list[dict[str, Any]] | None = None,
     reads_since_write: int = 0,
     deliverable_written: bool = False,
+    mcp_entries: list[dict[str, Any]] | None = None,
+    workspace: Path | None = None,
 ) -> str:
     """Assemble the full system prompt for a run.
 
@@ -180,7 +222,7 @@ def build_instructions(
     and freezing the nudges.
     """
     return build_static_instructions(
-        config, session_id, skill_entries
+        config, session_id, skill_entries, mcp_entries, workspace
     ) + render_nudges(
         turns_since_todo=turns_since_todo,
         reads_since_write=reads_since_write,

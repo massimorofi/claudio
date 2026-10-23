@@ -104,7 +104,6 @@ class Supervisor:
                 task_runner=self.task_runner, db=self.db, config=self.config
             )
             await self.task_scheduler.start()
-            self._warn_if_mcp_configured()
             self.state = "running"
             self.started_at = utcnow()
             logger.info("Agent runtime started")
@@ -128,6 +127,12 @@ class Supervisor:
                 for run_id in list(self.run_manager._runs.keys()):
                     if self.run_manager._runs[run_id].state == "running":
                         await self.run_manager.cancel_run(run_id)
+            # Release any MCP sessions the engine is holding open.
+            if self.engine:
+                try:
+                    await self.engine.close()
+                except Exception as e:  # noqa: BLE001 - teardown is best-effort
+                    logger.warning("Error closing engine MCP sessions: %s", e)
             if self.db:
                 await self.db.close()
         except Exception as e:  # noqa: BLE001
@@ -170,26 +175,6 @@ class Supervisor:
     @property
     def config_generation(self) -> int:
         return self._config_generation
-
-    # ---- MCP ------------------------------------------------------------
-
-    def _warn_if_mcp_configured(self) -> None:
-        """MCP servers are not wired into the current engine.
-
-        The ADK engine builds its tool set from the core tool registry only.
-        MCP servers declared in ``mcp.servers`` are therefore not loaded. This
-        is logged once at start so an operator who expects them is not left
-        wondering why their tools are missing.
-        """
-        if not self.config:
-            return
-        enabled = [s for s in getattr(self.config.mcp, "servers", []) if s.enabled]
-        if enabled:
-            logger.warning(
-                "%d MCP server(s) are configured but the current engine does not "
-                "load MCP tools; they will be ignored.",
-                len(enabled),
-            )
 
     # ---- status ---------------------------------------------------------
 

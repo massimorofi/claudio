@@ -380,6 +380,91 @@ merged back into one block on the client.
 
 ---
 
+## MCP servers
+
+External tool servers are configured under `mcp.servers` (each entry: `id`,
+`transport`, `url`/`command`, `enabled`). The engine turns every **enabled**
+server into an ADK `McpToolset` and hands it to the agent, so the server's
+tools become callable and — with `use_mcp_resources` — its resources readable.
+
+### How the engine wires it
+
+Unlike skills, MCP tools need no hand-written catalog to be *usable*: ADK calls
+the toolset's `get_tools()` and injects each MCP tool's name, description and
+JSON schema into the model's function declarations automatically. The model
+sees them natively, the same way it sees the core tools. The catalog the
+engine renders into the prompt is therefore about **resources**, which ADK does
+*not* surface to the model on its own — without a list, the agent has no idea
+what a server exposes to read.
+
+`AdkEngine._ensure_mcp(approval_mode)` builds the toolsets:
+
+1. For each enabled server, map `entry.transport` to the matching ADK
+   connection params (`_mcp_connection_params`): `stdio` →
+   `StdioConnectionParams(server_params=StdioServerParameters(command, args))`,
+   `sse` → `SseConnectionParams(url)`, `streamable_http` →
+   `StreamableHTTPConnectionParams(url)`.
+2. Construct `McpToolset(connection_params=..., use_mcp_resources=True,
+   require_confirmation=(approval_mode == "always"),
+   tool_name_prefix=_sanitize_mcp_prefix(entry.id))`. The prefix namespaces the
+   server's tools so they cannot collide with core tool names (`read_file`, …);
+   a non-alphanumeric id like `SkillMD.com` folds to `SkillMD_com`.
+3. `await toolset.get_tools()` to gather the tool names, and
+   `await toolset.list_resources()` for the resource names. The catalog lists
+   the **prefixed** tool names — the exact names the model can call — since ADK
+   prefixes the function declarations with `tool_name_prefix`. So a server tool
+   `search` under id `a` is catalogued (and callable) as `a_search`, and the
+   resource tool as `a_load_mcp_resource`.
+4. Render the catalog with `render_mcp_block` and pass it into
+   `build_static_instructions(..., mcp_entries=...)`, appended after the skill
+   block.
+
+### Built once per config generation
+
+The toolsets are built **once** and reused across runs, not per request — MCP
+connections are pooled rather than churned. `_ensure_mcp` keys the build on
+`(mcp-config-signature, approval_mode)`; if that key is unchanged it returns
+immediately. A config reload (`Supervisor.reload_config`) changes the
+signature, so the next request rebuilds against the new server list. `mcp` is
+in `AGENT_RESTART_KEYS`, so a config change that touches MCP also flows
+through the engine's restart path.
+
+`_ensure_mcp` is called at the top of `stream()` and `resume()`, before the
+agent is built, so the toolsets and catalog are always current when the agent
+is constructed.
+
+### Per-server failure skip
+
+A server whose **tools** fail to load (connection refused, bad transport,
+`get_tools()` error) is **skipped, not fatal**: the engine logs a warning,
+closes that toolset, and continues with the remaining servers. One dead server
+never takes down a run.
+
+The **resource** listing is best-effort and separate. A server that does not
+implement the MCP resources capability answers `resources/list` with "Method
+not found" — that does **not** discard the server. Its tools are kept and only
+the resource catalog is empty. (This is the common case: many MCP servers
+expose tools but no resources.) `close()` on each toolset is best-effort and
+safe to call repeatedly; `Supervisor.stop()` releases any sessions the engine
+holds open.
+
+### Approval mapping
+
+MCP tool calls follow the run's approval mode: when `approval_mode ==
+"always"`, the toolset is built with `require_confirmation=True` and every MCP
+tool call pauses for confirmation (the same pause/resume round-trip as the
+core write tools); otherwise MCP tools run freely.
+
+### Limitation: no per-server auth
+
+The `MCPServerEntry` schema carries no auth fields (no API key, bearer token,
+or OAuth). Servers that require authentication are therefore **not yet
+supported** — they will fail to connect and be skipped with a warning. Adding
+auth means extending the config schema and threading credentials into the
+connection params.
+
+---
+
 ## File structure
 
 ```

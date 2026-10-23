@@ -784,6 +784,38 @@ agent's file mutations and is the reason `rewind_files` is destructive.
 Every tool output is clipped to `agent.max_output_chars` (8000). This prevents a
 single `cat` of a large file from blowing the context window.
 
+### 9.5 MCP tools
+
+External tool servers configured under `mcp.servers` contribute their tools to
+the agent through ADK `McpToolset`s. These are **not** Claudio tools: they do
+not take `ToolContext`, do not return `{"ok": ...}`, and are not in the
+inventory above. Each enabled server's tools are injected into the model's
+function declarations by ADK itself (name, description, JSON schema), so they
+are callable like any other tool.
+
+- **Transport mapping.** `stdio` → `StdioConnectionParams`, `sse` →
+  `SseConnectionParams`, `streamable_http` → `StreamableHTTPConnectionParams`.
+  The connect timeout is `MCP_CONNECT_TIMEOUT_SECONDS` (30s).
+- **Namespacing.** Each server's tools are prefixed with a sanitized form of
+  its `id` (`_sanitize_mcp_prefix`) so they cannot collide with core tool
+  names. The catalog lists the **prefixed** names — what the model actually
+  calls — since ADK prefixes the function declarations (a tool `search` under
+  id `a` is `a_search`; the resource tool is `a_load_mcp_resource`).
+- **Approval.** MCP tool calls follow the run's approval mode: they pause for
+  confirmation when `approval_mode == "always"`, run freely otherwise.
+- **Resources.** `use_mcp_resources=True` adds a `load_mcp_resource` tool so
+  the agent can read the server's resources. The resource names are rendered
+  into the prompt catalog (`render_mcp_block`) because ADK does not surface
+  them to the model otherwise.
+- **Lifecycle.** Toolsets are built once per `(mcp-config, approval-mode)` and
+  reused across runs; a config reload rebuilds them. A server whose **tools**
+  fail to load is skipped with a warning — it never fails the run. The
+  resource listing is best-effort: a server without the resources capability
+  ("Method not found" on `resources/list`) keeps its tools with an empty
+  resource list.
+- **Limitation.** The config schema has no per-server auth fields, so servers
+  requiring authentication are not yet supported (they fail and are skipped).
+
 ---
 
 ## 10. Safety layers
@@ -1205,7 +1237,8 @@ flowchart TD
     A["BASE_IDENTITY"] --> B["OPERATING_PROCEDURE"]
     B --> C["# Environment block"]
     C --> D["Skills catalog"]
-    D --> E["Memory block"]
+    D --> D2["MCP servers catalog"]
+    D2 --> E["Memory block"]
     E --> F{"reads_since_write >= 8<br/>and nothing written?"}
     F -->|yes| G["write-first nudge"]
     F -->|no| H[""]
@@ -1232,12 +1265,17 @@ flowchart TD
    mode.
 4. **Skills catalog** — name + description per valid skill, plus an
    untrusted-content warning. Omitted when there are no valid skills.
-5. **Memory block** — discovered memory files, rendered with a header. Omitted
+5. **MCP servers catalog** — per connected server: its tool names and resource
+   names, with a note that resources load via `load_mcp_resource`. The tool
+   names are advisory (the model also gets them as real function declarations);
+   the resource list is the discovery the model actually needs. Omitted when no
+   MCP servers are connected.
+6. **Memory block** — discovered memory files, rendered with a header. Omitted
    when none found.
-6. **Write-first nudge** — fires when `reads_since_write >= 8` and nothing has
+7. **Write-first nudge** — fires when `reads_since_write >= 8` and nothing has
    been written yet. Tells the agent to stop gathering and write the deliverable
    now, and explicitly says a genuinely read-only task can ignore it.
-7. **Todo nag** — fires when `turns_since_todo >= 10`. Tells the agent to call
+8. **Todo nag** — fires when `turns_since_todo >= 10`. Tells the agent to call
    `todo_write` now and flip finished items to `done`.
 
 ### 14.2 The counters
