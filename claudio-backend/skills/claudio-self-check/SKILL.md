@@ -138,3 +138,73 @@ If you didn't run it, it goes under "Not checked", not under "ok".
 Minimum check: `/monitoring/health` + `/config` (did it apply?) +
 `restart_required` (from the PUT response) + `/skills` (did anything break?).
 A change that "worked" and a change that was *verified* are different claims.
+
+## Fixing a failed systemd unit (the complete procedure)
+
+A failed unit is not one command deep. Doing only the obvious step is what leaves
+the failure in the logs after a "successful" fix. Work through all of it:
+
+**1. Find the real unit name and the real cause.**
+```bash
+systemctl --failed --plain --no-legend --no-pager   # --plain: without it the row starts with the ● glyph
+systemctl status <unit> --no-pager                # read the exit code, not just "failed"
+systemctl cat <unit>                              # what it actually runs
+```
+`status=203/EXEC` means the executable is gone (package removed) — the unit is a
+stale leftover, not a service to repair. `status=2/INVALIDARGUMENT` after a
+timeout usually means a helper script bailed out.
+
+**2. Find what re-triggers it.** A `.service` is usually woken by a `.timer` or a
+`.path`, and stopping the service alone does nothing.
+```bash
+systemctl list-timers --all | grep <name>
+systemctl list-units --all | grep <name>
+systemctl show <unit> | grep -E 'TriggeredBy|WantedBy|RequiredBy'
+```
+When you disable or mask a service, systemd *prints* the triggering units:
+`"but its triggering units are still active: foo.timer, foo.path"`. **That line is
+the next instruction, not a warning to scroll past.**
+
+**3. Stop and mask the triggers, then the service.**
+```bash
+sudo systemctl stop    <unit>.timer <unit>.path
+sudo systemctl mask    <unit>.timer <unit>.path
+sudo systemctl stop    <unit>
+sudo systemctl mask    <unit>
+```
+
+**4. Clear the remembered failure.** Masking stops future runs; it does **not**
+clear the existing failed state. Without this the unit still shows red:
+```bash
+sudo systemctl reset-failed <unit>
+systemctl --failed --plain --no-legend --no-pager   # must print nothing
+```
+
+**5. Verify with a time-bounded query, not a line count.**
+```bash
+journalctl --since "5 min ago" -p err --no-pager
+```
+If you check `journalctl -p err -n 200` you are reading history, and old errors
+will still be there no matter how well you fixed things.
+
+## Deciding between masking and removing
+
+Masking a unit whose package has been removed leaves a permanently broken stub.
+If the software is gone (`systemctl cat` → not-found, executable missing), remove
+the leftovers properly:
+```bash
+dpkg -l | grep <pkg>              # is it still installed?
+sudo apt purge <pkg>              # removes unit files too
+sudo systemctl reset-failed       # clear everything left in memory
+```
+
+## sudo without a TTY
+
+Passwordless sudo is **not** configured on this host. Any privileged command run
+non-interactively fails with `sudo: Authentication required but not attempted`.
+Before proposing privileged fixes, check:
+```bash
+sudo -n true 2>&1 && echo "passwordless OK" || echo "needs password"
+```
+If it needs a password, a fix that requires root cannot be executed by the agent
+at all — hand the exact command to the operator instead of iterating on it.

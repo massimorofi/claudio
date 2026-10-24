@@ -71,6 +71,31 @@ def _is_catastrophic(command: str) -> bool:
     return any(rx.search(command) for rx in _CATASTROPHIC_RE)
 
 
+async def _loaded_units() -> set[str]:
+    """Units systemd currently knows about (including not-found-but-loaded ones).
+
+    ``systemctl cat`` only answers for units that have a unit *file* on disk.
+    A stale failed unit whose package was removed has no file, so ``cat`` fails
+    even though the unit is very much present in systemd's state and is exactly
+    what ``reset-failed`` must target. ``list-units --all`` covers that case.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "list-units", "--all", "--no-legend", "--plain", "--no-pager",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except (OSError, asyncio.TimeoutError):
+        return set()
+    units: set[str] = set()
+    for line in out.decode(errors="replace").splitlines():
+        m = _UNIT_TOKEN_RE.search(line)
+        if m:
+            units.add(m.group(1))
+    return units
+
+
 async def _validate_command(command: str) -> tuple[bool, str]:
     """Check a proposed command can actually run on this system.
 
@@ -79,6 +104,11 @@ async def _validate_command(command: str) -> tuple[bool, str]:
     would fail the moment it is run. We probe each unit named in the command
     with ``systemctl cat`` (read-only, no privileges needed) and report any
     that don't exist.
+
+    A unit that is *loaded* in systemd counts as existing even when it has no
+    unit file: otherwise the one command that clears a stale failed unit
+    (``systemctl reset-failed <unit>``) is rejected precisely when it is
+    needed.
 
     Returns ``(ok, reason)``. ``ok`` is False only when we can positively
     identify a missing resource; commands we can't validate (no units named,
@@ -89,8 +119,12 @@ async def _validate_command(command: str) -> tuple[bool, str]:
     if not units:
         return True, ""
 
+    loaded = await _loaded_units()
+
     missing: list[str] = []
     for unit in sorted(set(units)):
+        if unit in loaded:
+            continue
         try:
             proc = await asyncio.create_subprocess_exec(
                 "systemctl",
@@ -161,16 +195,18 @@ Severity: {severity}
 Evidence:
 {detail}
 {tried}
-Propose exactly ONE shell command that will fix this issue. Think about what the evidence actually shows and pick the single most appropriate, safe remediation.
+Propose the shell commands that will actually clear this issue. Think about what the evidence shows, not what usually fixes a problem that looks like this.
 
 Respond with ONLY a JSON object, no prose, in this exact shape:
-{{"command": "<the exact shell command>", "explanation": "<what it does and why it fixes this issue>", "risk": "<low|medium|high>", "reversible": <true or false>}}
+{{"command": "<the exact shell command(s)>", "explanation": "<what it does and why it fixes this issue>", "risk": "<low|medium|high>", "reversible": <true or false>}}
 
 Rules:
-- One command only. No chained destructive operations.
-- If the fix needs elevated privileges, prefix with sudo.
-- Prefer reversible, low-risk actions. If no safe automated fix exists, set risk to "high" and explain that a human should handle it manually.
+- Put the whole remediation in "command". Several steps joined with " && " are allowed and preferred when one command cannot finish the job. Never chain anything destructive.
+- Fix the WHOLE problem, not the symptom named in the title. For a failed systemd unit that means: stop the unit, stop and mask whatever triggers it (its .timer and .path units, and any unit that Wants=/Requires= it), then clear the failure with ``systemctl reset-failed <unit>``. Masking only the .service leaves the .timer/.path firing and the failure returns.
+- If the evidence contains a warning from the tool you just ran (e.g. "its triggering units are still active: X, Y"), treat it as the specification for the next step and address those exact units.
+- If the unit is reported "not-found", it is still loaded in systemd and ``reset-failed`` is the correct way to clear it. Do not avoid the unit name just because its package was removed.
 - Only reference systemd units, files, paths and services that actually exist on this host. Do not invent unit names.
+- If no safe automated fix exists, set risk to "high" and explain that a human should handle it manually.
 """
 
 

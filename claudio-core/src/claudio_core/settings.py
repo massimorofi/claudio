@@ -200,6 +200,10 @@ class HealthCheckConfig(BaseModel):
     # Backup freshness (see §9.1). Empty backup_path disables the check.
     backup_path: str = ""
     backup_max_age_hours: float = 26.0
+    # How far back the journal check looks. MUST be a time window, not a line
+    # count: a fixed ``-n 200`` window returns days of *historical* errors, so a
+    # perfectly successful fix never turns the monitor green.
+    journal_lookback_minutes: int = 15
     # The health check as an editable shell script. When non-empty it is the
     # source of truth: the script runs instead of the built-in Python diagnostics
     # and its exit code decides the verdict (0 = ok, non-zero = critical). Edit it

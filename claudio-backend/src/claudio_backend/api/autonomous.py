@@ -254,8 +254,17 @@ async def accept_suggestion(
         resolved = True
 
     # If the fix didn't clear the issue, keep the agent working rather than
-    # stopping: propose a different fix (bounded by max_fix_attempts) so the
-    # operator gets a fresh fix to try instead of a dead end.
+    # stopping: propose a different fix so the operator gets something new to
+    # try instead of a dead end.
+    #
+    # Two things were wrong here before:
+    #  * the budget counted *every* suggestion row, including ones merely
+    #    proposed and never run, so three proposals (even undismissed ones)
+    #    silently exhausted the issue and no further fix was ever offered;
+    #  * the feedback handed back to the model was the generic string "ran but
+    #    the issue is still present", which threw away the command's actual
+    #    stderr — the very text in which systemd said "its triggering units are
+    #    still active: apport-autoreport.timer, apport-autoreport.path".
     next_suggestion = None
     if not resolved:
         issue = await supervisor.db.get_issue(issue_id)
@@ -265,16 +274,29 @@ async def accept_suggestion(
                 supervisor.config.autonomous, "max_fix_attempts", fixer.MAX_FIX_ATTEMPTS
             )
         )
-        if issue and len(prior) < max_attempts:
+        # Only commands that were actually executed consume the budget.
+        executed = [s for s in prior if s.get("executed_at")]
+        if issue and len(executed) < max_attempts:
             tried: list[tuple[str, str]] = []
-            for s in prior:
-                if not s.get("command"):
+            for s in executed:
+                cmd = s.get("command") or ""
+                if not cmd:
                     continue
+                # Quote the real failure output — that is the useful signal.
+                out = (s.get("output") or "").strip()
+                if out:
+                    # Drop the sudo prompt line; it is noise and not diagnostic.
+                    out = "\n".join(
+                        ln for ln in out.splitlines()
+                        if "Password" not in ln
+                    ).strip()
                 if s.get("status") == "failed":
-                    why = f"failed (exit {s.get('exit_code')})"
+                    why = f"FAILED (exit {s.get('exit_code')})"
                 else:
-                    why = "ran but the issue is still present"
-                tried.append((s["command"], why))
+                    why = "ran (exit 0) but the issue is STILL PRESENT"
+                if out:
+                    why += f" — output was: {out[:700]}"
+                tried.append((cmd, why))
             try:
                 np = await fixer.propose_fix(issue, supervisor.config, tried=tried)
                 nsid = await supervisor.db.add_suggestion(
@@ -292,6 +314,18 @@ async def accept_suggestion(
                 next_suggestion = await supervisor.db.get_suggestion(nsid)
             except Exception:  # noqa: BLE001 - the next fix is best-effort
                 next_suggestion = None
+
+        if next_suggestion is None:
+            # The agent could not produce a further fix. Say so explicitly
+            # instead of returning a silent dead end.
+            await supervisor.db.add_audit(
+                action="fix_exhausted",
+                command="",
+                detail=(
+                    f"no further fix offered for issue {issue_id} after "
+                    f"{len(executed)} executed attempt(s); manual intervention needed"
+                ),
+            )
 
     return {
         "executed": result,

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,11 @@ from typing import Any, Awaitable, Callable
 
 # A runner executes a command and returns (returncode, stdout, stderr).
 CommandRunner = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
+
+# Matches a systemd unit name (foo.service, snap.x.y.service, foo@bar.timer ...).
+_UNIT_NAME_RE = re.compile(
+    r"\b([\w@.\-]+\.(?:service|socket|timer|mount|target|slice|path|device))\b"
+)
 
 
 async def _default_runner(cmd: list[str]) -> tuple[int, str, str]:
@@ -184,7 +190,7 @@ class HealthChecker:
     async def check_failed_units(self) -> CheckResult:
         try:
             rc, out, err = await self._runner(
-                ["systemctl", "--failed", "--no-legend", "--no-pager"]
+                ["systemctl", "--failed", "--no-legend", "--plain", "--no-pager"]
             )
         except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
             return CheckResult("failed_units", "skipped", f"systemctl unavailable: {exc}")
@@ -193,7 +199,15 @@ class HealthChecker:
             return CheckResult("failed_units", "skipped", f"systemctl --failed failed: {err.strip()[:120]}")
         if not lines:
             return CheckResult("failed_units", "ok", "no failed units")
-        names = [ln.split()[0] for ln in lines if ln.split()]
+        # Extract the unit NAME by pattern, not by column index. ``systemctl
+        # --failed`` prefixes each row with a status glyph (●), so ``split()[0]``
+        # returned "●" and the issue title read "2 failed unit(s): ●, ●" — the
+        # monitor never actually knew which unit had failed, and neither did the
+        # model it was fed.
+        names: list[str] = []
+        for ln in lines:
+            m = _UNIT_NAME_RE.search(ln)
+            names.append(m.group(1) if m else ln.split()[0])
         return CheckResult(
             "failed_units", "warning",
             f"{len(names)} failed unit(s): {', '.join(names[:10])}",
@@ -202,21 +216,40 @@ class HealthChecker:
         )
 
     async def check_journal_errors(self) -> CheckResult:
+        # A TIME window, never a line count. ``-n 200`` reads the last 200
+        # error lines regardless of when they happened: on this host that window
+        # spanned nine days, so errors from before any fix kept re-raising the
+        # same issue forever and no fix could ever clear it.
+        hc = self.config.autonomous.health_check
+        lookback = int(getattr(hc, "journal_lookback_minutes", 15) or 15)
         try:
             rc, out, err = await self._runner(
-                ["journalctl", "-p", "err", "-n", "200", "--no-pager"]
+                [
+                    "journalctl",
+                    "-p", "err",
+                    "--since", f"{lookback} min ago",
+                    "--no-pager",
+                ]
             )
         except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
             return CheckResult("journal_errors", "skipped", f"journalctl unavailable: {exc}")
         if rc != 0:
             return CheckResult("journal_errors", "skipped", f"journalctl failed: {err.strip()[:120]}")
-        lines = [ln for ln in out.splitlines() if ln.strip()]
+        # Drop journalctl's own banner lines ("-- No entries --", boot markers).
+        lines = [
+            ln for ln in out.splitlines()
+            if ln.strip() and not ln.startswith("--")
+        ]
         count = len(lines)
         if count == 0:
-            return CheckResult("journal_errors", "ok", "no recent error-level log entries")
+            return CheckResult(
+                "journal_errors", "ok",
+                f"no error-level log entries in the last {lookback} min",
+            )
         return CheckResult(
             "journal_errors", "warning",
-            f"{count} error-level entr{'y' if count == 1 else 'ies'} in the last 200 lines",
+            f"{count} error-level entr{'y' if count == 1 else 'ies'} "
+            f"in the last {lookback} min",
             value=float(count),
             detail="\n".join(lines[-20:]),
         )
