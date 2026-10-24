@@ -15,7 +15,7 @@ violation fails the build instead of eroding over time.
 - **Package:** `claudio_core`
 - **Python:** ≥ 3.11
 - **Runtime deps:** `pydantic`, `pyyaml`, `aiosqlite`, `httpx`, `croniter`, `pypdf`
-- **Tests:** 133 passing
+- **Tests:** 134 passing
 - **Contract:** `lint-imports` → *core is framework-free* **KEPT**
 
 ---
@@ -107,7 +107,7 @@ incremental migrations.
 
 | Table | Purpose |
 |---|---|
-| `claudio_sessions` | session metadata, running totals, `last_context_tokens` |
+| `claudio_sessions` | session metadata, running totals, `last_context_tokens`, `learning_captured_entries` (self-improvement watermark) |
 | `claudio_config_history` | immutable config versions |
 | `claudio_approvals` | approval requests and decisions |
 | `claudio_runs` | run records, usage, final output |
@@ -180,6 +180,13 @@ Notable config fields:
   `skills_enabled`, `skills_dir`, `tools`, `subagents`
 - `AutonomousConfig` — `enabled`, `report_only`, `health_check`, `maintenance`,
   `recovery`, `notification`, `command_allowlist`
+- `SelfImprovementConfig` — `enabled` (master switch, off by default),
+  `capture_enabled`, `consolidation_schedule` (cron, default weekly Mon 04:00),
+  `promotion_threshold` (recurrence ≥ N promotes, default 3), `auto_promote`
+  (apply skill changes without approval — trusted hosts only), `max_learnings`
+  (episodic store cap, default 5000), `retention_days` (prune raw after 180),
+  `max_auto_skills` (bloat guard, default 20). The `consolidation_schedule` is
+  validated with `croniter` on load.
 
 ### 5. Tools — `tools/`
 
@@ -381,6 +388,41 @@ chat-completions wire format and nothing else. Raises `LlmCallError`.
 `/chat/completions` suffix. `_extract_text()` handles both string and
 block-list `content`.
 
+### 16. Self-improvement capture — `learning.py`
+
+The capture phase of the self-improvement loop: after a run completes, read
+its transcript and ask the model to pull out reusable lessons — the three
+markers the proposal names: **Error Encountered / Root Cause / Validated
+Fix** — plus a category and a criticality flag. Each lesson becomes one
+episodic row in `claudio_learnings`; the periodic consolidation pass (in
+the backend) later distills recurring ones into skill drafts.
+
+Like `llm.py`, this module is framework-free: extraction goes through
+`openai_chat_completion` and carries no agent-framework dependency.
+
+| Function | Purpose |
+|---|---|
+| `Learning` | dataclass: `category`, `title`, `error_description`, `root_cause`, `fix_applied`, `validated`, `critical` |
+| `render_digest(transcript)` | flatten a transcript to a compact action/error digest (user + assistant + tool calls/results; reasoning deliberately excluded — verbose, larger injection surface, no error signal) |
+| `extract_learnings(transcript, config)` | one LLM pass → `list[Learning]`; returns `[]` on nothing-found or call failure |
+| `dedupe_or_insert(db, learning, …)` | FTS-search for a similar existing learning; bump its `recurrence_count` if found, else insert a fresh row |
+| `capture_run(db, transcript, config, …)` | fire-and-forget entry point; swallows all errors so capture never breaks the run |
+
+**Safety.** The transcript contains *untrusted* content (web pages, files,
+command output). The extractor treats it strictly as data to summarize,
+never as instructions to follow — the extraction prompt says so explicitly.
+The downstream promotion gate (operator approval before a distilled skill
+reaches the system prompt) is the real defense.
+
+> **Capture is per-run-slice, not whole-transcript.** The backend's
+> `_schedule_capture` hands this function only the transcript entries
+> appended since the last capture (tracked by the session's
+> `learning_captured_entries` watermark), not the entire cumulative
+> transcript. Re-reading the whole history each run would re-extract the
+> same fixed incident every time and inflate its `recurrence_count` past the
+> promotion threshold on phantom repeats. See the backend's self-improvement
+> section for the watermark mechanics.
+
 ---
 
 ## File structure
@@ -397,6 +439,7 @@ claudio-core/
 │   ├── settings.py                 AppConfig, YAML + env overrides
 │   ├── context.py                  ToolContext, context_usage_payload()
 │   ├── llm.py                      framework-free chat-completion client
+│   ├── learning.py                 self-improvement capture (episodic learnings)
 │   ├── instructions.py             system-prompt assembly
 │   ├── skill_loader.py             skill discovery / rendering
 │   ├── memory.py                   CLAUDE.md / AGENTS.md discovery
@@ -457,6 +500,7 @@ from claudio_core.compaction import Compactor
 from claudio_core.recovery import make_input_filter, TokenCalibrator
 from claudio_core.safety import is_allowed, is_catastrophic, screen_input
 from claudio_core.session_store import SessionStore
+from claudio_core.learning import capture_run, extract_learnings, Learning
 ```
 
 ### `ToolContext`
@@ -490,7 +534,7 @@ cd claudio-core
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest -q    # 133 passed
+.venv/bin/python -m pytest -q    # 134 passed
 .venv/bin/lint-imports           # core is framework-free KEPT
 ```
 

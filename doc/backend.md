@@ -126,36 +126,44 @@ The driver loop (`_drive`) additionally enforces `max_turns`, checks the
 cancellation set on every event, accumulates usage and cost, converts any
 unexpected exception into `run_failed`, and emits `run_completed` at the end.
 
-### 2. Run orchestration — `runs/`
+### 2. Run orchestration — `runs/manager.py`
 
-**Not yet ported.** Upstream `runs/manager.py` is 1718 lines. When written it
-will own everything that is not about the model:
+Ported and running. The `RunManager` owns everything that is not about the
+model: run lifecycle, the SSE fan-out and reconnection machinery, budget
+enforcement, the recovery loop, and finalisation.
 
-- `RunRecord` — per-run state: a 2000-entry ring buffer of `(seq, sse)` pairs,
-  the subscriber queue set, cancel event, task handle, token/cost accumulators,
-  `files_written`, `commands_run`, `resume_state_json`
-- `start_run(run_id, session_id, message, approval_mode=None)`
-- `resume_run(run_id, session_id, state_json, approval_id, decision,
-  rejection_message=None)`
-- `cancel_run(run_id) -> bool`, `get_record(run_id)`,
-  `get_active_run_for_session(session_id)`, `active_count()`
-- `request_compact(session_id) -> dict`
-- `subscribe(run_id, after_seq=0)` / `open_stream(...)` / `close_stream(...)` —
-  the reconnection machinery
-- budget gate against session `total_cost_usd` before any work starts
-- the recovery loop: proactive compaction, mid-run compaction capped at
+- **`RunRecord`** — per-run state: a ring buffer of `(seq, sse)` pairs, the
+  subscriber queue set, a cancel event, the task handle, token/cost
+  accumulators, `files_written`, `commands_run`, `turns_used`,
+  `resume_state_json`, and the `ToolContext` mutable mirror
+  (`turns_since_todo`, `deliverable_written`, `reads_since_write`,
+  `last_context_tokens`, `mid_run_compactions`).
+- **`start_run(run_id, session_id, message, approval_mode=None)`** — create
+  the record, persist the run row, spawn the driver task.
+- **`resume_run(run_id, session_id, state_json, approval_id, decision,
+  rejection_message=None)`** — continue a run paused for approval.
+- **`cancel_run(run_id) -> bool`**, `get_record(run_id)`,
+  `get_active_run_for_session(session_id)`, `active_count()`.
+- **`request_compact(session_id) -> dict`** — manual compaction.
+- **`open_stream(run_id, after_seq=0)` / `close_stream(...)`** — the
+  reconnection machinery: replay everything after `after_seq` from the ring
+  buffer, then continue live, so a dropped connection loses nothing.
+- **Budget gate** against the session's `total_cost_usd` before any work
+  starts.
+- **Recovery loop** — proactive compaction, mid-run compaction capped at
   `MAX_MID_RUN_COMPACTIONS = 5`, exponential-backoff retry up to
-  `llm.retry_attempts`, then one fallback-model attempt
-- `_finalize_completed` — deliverable verification, todo reconciliation, session
-  totals, the `run_completed` summary
-- exceptions `BudgetExceededError`, `ContextThresholdReached`,
-  `DeliveryFailureError`
+  `llm.retry_attempts`, then one fallback-model attempt.
+- **`_finalize_completed`** — deliverable verification, todo reconciliation,
+  session totals, the `run_completed` summary, and the self-improvement
+  capture pass (see below).
+- Exceptions `BudgetExceededError`, `ContextThresholdReached`,
+  `DeliveryFailureError`.
 
-The port is largely mechanical because the engine now supplies the events. The
-one genuinely new piece is **persisting `ToolContext`'s mutable accumulators**
-(`cost_usd`, `turns_since_todo`, `deliverable_written`, `reads_since_write`) to
-SQLite alongside the run record and rebuilding them on resume, so a resumed run
-continues the counters instead of resetting them.
+The one genuinely non-mechanical piece of the port is **persisting
+`ToolContext`'s mutable accumulators** (`cost_usd`, `turns_since_todo`,
+`deliverable_written`, `reads_since_write`) to SQLite alongside the run
+record and rebuilding them on resume, so a resumed run continues the counters
+instead of resetting them.
 
 ### 3. HTTP API — `api/`
 
@@ -341,6 +349,24 @@ the run.
 | `POST` | `/autonomous/tasks/{key}/run` | run now |
 | `GET` | `/autonomous/tasks/{key}/runs` | execution history |
 
+#### Learning (self-improvement read API)
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/learning?status=&category=&q=&limit=100` | list learnings; `q` runs a ranked full-text search, else newest-first |
+| `GET` | `/learning/categories` | distinct categories with counts, most common first |
+| `GET` | `/learning/stats` | headline counts: `total`, `raw`, `processed`, `promoted` |
+| `GET` | `/learning/consolidations?limit=20` | history of consolidation passes |
+| `GET` | `/skill-drafts?status=` | list drafts (pending/approved/rejected) |
+| `GET` | `/skill-drafts/{id}` | one draft |
+| `POST` | `/skill-drafts/{id}/approve` | validate + write the draft into the live skills directory |
+| `POST` | `/skill-drafts/{id}/reject` | reject a pending draft (body: `{note}`) |
+
+`limit` on `/learning` is clamped to `[1, 500]`. Approving a draft that
+fails validation returns `422 validation_failed` and leaves the draft
+rejected. See the **Self-improvement loop** section below for the full
+capture → consolidation → promotion pipeline.
+
 #### System
 
 | Method | Path | Notes |
@@ -413,6 +439,35 @@ field is **not** the live prompt path for the ADK engine.
 reference their bundled scripts by paths relative to that directory; the agent
 runs them through `run_command`. Discovery never imports or executes anything
 inside a skill folder — it only reads `SKILL.md`.
+
+### Directory paths: skills vs workspace
+
+The two on-disk directories resolve **relative paths differently** — a
+gotcha worth knowing before launching the backend from anywhere but the repo
+root.
+
+| Directory | Config key | Relative path anchored to | cwd-dependent? |
+|---|---|---|---|
+| Skills (`./skills`) | `agent.skills_dir` | backend base (`claudio-backend/`, from the module's own location) | **No** |
+| Workspace (`./data/workspace`) | `agent.workspace_dir` | process working directory | **Yes** |
+
+`resolve_skills_dir` computes the backend base from the module's own
+location (`Path(__file__).resolve().parents[3]`), so `./skills` always means
+`claudio-backend/skills/` no matter where the backend was launched from. The
+workspace, by contrast, uses `Path(workspace_dir).resolve()`, which resolves
+against the process cwd — so `backend-start.sh` (which does not change
+directory) lands the workspace wherever you invoked it from. An **absolute**
+path for either is used as-is. To avoid surprises, always launch from the repo
+root, or set `workspace_dir` to an absolute path in
+`claudio-backend/config/config.yaml`.
+
+A skill is one folder containing a `SKILL.md` (YAML frontmatter + markdown).
+Only direct child folders are scanned. `name` must be lowercase-hyphenated
+and match the folder name; `description` is required and ≤ 1024 chars; only
+`name`, `description`, `license`, `compatibility`, `metadata`,
+`allowed-tools` frontmatter keys are accepted. `GET /api/v1/skills` returns
+the resolved directory plus every skill with its `valid` status. Full detail:
+[`skills-and-workspace.md`](./skills-and-workspace.md).
 
 ### Reasoning is persisted to the transcript
 
@@ -508,6 +563,96 @@ or OAuth). Servers that require authentication are therefore **not yet
 supported** — they will fail to connect and be skipped with a warning. Adding
 auth means extending the config schema and threading credentials into the
 connection params.
+
+---
+
+## Self-improvement loop
+
+A Reflexion / Mem0-style loop that turns what the agent runs into into
+reusable skills. Three phases, each independently gated by
+`self_improvement.*` config (the whole feature is **off** until
+`self_improvement.enabled = true`).
+
+### Phase 1 — Capture (per run)
+
+`claudio_core.learning.capture_run` runs after every completed run. It
+digests the transcript and asks the model for reusable lessons (error /
+root cause / validated fix + category + criticality), then
+`dedupe_or_insert` either bumps an existing learning's `recurrence_count`
+(FTS match) or inserts a fresh `claudio_learnings` row.
+
+**Per-run-slice, not whole-transcript.** `_schedule_capture`
+(`runs/manager.py`) hands the extractor only the transcript entries
+appended since the last capture, tracked by a durable per-session watermark
+`claudio_sessions.learning_captured_entries`:
+
+```
+captured = session.learning_captured_entries
+slice    = transcript[min(captured, len) :]     # only new entries
+session.learning_captured_entries = len(transcript)   # advance BEFORE the task
+capture_run(db, slice, config, ...)            # fire-and-forget
+```
+
+The watermark is advanced **synchronously, before** the capture task is
+spawned, so a later run on the same session sees the updated value
+immediately and never re-reads the same entries regardless of how long
+extraction takes. This is what stops a single fixed incident from being
+re-extracted every run and inflating its `recurrence_count` past the
+promotion threshold on phantom repeats. `POST /sessions/{id}/clear` resets
+the watermark to 0 alongside the other counters.
+
+### Phase 2 — Consolidation (scheduled / on demand)
+
+`autonomous/consolidation.run_consolidation` (cron:
+`self_improvement.consolidation_schedule`, default weekly Mon 04:00 UTC):
+
+1. Gather every `status='raw'` learning (capped at 2000/pass).
+2. Group by the extractor's `category`.
+3. One LLM pass collapses near-duplicate categories
+   (`rocm`/`amd-gpu`/`gpu-driver` → one `amd-gpu` cluster).
+4. For each cluster that clears the bar — a learning recurring
+   `promotion_threshold` times, or any `critical` learning — draft a
+   `SKILL.md` body, merging into the existing skill when one already covers
+   the topic.
+5. Insert each as a `pending` draft (or promote straight through when
+   `auto_promote` is on) and mark the consumed learnings `processed`.
+6. Retention sweep: drop raw learnings older than `retention_days`, then
+   enforce the `max_learnings` store cap by dropping the oldest remaining
+   raw rows. Processed/promoted history is never pruned here.
+7. Record a consolidation row + an audit entry.
+
+A **bloat guard** refuses to create *new* skills past `max_auto_skills`
+(updates to existing skills are always allowed).
+
+### Phase 3 — Promotion (the safety gate)
+
+`autonomous/promotion.promote_draft` writes an approved draft into the live
+skills directory. Before writing it **validates** the candidate by rendering
+the `SKILL.md` into a throwaway temp dir and running the same `scan_skills`
+the engine uses — so a malformed draft can never land in the catalog and
+silently drop out of (or mislead) the prompt. When the target skill already
+exists, the existing folder is copied to a timestamped backup under
+`<backend>/data/skill-backups/` first (deliberately outside the scan dir,
+so backups aren't reported as broken skills), making a bad auto-merge
+revertible. The write is atomic (stage in a temp dir on the same filesystem,
+then move). On success the draft is `approved` and the skill is live on the
+next run (the engine re-scans per request).
+
+### Safety
+
+Learnings are extracted from transcripts containing **untrusted** content.
+The extractor and the consolidation drafting prompts treat that content
+strictly as data to summarize, never as instructions to follow. The
+**operator-approval gate** on promotion is the primary defense. Do **not**
+enable `auto_promote` on an untrusted host — it bypasses that gate and lets
+the model's distilled lessons reach the system prompt without review.
+
+### Endpoints
+
+Read side: `GET /learning`, `/learning/categories`, `/learning/stats`,
+`/learning/consolidations`. Draft gate: `GET /skill-drafts`,
+`POST /skill-drafts/{id}/approve`, `POST /skill-drafts/{id}/reject`. See
+the HTTP API table above.
 
 ---
 
@@ -616,16 +761,18 @@ the documentation and cost real time to discover.
 legacy engine being replaced depends on `openai-agents`, which pins `openai>=3`.
 A clean dependency resolve therefore cannot install both.
 
-This matters only during the transition, for the A/B harness, which needs both
+This mattered during the transition, for the A/B harness, which needed both
 engines in one interpreter. In practice `claudio-backend/.venv` resolves to
-`openai 2.54.0` and the legacy `openai-agents` path still works — the conflict
-is over-cautious metadata rather than a real runtime incompatibility, because
-`openai-agents` uses chat-completions APIs that exist in both. But pip will
-report a conflict, and a fresh `pip install` of a project that requires both will
-refuse to resolve.
+`openai 2.54.0` and the legacy `openai-agents` path still worked — the
+conflict was over-cautious metadata rather than a real runtime
+incompatibility, because `openai-agents` uses chat-completions APIs that
+exist in both. But pip reported a conflict, and a fresh `pip install` of a
+project that required both refused to resolve.
 
-Once step 2b replaces the legacy `Runner` calls with `RunEngine.stream()`, the
-`openai-agents` dependency disappears and so does the conflict.
+The migration is now complete: the legacy `Runner` calls have been replaced
+by `RunEngine.stream()`, the `openai-agents` dependency is gone from the
+backend, and so is the conflict. The note is kept for historical context on
+why the engine boundary was worth building.
 
 Warnings to expect and ignore:
 

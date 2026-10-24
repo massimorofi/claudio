@@ -5,13 +5,14 @@ workspace, with human approval on destructive actions, budget tracking, context
 compaction, and an autonomous maintenance daemon.
 
 This repository is the **refactored three-project layout**. Claudio was originally
-built on the OpenAI Agents SDK. It is being moved to Google ADK behind a
-framework-neutral core, so that the agent framework becomes a replaceable
-component rather than a load-bearing assumption.
+built on the OpenAI Agents SDK. It has been moved to Google ADK behind a
+framework-neutral core, so that the agent framework is a replaceable component
+rather than a load-bearing assumption.
 
 **Current status: migration complete and operational.** Core is extracted and
-verified, the ADK engine is written, backend orchestration and HTTP routes are
-ported, and the backend serves traffic.
+verified, the ADK engine is written, backend orchestration, HTTP routes and the
+autonomous daemon are ported, the self-improvement loop is live, and the backend
+serves traffic.
 
 ---
 
@@ -43,21 +44,20 @@ The result: swapping the engine later is a change to one subpackage.
 ```
 claudio/
 ├── claudio-core/             framework-free domain: tools, storage, settings,
-│                             safety, event protocol
-├── claudio-backend/          Google ADK engine + FastAPI deployable
-├── claudio-frontend/         React SPA (unchanged)
+│                             safety, event protocol, self-improvement capture
+├── claudio-backend/          Google ADK engine + FastAPI deployable + daemon
+├── claudio-frontend/         React SPA
 ├── doc/
 │   ├── core.md               capabilities, API, structure
 │   ├── backend.md            engine internals, full endpoint reference
-│   └── frontend.md           views, SSE handling, contract mirror
-├── refactoring_status.md     what is done, what is not, what is verified
-├── claudio_refactoring.md    the original migration analysis
-├── _engine_ab/               deterministic A/B harness, old engine vs ADK
-├── _upstream/                the original repo, kept for reference
-└── _deferred_backend_tests/  upstream tests parked during extraction
+│   ├── frontend.md           views, SSE handling, contract mirror
+│   ├── skills-and-workspace.md   skills/workspace paths and resolution
+│   ├── skills-refresh-prompt.md  refresh the curated skill set
+│   └── claudio_full_spec.md  the original rebuild specification (historical)
+├── todo/                     working task notes
+├── backend-start.sh          daemon launcher (uvicorn + healthcheck + pid)
+└── backend-stop.sh           daemon stopper (graceful SIGTERM)
 ```
-
-Anything prefixed `_` is scratch from the migration, not part of the product.
 
 ```mermaid
 flowchart TD
@@ -111,6 +111,7 @@ with plain data.
 | **Frozen SSE event protocol** | `events.py` |
 | **`RunEngine` protocol** | `engine.py` |
 | Direct OpenAI-compatible calls | `llm.py` |
+| Self-improvement capture (episodic learnings) | `learning.py` |
 
 Details: [doc/core.md](./doc/core.md)
 
@@ -197,31 +198,26 @@ cd claudio-core
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/python -m pytest -q     # 133 tests
+.venv/bin/python -m pytest -q     # 134 tests
 .venv/bin/lint-imports            # core is framework-free: KEPT
 ```
 
 ### Backend
 
-Not yet runnable end to end: `runs/manager.py` and `api/` still need porting.
-The engine itself imports and its pause/resume behaviour is verified:
+Ported and running end to end — `RunManager`, the HTTP API and the
+autonomous daemon all serve traffic.
 
 ```bash
 cd claudio-backend
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-PYTHONPATH=src:../claudio-core/src .venv/bin/python -c "
-from claudio_backend.engine import create_engine
-from claudio_core import AppConfig
-from claudio_core.db import Database
-import pathlib, tempfile
-db = Database(pathlib.Path(tempfile.mkdtemp()) / 't.db')
-print(type(create_engine(AppConfig(), db)).__name__)   # AdkEngine
-"
-
+.venv/bin/python -m pytest -q     # 61 tests
 .venv/bin/lint-imports            # only the engine knows about ADK: KEPT
 ```
+
+Or drive it as a daemon from the repo root with `./backend-start.sh` /
+`./backend-stop.sh` (see **Start / stop** above).
 
 ### Frontend
 
@@ -236,8 +232,10 @@ Vite proxies `/api` to `http://127.0.0.1:8100`.
 
 ### Configuration
 
-Claudio reads `~/.claudio/config.yaml`. Every key can be overridden by
-environment variable using the `CLAUDIO__` prefix and `__` as the separator:
+Claudio reads `claudio-backend/config/config.yaml` (the live, gitignored
+config; a fresh clone falls back to the built-in defaults in
+`claudio_core/settings.py`). Every key can be overridden by environment
+variable using the `CLAUDIO__` prefix and `__` as the separator:
 
 ```bash
 export CLAUDIO__LLM__BASE_URL="http://localhost:8081/v1"
@@ -251,7 +249,7 @@ The essential keys:
 server:
   host: 127.0.0.1
   port: 8100
-  auth_token: "change-me"
+  auth_token: "change-me"        # Bearer token; empty = deny-all, not open
 
 llm:
   provider: openai
@@ -261,17 +259,34 @@ llm:
   max_tokens: 16384
 
 agent:
-  workspace_dir: "~/claudio-workspace"
+  workspace_dir: ./data/workspace   # relative to process cwd — see note
   approval_mode: on_request      # auto | on_request | always
   max_turns: 50
   max_budget_usd: 5.0
   context_window: 32768
   skills_enabled: true
+  skills_dir: ./skills           # relative to claudio-backend/ (cwd-independent)
+
+self_improvement:
+  enabled: false                 # master switch for the learn→distill→promote loop
+  capture_enabled: true          # extract learnings after each run
+  consolidation_schedule: "0 4 * * 1"   # weekly, Mon 04:00 UTC
+  promotion_threshold: 3        # recurrence_count >= N promotes
+  auto_promote: false           # apply skill changes without approval (trusted hosts only)
 ```
 
-The config API exposes the full JSON schema at `GET /api/v1/config/schema`. The
-same schema is available without a server from
-`claudio_core.settings.config_schema_json()`.
+**Two directory gotchas.** The skills dir (`./skills`) is anchored to
+`claudio-backend/` regardless of where the backend is launched, but the
+workspace (`./data/workspace`) is anchored to the **process working
+directory** — so launch `backend-start.sh` from the repo root, or set
+`workspace_dir` to an absolute path. Full detail in
+[`doc/skills-and-workspace.md`](./doc/skills-and-workspace.md).
+
+The config API exposes the full JSON schema at `GET /api/v1/config/schema`.
+The same schema is available without a server from
+`claudio_core.settings.config_schema_json()`. `PUT /config` is a
+**merge-patch** over the current config — send only the keys you want to
+change.
 
 ---
 
@@ -279,7 +294,7 @@ same schema is available without a server from
 
 | Check | Command | Result |
 |---|---|---|
-| Core unit tests | `cd claudio-core && .venv/bin/python -m pytest -q` | 133 passed |
+| Core unit tests | `cd claudio-core && .venv/bin/python -m pytest -q` | 134 passed |
 | Core framework-free | `cd claudio-core && .venv/bin/lint-imports` | KEPT |
 | Core end-to-end | DB, sessions, skills, instructions, tools, compaction, safety | passed |
 | Backend engine import | `from claudio_backend.engine import create_engine` | OK |
@@ -297,18 +312,19 @@ same schema is available without a server from
 | Step | What | State |
 |---|---|---|
 | 0 | Freeze the SSE wire contract | done, `claudio_core/events.py` |
-| 1 | Extract framework-free core | done, 133 tests, contract KEPT |
+| 1 | Extract framework-free core | done, 134 tests, contract KEPT |
 | 1b | Frontend copy, build verified | done, `tsc -b` + `vite build` clean |
 | 2a | ADK engine | done, `engine/adk_engine.py` |
-| 2b | `RunManager` port | not started |
-| 2c | HTTP API port | not started |
+| 2b | `RunManager` port | done, `runs/manager.py` |
+| 2c | HTTP API port | done, `api/` (13 modules) |
 | 2d | Engine flag-switch A/B harness | done, all 3 scenarios pass |
-| 3 | Autonomous daemon port | not started |
-| 4 | Delete `_upstream`, retire the old tree | blocked on 2b, 2c, 3 |
+| 3 | Autonomous daemon port | done, `autonomous/` |
+| 4 | Self-improvement loop | done, capture + consolidation + promotion |
+| 5 | Delete `_upstream`, retire the old tree | pending |
 
-`create_engine(config, db, kind=...)` already selects the implementation from
-`kind` then `$CLAUDIO_ENGINE` then `"adk"`, so the flag-switch mechanism exists
-even though the second implementation does not.
+`create_engine(config, db, kind=...)` selects the implementation from `kind`
+then `$CLAUDIO_ENGINE` then `"adk"`. Only the ADK engine exists today; the
+flag-switch mechanism is in place for a future second engine.
 
 ---
 
@@ -316,10 +332,9 @@ even though the second implementation does not.
 
 | Document | Contents |
 |---|---|
-| [refactoring_status.md](./refactoring_status.md) | what is done, what is not, what was empirically verified |
 | [doc/core.md](./doc/core.md) | core capabilities, module-by-module API, file structure |
-| [doc/backend.md](./doc/backend.md) | engine internals, complete endpoint reference, ADK integration notes |
+| [doc/backend.md](./doc/backend.md) | engine internals, complete endpoint reference, self-improvement loop, ADK integration notes |
 | [doc/frontend.md](./doc/frontend.md) | views, SSE handling, contract mirror, build |
 | [doc/skills-and-workspace.md](./doc/skills-and-workspace.md) | where the skills directory and workspace live, path resolution, skill folder format |
 | [doc/skills-refresh-prompt.md](./doc/skills-refresh-prompt.md) | reusable prompt to refresh the curated skill set from skillmd.com, with owner/repo/credits manifest |
-| [claudio_refactoring.md](./claudio_refactoring.md) | the original migration analysis and framework comparison |
+| [doc/claudio_full_spec.md](./doc/claudio_full_spec.md) | the original rebuild specification (historical design doc) |

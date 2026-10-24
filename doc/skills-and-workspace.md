@@ -169,14 +169,20 @@ fresh clone falls back to the built-in defaults in
 
 ---
 
-## 5. Known gap: skills are not injected into the agent prompt
+## 5. Skills ARE injected into the agent prompt
 
-At runtime the engine currently builds its instruction with
-`skill_entries=None`
-([`adk_engine.py`](../claudio-backend/src/claudio_backend/engine/adk_engine.py),
-`_build_agent`), so the skills catalog is **not** appended to the agent's
-system prompt. Skills are surfaced only through the `GET /api/v1/skills`
-endpoint (the UI). If the intent is for the agent to see and use the
-installed skills automatically, that wiring still needs to be restored —
-scan the directory and pass the resulting entries into
-`build_static_instructions(..., skill_entries=...)`.
+This was once a gap; it is now closed. At runtime the engine scans the
+resolved skills directory with `scan_skills` and passes the resulting
+`entries` into `build_static_instructions(..., skill_entries=...)`, so the
+Tier-1 skills catalog (names + one-line descriptions) is rendered into the
+agent's system prompt every turn. The three read-only skill tools
+(`list_skills`, `load_skill`, `read_skill_resource`) are registered on the
+agent so it can pull a skill's full body on demand. The scan runs per
+request, so a skill added or edited on disk is picked up without restarting
+the backend. See the **Skills** section of
+[`backend.md`](./backend.md) for the full two-tier loading mechanism.
+
+Skills are also surfaced through `GET /api/v1/skills` (the UI), and the
+self-improvement loop can draft and promote new skills into this same
+directory — see the **Self-improvement loop** section of
+[`backend.md`](./backend.md).

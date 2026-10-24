@@ -1,13 +1,16 @@
 # claudio-frontend
 
-The React SPA. Unchanged by the refactor — it is the stable half of the
-split. Everything the UI needs is defined by the HTTP and SSE contract, which
-lives in `claudio_core/events.py` on the backend side and
-`src/api/types.ts` here.
+The React SPA. Everything the UI needs is defined by the HTTP and SSE
+contract, which lives in `claudio_core/events.py` on the backend side and
+`src/api/types.ts` here. The refactor left the contract stable, so the UI
+needed only targeted changes — a tightened event-type mirror, corrected
+payload shapes, and a new Memory view for the self-improvement store — not a
+rewrite.
 
 - **Stack:** React 18, TypeScript 5.6, Vite 5, Tailwind CSS 4
 - **Data:** TanStack Query 5, `react-hook-form`, `zod`
 - **Streaming:** `@microsoft/fetch-event-source`
+- **Views:** six — chat, config, workspace, monitor, tasks (autonomous), memory
 - **Build:** `tsc -b && vite build` — clean
 
 ---
@@ -52,9 +55,15 @@ records, and one interface per SSE event payload (`TokenEvent`,
 protocol on one side without the other produces runtime failures the type checker
 cannot see.
 
-> Caveat: `types.ts` declares the payload interfaces but does not enumerate the
-> event string literals, so the mirror test checks names rather than true
-> coverage. Worth tightening next time the protocol is touched.
+`types.ts` now declares an `EventName` string-literal union of all 13 event
+names, and `StreamEvent.event` is typed as `EventName` rather than `string`, so
+an unknown event name is a compile error rather than a runtime surprise. The
+mirror test (`test_event_protocol.py`) asserts the TS `EventName` union and the
+core `ALL_EVENT_NAMES` set are identical in **both** directions — a missing or
+extra event fails loudly. The payload shapes themselves are checked against the
+live HTTP JSON by `test_contract_shapes.py` (SessionSummary, ApprovalRequest,
+RunFailedEvent and its nested `error`), catching the class of drift a
+compile-time check can't see because the JSON is untyped at the boundary.
 
 ### 4. Auth — `src/api/auth.ts`
 
@@ -119,7 +128,25 @@ The daemon cockpit.
 | `AuditPanel.tsx` | the audit trail |
 | `DaemonConfigPanel.tsx` | health-check, maintenance, recovery and notification settings |
 
-### 11. Shared components
+### 11. Memory — `features/memory/MemoryView.tsx`
+
+The self-improvement store browser. Three tabs:
+
+| Tab | Shows |
+|---|---|
+| **Learnings** | the episodic store — list, filter by status/category, full-text search (`q`), each with its recurrence count, category, validated/critical flags |
+| **Drafts** | pending skill drafts with **approve** / **reject** (the promotion gate) |
+| **History** | past consolidation passes |
+
+A header strip shows the headline counts (`total` / `raw` / `processed` /
+`promoted`) from `GET /learning/stats`, refreshed every 15 s. Approving a
+draft calls `POST /skill-drafts/{id}/approve`, which validates and writes it
+into the live skills directory; a draft that fails validation returns
+`422` and the reason is surfaced. Backed by the `/learning/*` and
+`/skill-drafts/*` endpoints (see
+[`backend.md`](./backend.md#learning-self-improvement-read-api)).
+
+### 12. Shared components
 
 `components/CodeEditor.tsx` — code display/editing used by the workspace and file
 views.
@@ -165,11 +192,13 @@ claudio-frontend/
         │   └── WorkspaceView.tsx
         ├── monitoring/
         │   └── MonitoringView.tsx
-        └── autonomous/
-            ├── AutonomousView.tsx
-            ├── TasksPanel.tsx
-            ├── AuditPanel.tsx
-            └── DaemonConfigPanel.tsx
+        ├── autonomous/
+        │   ├── AutonomousView.tsx
+        │   ├── TasksPanel.tsx
+        │   ├── AuditPanel.tsx
+        │   └── DaemonConfigPanel.tsx
+        └── memory/
+            └── MemoryView.tsx        self-improvement store (learnings/drafts/history)
 ```
 
 ---
@@ -183,6 +212,7 @@ claudio-frontend/
 | `/workspace` | Workspace |
 | `/monitor` | Monitor |
 | `/autonomous` | Tasks (daemon) |
+| `/memory` | Memory (self-improvement) |
 
 Responsive: bottom tab bar on mobile, collapsible sidebar on desktop. The
 collapse state persists in `localStorage` under `claudio.sidebar.collapsed`.
@@ -205,6 +235,7 @@ All under `/api/v1`. Full request/response shapes are in
 | Agent | `POST /agent/start`, `POST /agent/stop`, `POST /agent/restart`, `GET /agent/status`, `GET /agent/tools`, `GET /skills` |
 | Monitoring | `GET /monitoring/health`, `GET /monitoring/metrics`, `GET /monitoring/logs`, `GET /monitoring/runs` |
 | Autonomous | `GET /autonomous/status`, `GET /autonomous/health`, `GET /autonomous/health/history`, `POST /autonomous/health/run`, `POST /autonomous/maintenance/run`, `POST /autonomous/recovery/run`, `GET /autonomous/issues`, `POST /autonomous/issues/{id}/acknowledge`, `POST /autonomous/issues/{id}/resolve`, `POST /autonomous/issues/{id}/propose-fix`, `GET /autonomous/issues/{id}/suggestions`, `POST /autonomous/suggestions/{id}/accept`, `POST /autonomous/suggestions/{id}/dismiss`, `POST /autonomous/notify/test`, `GET /autonomous/audit`, `GET /autonomous/tasks`, `POST /autonomous/tasks`, `PUT /autonomous/tasks/{key}`, `DELETE /autonomous/tasks/{key}`, `POST /autonomous/tasks/{key}/enable`, `POST /autonomous/tasks/{key}/disable`, `POST /autonomous/tasks/{key}/run`, `GET /autonomous/tasks/{key}/runs` |
+| Learning | `GET /learning`, `GET /learning/categories`, `GET /learning/stats`, `GET /learning/consolidations`, `GET /skill-drafts`, `GET /skill-drafts/{id}`, `POST /skill-drafts/{id}/approve`, `POST /skill-drafts/{id}/reject` |
 | System | `GET /healthz` |
 
 ---
