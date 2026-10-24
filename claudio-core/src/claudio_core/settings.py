@@ -255,6 +255,35 @@ class RecoveryConfig(BaseModel):
     restart_allowlist: list[str] = Field(default_factory=list)
 
 
+class SelfImprovementConfig(BaseModel):
+    """Self-improvement loop: per-run episodic capture + periodic skill
+    distillation (Reflexion / Mem0 style).
+
+    Capture runs after every completed run and writes structured "learnings"
+    (error / root cause / validated fix) to the episodic store. Consolidation
+    runs on its own schedule (or on demand) and distills recurring learnings
+    into skills. The whole feature is off until ``enabled`` is set true.
+    """
+
+    enabled: bool = False                 # master switch (off by default)
+    capture_enabled: bool = True          # run the post-run extractor
+    consolidation_schedule: str = "0 4 * * 1"   # weekly, Mon 04:00 UTC
+    promotion_threshold: int = 3        # recurrence_count >= N promotes
+    auto_promote: bool = False          # apply skill changes without approval
+    max_learnings: int = 5000           # cap episodic table (prune oldest)
+    retention_days: int = 180           # prune raw learnings older than this
+    max_auto_skills: int = 20           # cap auto-generated skills (bloat guard)
+
+    @field_validator("consolidation_schedule")
+    @classmethod
+    def _check_schedule(cls, v: str) -> str:
+        from croniter import croniter
+
+        if not croniter.is_valid(v):
+            raise ValueError(f"invalid cron schedule: {v!r}")
+        return v
+
+
 class AutonomousConfig(BaseModel):
     enabled: bool = False
     report_only: bool = True
@@ -286,6 +315,9 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     autonomous: AutonomousConfig = Field(default_factory=AutonomousConfig)
+    self_improvement: SelfImprovementConfig = Field(
+        default_factory=SelfImprovementConfig
+    )
 
 
 def _env_overrides() -> dict[str, Any]:

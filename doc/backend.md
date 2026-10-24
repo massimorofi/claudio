@@ -13,8 +13,8 @@ later is a change to one package rather than a hunt through the backend.
 - **Python:** ≥ 3.11
 - **Deps:** `claudio-core`, `google-adk[openai]>=2.0,<3`, `fastapi`,
   `uvicorn`, `pydantic`, `pyyaml`, `aiosqlite`, `httpx`, `croniter`
-- **Status:** engine complete; orchestration and routes **not yet ported**.
-  See [`../refactoring_status.md`](../refactoring_status.md).
+- **Status:** complete and operational — engine, run orchestration and HTTP
+  routes are all ported and serving traffic.
 
 ---
 
@@ -159,11 +159,39 @@ continues the counters instead of resetting them.
 
 ### 3. HTTP API — `api/`
 
-**Not yet ported.** The required surface is specified in full below, since it is
-a frontend contract and does not change with the engine.
+The full surface is documented below; it is a frontend contract and does not
+change with the engine.
 
 All routes are under `/api/v1`. All except `GET /healthz` require
 `Authorization: Bearer <server.auth_token>`.
+
+#### Rotating the auth token
+
+The token is a single shared secret read from `server.auth_token` in
+`claudio-backend/config/config.yaml` (a gitignored, local file). The shipped
+default `dev-token-change-me` is a placeholder and should be replaced on any
+host reachable by more than its operator. To rotate:
+
+1. **Generate a strong secret:**
+   ```bash
+   python -c "import secrets; print('claudio-' + secrets.token_urlsafe(32))"
+   ```
+2. **Set it in the config** — edit `server.auth_token` in
+   `claudio-backend/config/config.yaml` to the new value. (You can also do it
+   live via `PUT /config` with `{"server": {"auth_token": "<new>"}}`, but the
+   file is the source of truth across restarts.)
+3. **Restart the backend** so the running process picks it up:
+   ```bash
+   ./backend-stop.sh && ./backend-start.sh
+   ```
+4. **Update the frontend.** The browser keeps its own copy in
+   `localStorage['claudio.auth_token']`. Open the app, set the new token in the
+   UI (which writes localStorage), and reload. Until you do, requests carry the
+   old token and return `401`.
+
+The change takes effect immediately for new requests; in-flight SSE streams drop
+and reconnect. If you rotate and get locked out, the config file is the
+fallback — set a known token there and restart.
 
 #### Error envelope
 
@@ -229,12 +257,30 @@ the run.
 |---|---|---|
 | `GET` | `/config` | current config, secrets redacted, plus `generation` |
 | `GET` | `/config/schema` | JSON schema for the settings UI |
-| `PUT` | `/config` | replace config; returns changed keys and restart requirements |
+| `PUT` | `/config` | **merge-patch** config; returns changed keys and restart requirements |
 | `POST` | `/config/validate` | validate a candidate without saving |
 | `POST` | `/config/llm/test` | live connectivity test → `{ok, latency_ms, model, error}` |
 | `GET` | `/config/history` | saved versions |
 | `POST` | `/config/restore` | restore a version |
 | `GET` | `/config/raw` | unredacted; gated by `server.expose_raw_config` |
+
+> **`PUT /config` is a merge-patch, not a replace.** The payload is deep-merged
+> over the *current* config (`merged = _merge(current, payload)`), so you only
+> need to send the keys you want to change — anything you omit keeps its current
+> value. Two consequences worth knowing:
+>
+> - **Secrets:** the client only ever sees redacted secrets (`***`). A `***` in
+>   the payload means *"leave this secret unchanged"*, never *"set the secret to
+>   `***`"* — `restore_redacted_secrets(merged, current)` substitutes the stored
+>   secret back in before validation. To actually change a secret, send its real
+>   value.
+> - **Validation is whole-config:** the merged result is validated as a complete
+>   `AppConfig`. If the merge produces an invalid config, the request returns
+>   `422` and **nothing is written** — the existing config is left untouched.
+>
+> The response carries `changed_keys` (the dotted paths that actually differed)
+> and `restart_required` (whether those keys need a process restart to take
+> effect).
 
 #### Files and workspace
 
@@ -472,37 +518,48 @@ claudio-backend/
 ├── pyproject.toml                  deps + "only the engine knows ADK" contract
 └── src/claudio_backend/
     ├── __init__.py
-    ├── engine/
+    ├── app.py                      FastAPI assembly (routers, lifespan, CORS)
+    ├── supervisor.py               owns config/db/engine/run-manager lifecycle
+    ├── errors.py                   backend error types
+    ├── paths.py                    data/log path resolution
+    ├── engine/                     ★ the ONLY package importing ADK
     │   ├── __init__.py             exports AdkEngine, create_engine
-    │   └── adk_engine.py           ★ the ADK implementation (519 lines)
+    │   ├── adk_engine.py           the ADK RunEngine implementation
+    │   └── reasoning_llm.py        framework-free streaming LLM client
     ├── runs/
-    │   └── __init__.py             placeholder — manager.py not yet ported
+    │   ├── __init__.py
+    │   └── manager.py              RunManager: start/resume/cancel, finalisation
     ├── api/
-    │   └── __init__.py             placeholder — routes not yet ported
-    └── (nothing else yet)
-```
-
-Planned layout once the port is complete:
-
-```
-src/claudio_backend/
-├── engine/          ADK engine            ← the ONLY package importing ADK
-├── runs/            RunManager, budgets, fan-out
-├── api/
-│   ├── deps.py      require_auth, ApiError
-│   ├── system.py    healthz / readyz / version
-│   ├── chat.py      chat stream + run control
-│   ├── approvals.py human-in-the-loop
-│   ├── sessions.py
-│   ├── config.py
-│   ├── files.py
-│   ├── workspace.py
-│   ├── management.py
-│   ├── monitoring.py
-│   ├── tasks.py
-│   └── autonomous.py
-├── daemon/          health checks, maintenance, cron
-└── app.py           FastAPI assembly
+    │   ├── deps.py                 require_auth, ApiError
+    │   ├── system.py               healthz / readyz / version
+    │   ├── chat.py                 chat stream + run control
+    │   ├── approvals.py            human-in-the-loop
+    │   ├── sessions.py
+    │   ├── config.py               GET/PUT (merge-patch) + validate/test
+    │   ├── files.py                upload
+    │   ├── workspace.py            file/tree views, download
+    │   ├── management.py           agent start/stop/restart
+    │   ├── monitoring.py           health, metrics, logs, runs
+    │   ├── tasks.py                user-defined scheduled playbooks
+    │   ├── autonomous.py           daemon control + manual triggers
+    │   └── learning.py             self-improvement read API + draft approval
+    └── autonomous/                 the watch/maintain/repair daemon
+        ├── __init__.py
+        ├── service.py              daemon orchestration
+        ├── scheduler.py            cron scheduling for built-in passes
+        ├── task_scheduler.py       user-defined task scheduling
+        ├── task_runner.py          task dispatch (HANDLERS)
+        ├── health.py               health-check pass
+        ├── maintenance.py          maintenance playbook
+        ├── recovery.py             service recovery
+        ├── fixer.py                agent-proposed fix commands
+        ├── agent.py                autonomous agent helpers
+        ├── tools.py                daemon-side tools
+        ├── script.py               operator-script runner
+        ├── notifier.py             email/webhook notifications
+        ├── report.py               TaskReport
+        ├── consolidation.py        learnings → skill drafts
+        └── promotion.py            draft → live skill (validate + backup)
 ```
 
 ---

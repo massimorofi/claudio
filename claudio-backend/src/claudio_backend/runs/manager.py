@@ -43,6 +43,7 @@ from claudio_core.db import Database, utcnow
 from claudio_core.engine import ModelSpec, RunRequest, ToolPolicy
 from claudio_core.events import EventName
 from claudio_core.instructions import build_instructions
+from claudio_core.learning import capture_run
 from claudio_core.llm import LlmCallError, openai_chat_completion
 from claudio_core.settings import AppConfig
 from claudio_core.tools.registry import select_tool_names
@@ -170,6 +171,10 @@ class RunManager:
         self.engine = engine
         self._runs: dict[str, RunRecord] = {}
         self._lock = asyncio.Lock()
+        # Fire-and-forget post-run capture tasks. Held here so the event loop's
+        # weak reference doesn't let them be GC'd mid-flight; each discards
+        # itself on completion.
+        self._capture_tasks: set = set()
 
     # ---- public API -----------------------------------------------------
 
@@ -942,7 +947,36 @@ class RunManager:
                 },
             },
         )
+        self._schedule_capture(record)
         self._close_subscribers(record)
+
+    def _schedule_capture(self, record: RunRecord) -> None:
+        """Fire-and-forget the self-improvement capture pass for a finished run.
+
+        Reads the transcript the run just persisted and extracts learnings in a
+        background task, so the run's completion response is never delayed by
+        the extra LLM call. The whole thing is gated on the self-improvement
+        config and is best-effort: capture_run swallows its own errors.
+        """
+        si = self.config.self_improvement
+        if not (si.enabled and si.capture_enabled):
+            return
+        try:
+            transcript = self.session_store.read(record.session_id)
+        except Exception as exc:  # noqa: BLE001 - capture is opportunistic
+            logger.warning("capture: could not read transcript: %s", exc)
+            return
+        task = asyncio.create_task(
+            capture_run(
+                self.db,
+                transcript,
+                self.config,
+                session_id=record.session_id,
+                run_id=record.run_id,
+            )
+        )
+        self._capture_tasks.add(task)
+        task.add_done_callback(self._capture_tasks.discard)
 
     async def _finalize_failed(self, record: RunRecord, code: str | Exception, message: str | None = None) -> None:
         duration = max(0.0, time.time() - (record.started_at or time.time()))

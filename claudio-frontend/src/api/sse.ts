@@ -1,6 +1,6 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { getToken } from './auth'
-import type { StreamEvent } from './types'
+import type { EventName, StreamEvent } from './types'
 
 export interface SseHandle {
   close: () => void
@@ -58,7 +58,7 @@ export function openChatStream(
         }
       },
       onmessage: (msg) => {
-        handle({ event: msg.event || 'message', data: safeParse(msg.data), id: msg.id || undefined })
+        handle({ event: (msg.event || 'message') as EventName, data: safeParse(msg.data), id: msg.id || undefined })
       },
       onclose: () => {
         // Server closed cleanly. If a run was started, fall back to the resumable
@@ -91,7 +91,7 @@ export function openChatStream(
         if (!res.ok) throw new Error(`stream_open_failed:${res.status}`)
       },
       onmessage: (msg) => {
-        handle({ event: msg.event || 'message', data: safeParse(msg.data), id: msg.id || undefined })
+        handle({ event: (msg.event || 'message') as EventName, data: safeParse(msg.data), id: msg.id || undefined })
       },
       onclose: () => opts.onClose?.(),
       onerror: (err) => {
@@ -148,7 +148,7 @@ export function resumeRunStream(
     },
     onmessage: (msg) => {
       opts.onEvent({
-        event: msg.event || 'message',
+        event: (msg.event || 'message') as EventName,
         data: safeParse(msg.data),
         id: msg.id || undefined,
       })

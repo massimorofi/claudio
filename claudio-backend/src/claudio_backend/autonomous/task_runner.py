@@ -41,6 +41,7 @@ from .report import TaskReport
 from .tools import DaemonContext, build_daemon_tools, effective_report_only, _clip
 from .maintenance import run_maintenance
 from .recovery import run_recovery
+from .consolidation import run_consolidation
 from .fixer import _extract_json
 from ..paths import resolve_workspace_dir
 
@@ -50,6 +51,7 @@ logger = logging.getLogger(__name__)
 HANDLERS: dict[str, Callable[..., Awaitable[TaskReport]]] = {
     "maintenance": run_maintenance,
     "recovery": run_recovery,
+    "consolidation": run_consolidation,
 }
 
 # Wall-clock ceilings. A single elevated command already has its own timeout

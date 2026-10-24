@@ -20,7 +20,7 @@ const commandToString = (cmd: unknown): string =>
 const stringToCommand = (s: string): string[] => s.split(/\s+/).filter(Boolean)
 
 export default function ConfigView() {
-  const [tab, setTab] = useState<'llm' | 'agent' | 'mcp' | 'danger'>('llm')
+  const [tab, setTab] = useState<'llm' | 'agent' | 'mcp' | 'memory' | 'danger'>('llm')
   const [draft, setDraft] = useState<AppConfig | null>(null)
   const [restartNeeded, setRestartNeeded] = useState(false)
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
@@ -123,7 +123,7 @@ export default function ConfigView() {
     <div className="flex h-full flex-col">
       <div className="border-b border-black/10 bg-white px-4 py-3">
         <div className="flex gap-1 overflow-x-auto">
-          {(['llm', 'agent', 'mcp', 'danger'] as const).map((t) => (
+          {(['llm', 'agent', 'mcp', 'memory', 'danger'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -131,7 +131,7 @@ export default function ConfigView() {
                 tab === t ? 'bg-brand text-white' : 'text-black/60 hover:bg-black/5'
               }`}
             >
-              {t === 'mcp' ? 'MCP Servers' : t}
+              {t === 'mcp' ? 'MCP Servers' : t === 'memory' ? 'Self-Improvement' : t}
             </button>
           ))}
         </div>
@@ -165,6 +165,7 @@ export default function ConfigView() {
         )}
         {tab === 'agent' && <AgentSection draft={draft} setDraft={set} />}
         {tab === 'mcp' && <McpSection draft={draft} setDraft={set} />}
+        {tab === 'memory' && <SelfImprovementSection draft={draft} setDraft={set} />}
         {tab === 'danger' && <DangerSection />}
       </div>
 
@@ -595,6 +596,107 @@ function DangerSection() {
         {clearMut.data && (
           <div className="mt-2 text-xs text-green-700">All sessions cleared.</div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function SelfImprovementSection({
+  draft,
+  setDraft,
+}: {
+  draft: AppConfig
+  setDraft: SetField
+}) {
+  const si = draft.self_improvement
+  const upd = (patch: Partial<AppConfig['self_improvement']>) =>
+    setDraft('self_improvement', { ...si, ...patch })
+
+  return (
+    <div className="max-w-xl">
+      <p className="mb-3 text-sm text-black/50">
+        Claudio can learn from its own runs: capture a lesson after each session,
+        then periodically distill recurring lessons into skills. Off by default.
+      </p>
+
+      <label className="mb-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={si.enabled}
+          onChange={(e) => upd({ enabled: e.target.checked })}
+        />
+        <span>Enable self-improvement (master switch)</span>
+      </label>
+
+      <label className="mb-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={si.capture_enabled}
+          onChange={(e) => upd({ capture_enabled: e.target.checked })}
+        />
+        <span>Capture learnings after each run</span>
+      </label>
+
+      <label className="mb-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={si.auto_promote}
+          onChange={(e) => upd({ auto_promote: e.target.checked })}
+        />
+        <span>Auto-promote distilled skills without approval</span>
+      </label>
+      {si.auto_promote && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          Auto-promote writes model-generated content into the live skill catalog
+          without review. Only enable this on a trusted host.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-x-4 sm:grid-cols-2">
+        <Field label="Consolidation schedule" hint="cron, evaluated in UTC">
+          <input
+            className={inputCls}
+            value={si.consolidation_schedule}
+            onChange={(e) => upd({ consolidation_schedule: e.target.value })}
+          />
+        </Field>
+        <Field label="Promotion threshold" hint="recurrence count needed to promote">
+          <input
+            className={inputCls}
+            type="number"
+            min={1}
+            value={si.promotion_threshold}
+            onChange={(e) => upd({ promotion_threshold: Number(e.target.value) })}
+          />
+        </Field>
+        <Field label="Max learnings" hint="episodic store cap (prune oldest)">
+          <input
+            className={inputCls}
+            type="number"
+            min={1}
+            value={si.max_learnings}
+            onChange={(e) => upd({ max_learnings: Number(e.target.value) })}
+          />
+        </Field>
+        <Field label="Retention days" hint="prune raw learnings older than this">
+          <input
+            className={inputCls}
+            type="number"
+            min={1}
+            value={si.retention_days}
+            onChange={(e) => upd({ retention_days: Number(e.target.value) })}
+          />
+        </Field>
+        <Field label="Max auto-generated skills" hint="bloat guard for the skill catalog">
+          <input
+            className={inputCls}
+            type="number"
+            min={0}
+            value={si.max_auto_skills}
+            onChange={(e) => upd({ max_auto_skills: Number(e.target.value) })}
+          />
+        </Field>
       </div>
     </div>
   )

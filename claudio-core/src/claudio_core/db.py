@@ -5,6 +5,7 @@ tables in the same file; ours are namespaced under ``claudio_``.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -152,6 +153,78 @@ CREATE TABLE IF NOT EXISTS claudio_task_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_runs_task ON claudio_task_runs (task_key, id DESC);
+
+-- ---- Self-improvement: episodic memory + skill distillation ----
+
+-- Episodic memory: one row per extracted learning.
+CREATE TABLE IF NOT EXISTS claudio_learnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    session_id TEXT,
+    run_id TEXT,
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    error_description TEXT,
+    root_cause TEXT,
+    fix_applied TEXT,
+    validated INTEGER NOT NULL DEFAULT 0,
+    critical INTEGER NOT NULL DEFAULT 0,
+    recurrence_count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'raw',
+    promoted_skill TEXT,
+    raw_excerpt TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_learnings_status ON claudio_learnings (status);
+CREATE INDEX IF NOT EXISTS idx_learnings_category ON claudio_learnings (category);
+
+-- Full-text search over past errors (external-content FTS5 table).
+CREATE VIRTUAL TABLE IF NOT EXISTS claudio_learnings_fts
+    USING fts5(title, error_description, root_cause, fix_applied,
+               content=claudio_learnings, content_rowid=id);
+
+-- Keep the FTS index in sync with the content table.
+CREATE TRIGGER IF NOT EXISTS claudio_learnings_fts_ai AFTER INSERT ON claudio_learnings BEGIN
+    INSERT INTO claudio_learnings_fts(rowid, title, error_description, root_cause, fix_applied)
+    VALUES (new.id, new.title, new.error_description, new.root_cause, new.fix_applied);
+END;
+
+CREATE TRIGGER IF NOT EXISTS claudio_learnings_fts_ad AFTER DELETE ON claudio_learnings BEGIN
+    INSERT INTO claudio_learnings_fts(claudio_learnings_fts, rowid, title, error_description, root_cause, fix_applied)
+    VALUES ('delete', old.id, old.title, old.error_description, old.root_cause, old.fix_applied);
+END;
+
+CREATE TRIGGER IF NOT EXISTS claudio_learnings_fts_au AFTER UPDATE ON claudio_learnings BEGIN
+    INSERT INTO claudio_learnings_fts(claudio_learnings_fts, rowid, title, error_description, root_cause, fix_applied)
+    VALUES ('delete', old.id, old.title, old.error_description, old.root_cause, old.fix_applied);
+    INSERT INTO claudio_learnings_fts(rowid, title, error_description, root_cause, fix_applied)
+    VALUES (new.id, new.title, new.error_description, new.root_cause, new.fix_applied);
+END;
+
+-- Procedural drafts awaiting operator approval before they reach skills/.
+CREATE TABLE IF NOT EXISTS claudio_skill_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    body TEXT NOT NULL,
+    source_learning_ids TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at TEXT,
+    review_note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_drafts_status ON claudio_skill_drafts (status);
+
+-- One row per consolidation pass (audit + "what changed when").
+CREATE TABLE IF NOT EXISTS claudio_consolidations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    learnings_reviewed INTEGER NOT NULL DEFAULT 0,
+    drafts_created INTEGER NOT NULL DEFAULT 0,
+    summary TEXT,
+    report TEXT
+);
 """
 
 
@@ -815,4 +888,305 @@ class Database:
                 "SELECT * FROM claudio_task_runs ORDER BY id DESC LIMIT ?", (limit,)
             ) as cur:
                 rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- learnings (episodic memory) -----------------------------------
+
+    @staticmethod
+    def _learning_from_row(row: Any) -> dict[str, Any]:
+        d = dict(row)
+        d["validated"] = bool(d.get("validated"))
+        d["critical"] = bool(d.get("critical"))
+        return d
+
+    async def add_learning(
+        self,
+        category: str,
+        title: str,
+        error_description: str = "",
+        root_cause: str = "",
+        fix_applied: str = "",
+        validated: bool = False,
+        critical: bool = False,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        raw_excerpt: str = "",
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_learnings "
+            "(created_at, session_id, run_id, category, title, error_description, "
+            "root_cause, fix_applied, validated, critical, recurrence_count, "
+            "status, raw_excerpt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'raw', ?)",
+            (
+                utcnow(),
+                session_id,
+                run_id,
+                category,
+                title,
+                error_description,
+                root_cause,
+                fix_applied,
+                1 if validated else 0,
+                1 if critical else 0,
+                raw_excerpt,
+            ),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def find_similar_learning(
+        self, query: str, status: str | None = None
+    ) -> dict[str, Any] | None:
+        """FTS search for a learning resembling ``query``.
+
+        Returns the single best match, or None. The query is sanitized into
+        quoted tokens joined by OR so FTS5 special characters can't break the
+        MATCH expression.
+        """
+        tokens = re.findall(r"[A-Za-z0-9_]+", query or "")
+        if not tokens:
+            return None
+        # Cap the term count so a long error string doesn't build a huge query.
+        terms = list(dict.fromkeys(t.lower() for t in tokens))[:8]
+        fts_query = " OR ".join(f'"{t}"' for t in terms)
+        sql = (
+            "SELECT l.* FROM claudio_learnings_fts f "
+            "JOIN claudio_learnings l ON l.id = f.rowid "
+            "WHERE claudio_learnings_fts MATCH ?"
+        )
+        params: list[Any] = [fts_query]
+        if status:
+            sql += " AND l.status = ?"
+            params.append(status)
+        sql += " ORDER BY bm25(claudio_learnings_fts) LIMIT 1"
+        try:
+            async with self.conn.execute(sql, params) as cur:
+                row = await cur.fetchone()
+        except Exception:  # noqa: BLE001 - FTS query failure is not fatal
+            return None
+        return self._learning_from_row(row) if row else None
+
+    async def bump_learning_recurrence(self, learning_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE claudio_learnings SET recurrence_count = recurrence_count + 1 "
+            "WHERE id = ?",
+            (learning_id,),
+        )
+        await self.conn.commit()
+
+    async def search_learnings(
+        self,
+        query: str,
+        status: str | None = None,
+        category: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Full-text search over learnings, returning ranked matches.
+
+        Same tokenization/sanitization as :meth:`find_similar_learning` but
+        returns many rows (best first) instead of one. Used by the read-side
+        ``GET /learning?q=`` endpoint.
+        """
+        tokens = re.findall(r"[A-Za-z0-9_]+", query or "")
+        if not tokens:
+            return []
+        terms = list(dict.fromkeys(t.lower() for t in tokens))[:12]
+        fts_query = " OR ".join(f'"{t}"' for t in terms)
+        sql = (
+            "SELECT l.* FROM claudio_learnings_fts f "
+            "JOIN claudio_learnings l ON l.id = f.rowid "
+            "WHERE claudio_learnings_fts MATCH ?"
+        )
+        params: list[Any] = [fts_query]
+        if status:
+            sql += " AND l.status = ?"
+            params.append(status)
+        if category:
+            sql += " AND l.category = ?"
+            params.append(category)
+        sql += " ORDER BY bm25(claudio_learnings_fts) LIMIT ?"
+        params.append(limit)
+        try:
+            async with self.conn.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+        except Exception:  # noqa: BLE001 - FTS failure is not fatal
+            return []
+        return [self._learning_from_row(r) for r in rows]
+
+    async def list_learnings(
+        self,
+        status: str | None = None,
+        category: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        async with self.conn.execute(
+            f"SELECT * FROM claudio_learnings {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._learning_from_row(r) for r in rows]
+
+    async def update_learning_status(
+        self, learning_id: int, status: str, promoted_skill: str | None = None
+    ) -> None:
+        if promoted_skill is not None:
+            await self.conn.execute(
+                "UPDATE claudio_learnings SET status = ?, promoted_skill = ? WHERE id = ?",
+                (status, promoted_skill, learning_id),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE claudio_learnings SET status = ? WHERE id = ?",
+                (status, learning_id),
+            )
+        await self.conn.commit()
+
+    async def count_learnings(self, status: str | None = None) -> int:
+        if status:
+            async with self.conn.execute(
+                "SELECT COUNT(*) AS n FROM claudio_learnings WHERE status = ?", (status,)
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with self.conn.execute(
+                "SELECT COUNT(*) AS n FROM claudio_learnings"
+            ) as cur:
+                row = await cur.fetchone()
+        return int((row["n"] if row else 0) or 0)
+
+    async def list_learning_categories(self) -> list[dict[str, Any]]:
+        """Distinct categories with their learning counts, most common first."""
+        async with self.conn.execute(
+            "SELECT category, COUNT(*) AS n FROM claudio_learnings "
+            "GROUP BY category ORDER BY n DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_learnings_older_than(self, cutoff_iso: str) -> int:
+        cur = await self.conn.execute(
+            "DELETE FROM claudio_learnings WHERE created_at < ?", (cutoff_iso,)
+        )
+        await self.conn.commit()
+        return cur.rowcount or 0
+
+    async def delete_oldest_raw_learnings(self, n: int) -> int:
+        """Delete the ``n`` oldest ``raw`` learnings (hard store-cap pruning).
+
+        Only raw rows are eligible — processed/promoted history is kept for
+        traceability. Returns the number of rows deleted.
+        """
+        if n <= 0:
+            return 0
+        cur = await self.conn.execute(
+            "DELETE FROM claudio_learnings WHERE id IN ("
+            "  SELECT id FROM claudio_learnings WHERE status = 'raw'"
+            "  ORDER BY id ASC LIMIT ?"
+            ")",
+            (n,),
+        )
+        await self.conn.commit()
+        return cur.rowcount or 0
+
+    # ---- skill drafts --------------------------------------------------
+
+    async def add_skill_draft(
+        self,
+        skill_name: str,
+        description: str,
+        body: str,
+        source_learning_ids: list[int] | None = None,
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_skill_drafts "
+            "(created_at, skill_name, description, body, source_learning_ids, status) "
+            "VALUES (?, ?, ?, ?, ?, 'pending')",
+            (
+                utcnow(),
+                skill_name,
+                description,
+                body,
+                json.dumps(source_learning_ids or []),
+            ),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def get_skill_draft(self, draft_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_skill_drafts WHERE id = ?", (draft_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["source_learning_ids"] = json.loads(d.get("source_learning_ids") or "[]")
+        return d
+
+    async def list_skill_drafts(self, status: str | None = None) -> list[dict[str, Any]]:
+        if status:
+            async with self.conn.execute(
+                "SELECT * FROM claudio_skill_drafts WHERE status = ? ORDER BY id DESC",
+                (status,),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self.conn.execute(
+                "SELECT * FROM claudio_skill_drafts ORDER BY id DESC"
+            ) as cur:
+                rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["source_learning_ids"] = json.loads(d.get("source_learning_ids") or "[]")
+            out.append(d)
+        return out
+
+    async def update_skill_draft(self, draft_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        if "source_learning_ids" in fields and not isinstance(
+            fields["source_learning_ids"], str
+        ):
+            fields["source_learning_ids"] = json.dumps(fields["source_learning_ids"])
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        await self.conn.execute(
+            f"UPDATE claudio_skill_drafts SET {cols} WHERE id = ?",
+            (*fields.values(), draft_id),
+        )
+        await self.conn.commit()
+
+    # ---- consolidations ------------------------------------------------
+
+    async def add_consolidation(
+        self,
+        learnings_reviewed: int,
+        drafts_created: int,
+        summary: str = "",
+        report: str = "",
+    ) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO claudio_consolidations "
+            "(created_at, learnings_reviewed, drafts_created, summary, report) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (utcnow(), learnings_reviewed, drafts_created, summary, report),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def list_consolidations(self, limit: int = 20) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_consolidations ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
         return [dict(r) for r in rows]

@@ -269,10 +269,6 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
         ],
       }
     }
-    case 'usage': {
-      const d = ev.data as UsageInfo
-      return { ...state, usage: d }
-    }
     case 'context_usage': {
       const d = ev.data as ContextUsage
       return { ...state, context: d }
@@ -283,6 +279,12 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
         files_written: [],
         commands_run: 0,
         duration_seconds: 0,
+        outstanding_todos: [],
+        deliverable_written: false,
+        deliverable_ok: false,
+        deliverable_bytes: 0,
+        deliverable: [],
+        task_complete: false,
       }
       return {
         ...state,
@@ -307,7 +309,8 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
     }
     case 'run_failed': {
       const d = ev.data as RunFailedEvent
-      const code = d.code ?? ''
+      const err = d.error ?? { code: '', message: '', retryable: false }
+      const code = err.code ?? ''
       const status: 'failed' | 'interrupted' =
         code === 'cancelled' || code === 'connection_error' ? 'interrupted' : 'failed'
       return {
@@ -315,7 +318,7 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
         streaming: false,
         reconnecting: false,
         runId: null,
-        error: `${d.code}: ${d.message}`,
+        error: `${err.code}: ${err.message}`,
         items: [
           ...state.items,
           {
@@ -325,7 +328,7 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
             filesWritten: [],
             commandsRun: 0,
             durationSeconds: 0,
-            error: d.message,
+            error: err.message,
           },
         ],
       }

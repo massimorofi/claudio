@@ -9,10 +9,9 @@ built on the OpenAI Agents SDK. It is being moved to Google ADK behind a
 framework-neutral core, so that the agent framework becomes a replaceable
 component rather than a load-bearing assumption.
 
-**Current status: Step 2 of the migration.** Core is extracted and verified, the
-ADK engine is written, the frontend is intact. Backend orchestration and HTTP
-routes are not yet ported, so the backend cannot serve traffic yet. See
-[refactoring_status.md](./refactoring_status.md).
+**Current status: migration complete and operational.** Core is extracted and
+verified, the ADK engine is written, backend orchestration and HTTP routes are
+ported, and the backend serves traffic.
 
 ---
 
@@ -121,14 +120,14 @@ The ADK deployable. `engine/adk_engine.py` implements core's `RunEngine` over
 ADK: wrapped tools with synthetic signatures, confirmation-based pause,
 cross-process resume, and event translation from ADK's shape into Claudio's.
 
-The rest, `RunManager`, HTTP routes and the autonomous daemon, is specified in
-[doc/backend.md](./doc/backend.md) and not yet ported.
+The rest — `RunManager`, HTTP routes and the autonomous daemon — is ported and
+running. See [doc/backend.md](./doc/backend.md) for the full API and structure.
 
 ### claudio-frontend
 
-Unchanged. Vite + React 18 + TypeScript + Tailwind 4. Five views: chat, config,
-workspace, monitor, tasks. Handles SSE reconnection, approval round-trips,
-context-usage display, and file attachment.
+Vite + React 18 + TypeScript + Tailwind 4. Six views: chat, config, workspace,
+monitor, tasks, memory. Handles SSE reconnection, approval round-trips,
+context-usage display, file attachment, and the self-improvement Memory view.
 
 Details: [doc/frontend.md](./doc/frontend.md)
 

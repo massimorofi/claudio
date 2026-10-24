@@ -184,3 +184,52 @@ def test_typescript_tool_call_arguments_is_string():
     assert "arguments: string" in tool_call
     tool_result = ts.split("interface ToolResultEvent")[1].split("}")[0]
     assert "output: string" in tool_result
+
+
+def _ts_event_name_union(ts: str) -> set[str]:
+    """Extract the members of the TS ``EventName`` string-literal union.
+
+    Reads the ``export type EventName = ...`` block and pulls every quoted
+    literal out of it. Raises if the block is missing, so a renamed or deleted
+    union fails loudly rather than silently passing as an empty set.
+    """
+    import re
+
+    marker = "export type EventName ="
+    if marker not in ts:
+        raise AssertionError(f"`{marker}` not found in {FRONTEND_TYPES}")
+    after = ts.split(marker, 1)[1]
+    # The union ends at the first line that isn't a `| 'name'` continuation.
+    block_lines: list[str] = []
+    for line in after.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") or stripped == "":
+            block_lines.append(line)
+            if stripped == "" and block_lines[:-1]:
+                break
+        else:
+            break
+    block = "\n".join(block_lines)
+    members = set(re.findall(r"'([a-z_]+)'", block))
+    if not members:
+        raise AssertionError(f"no string literals parsed from the EventName union")
+    return members
+
+
+@pytest.mark.skipif(not FRONTEND_TYPES.exists(), reason="frontend not present yet")
+def test_typescript_event_name_union_matches_core_both_directions():
+    """The TS ``EventName`` union and core ``EventName`` must be identical.
+
+    Asserted in both directions so drift is caught whether the backend adds an
+    event the TS mirror lacks, or the TS mirror declares one the backend never
+    emits. This is the strict version of the name-coverage check above.
+    """
+    ts = FRONTEND_TYPES.read_text()
+    ts_names = _ts_event_name_union(ts)
+    core_names = set(ALL_EVENT_NAMES)
+
+    missing_in_ts = core_names - ts_names
+    extra_in_ts = ts_names - core_names
+    assert not missing_in_ts, f"core events missing from TS EventName union: {sorted(missing_in_ts)}"
+    assert not extra_in_ts, f"TS EventName union declares events not in core: {sorted(extra_in_ts)}"
+    assert ts_names == core_names

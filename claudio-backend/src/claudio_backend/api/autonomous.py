@@ -105,6 +105,15 @@ async def recovery_run(request: Request) -> dict:
     return {"report": report.to_dict()}
 
 
+@router.post("/autonomous/consolidation/run")
+async def consolidation_run(request: Request) -> dict:
+    """Run one self-improvement consolidation pass now (the scheduler runs it on its cron)."""
+    require_auth(request)
+    supervisor = request.app.state.supervisor
+    report = await supervisor.task_runner.run_builtin("consolidation", trigger="manual")
+    return {"report": report.to_dict()}
+
+
 @router.get("/autonomous/issues")
 async def list_issues(request: Request, status: str | None = None) -> dict:
     require_auth(request)

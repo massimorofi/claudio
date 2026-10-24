@@ -38,6 +38,7 @@ from .api import (
     chat,
     config,
     files,
+    learning,
     management,
     monitoring,
     sessions,
@@ -52,6 +53,44 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 CONFIG_PATH = BASE_DIR / "config" / "config.yaml"
 
 API_PREFIX = "/api/v1"
+
+# ADK's McpToolset calls the optional ``resources/list`` MCP method during
+# setup. Servers that don't implement it (e.g. the SkillMD server) answer
+# "Method not found: resources/list", and ADK logs a WARNING every time. The
+# warning is harmless -- the toolset's tool functionality is unaffected -- but
+# it buries real signal in the log. Suppress exactly this one message.
+#
+# Two ADK loggers emit it: the toolset itself and the resource-loading tool.
+_MCP_NOISE_LOGGERS = (
+    "google_adk.google.adk.tools.mcp_tool.mcp_toolset",
+    "google_adk.google.adk.tools.load_mcp_resource_tool",
+)
+
+
+class _McpResourcesListNoiseFilter(logging.Filter):
+    """Drop the 'resources/list not supported' warning, pass everything else."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 - never let a filter raise
+            return True
+        if "Failed to list resources" in msg and "resources/list" in msg:
+            return False
+        return True
+
+
+def _silence_mcp_resources_list_noise() -> None:
+    """Attach the noise filter to the ADK MCP loggers that emit it (idempotent).
+
+    A ``logging.Filter`` on a logger only sees records logged *directly* to that
+    logger, not records propagated up from children -- so it is attached to each
+    emitting logger by name rather than to a shared parent.
+    """
+    for name in _MCP_NOISE_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(isinstance(f, _McpResourcesListNoiseFilter) for f in target.filters):
+            target.addFilter(_McpResourcesListNoiseFilter())
 
 
 def _load_cors_origins() -> list[str]:
@@ -132,6 +171,7 @@ def build_app(supervisor: Supervisor, lifespan: Callable | None = None) -> FastA
     app.include_router(workspace.router, prefix=API_PREFIX)
     app.include_router(autonomous.router, prefix=API_PREFIX)
     app.include_router(tasks.router, prefix=API_PREFIX)
+    app.include_router(learning.router, prefix=API_PREFIX)
     app.include_router(files.router, prefix=API_PREFIX)
 
     @app.get("/")
@@ -159,6 +199,7 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             setup_logging("INFO")
             logger.warning("Could not load config at startup: %s", e)
+        _silence_mcp_resources_list_noise()
         # Auto-start the agent runtime; the supervisor serves regardless of outcome.
         try:
             await supervisor.start()

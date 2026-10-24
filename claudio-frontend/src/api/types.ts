@@ -147,6 +147,17 @@ export interface AutonomousCfg {
   command_allowlist: string[] | null
 }
 
+export interface SelfImprovementCfg {
+  enabled: boolean
+  capture_enabled: boolean
+  consolidation_schedule: string
+  promotion_threshold: number
+  auto_promote: boolean
+  max_learnings: number
+  retention_days: number
+  max_auto_skills: number
+}
+
 export interface AppConfig {
   server: ServerCfg
   llm: LlmCfg
@@ -154,6 +165,7 @@ export interface AppConfig {
   mcp: { servers: McpServerEntry[] }
   monitoring: MonitoringCfg
   autonomous: AutonomousCfg
+  self_improvement: SelfImprovementCfg
 }
 
 export interface ConfigResponse {
@@ -183,8 +195,6 @@ export interface SessionSummary {
   updated_at: string
   message_count: number
   total_cost_usd: number
-  total_input_tokens: number
-  total_output_tokens: number
 }
 
 export interface ChatMessage {
@@ -221,14 +231,12 @@ export interface RunInfo {
 }
 
 export interface ApprovalRequest {
-  id: string
+  approval_id: string
   run_id: string
   session_id: string
-  tool_name: string
-  call_id: string
+  tool: string
   arguments: string
   reason: string
-  state: string
   requested_at: string
 }
 
@@ -241,8 +249,27 @@ export interface ActiveRunResponse {
 
 // ---- SSE events ----
 
+/**
+ * Every SSE event name on the wire. Mirrors ``claudio_core.events.EventName``;
+ * the contract test asserts the two sets match in both directions.
+ */
+export type EventName =
+  | 'run_started'
+  | 'run_completed'
+  | 'run_failed'
+  | 'run_restarting'
+  | 'run_compacted'
+  | 'token'
+  | 'reasoning'
+  | 'tool_call'
+  | 'tool_result'
+  | 'handoff'
+  | 'approval_required'
+  | 'context_usage'
+  | 'heartbeat'
+
 export interface StreamEvent {
-  event: string
+  event: EventName
   data: unknown
   id?: string
 }
@@ -294,16 +321,30 @@ export interface ContextUsage {
 
 // ---- Phase 5: completion status ----
 
+export interface DeliverableItem {
+  path: string
+  bytes: number
+  status: 'ok' | 'missing' | 'stub'
+}
+
 export interface TurnSummary {
   files_written: string[]
   commands_run: number
   duration_seconds: number
+  outstanding_todos: string[]
+  deliverable_written: boolean
+  deliverable_ok: boolean
+  deliverable_bytes: number
+  deliverable: DeliverableItem[]
+  task_complete: boolean
 }
 export interface RunFailedEvent {
   run_id: string
-  code: string
-  message: string
-  retryable: boolean
+  error: {
+    code: string
+    message: string
+    retryable: boolean
+  }
 }
 export interface RunRestartingEvent {
   reason: string // 'compacted' | 'fallback' | an error code
@@ -627,4 +668,61 @@ export interface AcceptFixResult {
   // When the fix did not resolve the issue, the agent proposes a different one
   // here (null once the attempt ceiling is reached).
   next_suggestion: FixSuggestion | null
+}
+
+// ---- Self-improvement (Memory) ----
+
+export type LearningStatus = 'raw' | 'processed' | 'promoted' | 'rejected'
+
+export interface Learning {
+  id: number
+  created_at: string
+  session_id: string | null
+  run_id: string | null
+  category: string
+  title: string
+  error_description: string
+  root_cause: string
+  fix_applied: string
+  validated: boolean
+  critical: boolean
+  recurrence_count: number
+  status: LearningStatus
+  promoted_skill: string | null
+  raw_excerpt: string
+}
+
+export interface LearningCategory {
+  category: string
+  n: number
+}
+
+export interface LearningStats {
+  total: number
+  raw: number
+  processed: number
+  promoted: number
+}
+
+export type DraftStatus = 'pending' | 'approved' | 'rejected'
+
+export interface SkillDraft {
+  id: number
+  created_at: string
+  skill_name: string
+  description: string
+  body: string
+  source_learning_ids: number[]
+  status: DraftStatus
+  reviewed_at: string | null
+  review_note: string | null
+}
+
+export interface ConsolidationRecord {
+  id: number
+  created_at: string
+  learnings_reviewed: number
+  drafts_created: number
+  summary: string
+  report: string
 }

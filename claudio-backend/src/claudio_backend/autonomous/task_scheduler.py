@@ -35,6 +35,7 @@ MAX_SLEEP_SECONDS = 300.0
 IDLE_SLEEP_SECONDS = 300.0
 
 BUILTIN_MAINTENANCE = "builtin:maintenance"
+BUILTIN_CONSOLIDATION = "builtin:consolidation"
 
 
 def _cron_next(schedule: str, from_dt: datetime) -> datetime:
@@ -93,6 +94,10 @@ class TaskScheduler:
             items.append((f"task:{task['key']}", task["schedule"]))
         if self.config.autonomous.maintenance.enabled:
             items.append((BUILTIN_MAINTENANCE, self.config.autonomous.maintenance.schedule))
+        if self.config.self_improvement.enabled:
+            items.append(
+                (BUILTIN_CONSOLIDATION, self.config.self_improvement.consolidation_schedule)
+            )
         return items
 
     async def _tick(self) -> float:
@@ -144,6 +149,8 @@ class TaskScheduler:
     def _spawn(self, item_id: str) -> None:
         if item_id == BUILTIN_MAINTENANCE:
             asyncio.create_task(self._run_builtin("maintenance"))
+        elif item_id == BUILTIN_CONSOLIDATION:
+            asyncio.create_task(self._run_builtin("consolidation"))
         elif item_id.startswith("task:"):
             key = item_id[len("task:"):]
             asyncio.create_task(self._run_task(key))
