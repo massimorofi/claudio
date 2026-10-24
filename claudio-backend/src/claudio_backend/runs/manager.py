@@ -947,29 +947,57 @@ class RunManager:
                 },
             },
         )
-        self._schedule_capture(record)
+        await self._schedule_capture(record)
         self._close_subscribers(record)
 
-    def _schedule_capture(self, record: RunRecord) -> None:
+    async def _schedule_capture(self, record: RunRecord) -> None:
         """Fire-and-forget the self-improvement capture pass for a finished run.
 
-        Reads the transcript the run just persisted and extracts learnings in a
-        background task, so the run's completion response is never delayed by
-        the extra LLM call. The whole thing is gated on the self-improvement
-        config and is best-effort: capture_run swallows its own errors.
+        Captures only the transcript entries appended since the last capture,
+        tracked by a per-session watermark (``learning_captured_entries``).
+        Reading just the new slice -- rather than the whole cumulative
+        transcript -- is what stops a single fixed incident from being
+        re-extracted on every later run, which would inflate its
+        ``recurrence_count`` past the promotion threshold on phantom repeats.
+
+        The watermark is advanced synchronously, before the capture task is
+        spawned, so a subsequent run on this session sees the updated value
+        immediately and never re-reads these entries -- regardless of how
+        long the background extraction takes. Capture itself stays
+        best-effort: capture_run swallows its own errors.
         """
         si = self.config.self_improvement
         if not (si.enabled and si.capture_enabled):
             return
         try:
             transcript = self.session_store.read(record.session_id)
+            session = await self.db.get_session(record.session_id)
         except Exception as exc:  # noqa: BLE001 - capture is opportunistic
             logger.warning("capture: could not read transcript: %s", exc)
+            return
+        captured = int((session or {}).get("learning_captured_entries") or 0)
+        # Clamp in case the transcript was cleared/truncated below the stored
+        # watermark; a stale watermark must not skip future entries.
+        start = min(captured, len(transcript))
+        new_entries = transcript[start:]
+        # Advance the watermark to the current length now, before handing the
+        # slice off, so the next run never re-reads these entries. This runs
+        # even when the slice is empty: if the transcript had been truncated
+        # below a stale watermark, this corrects it so the next run resumes
+        # from the right place instead of being stuck above the transcript.
+        try:
+            await self.db.update_session(
+                record.session_id, learning_captured_entries=len(transcript)
+            )
+        except Exception as exc:  # noqa: BLE001 - capture is opportunistic
+            logger.warning("capture: could not advance watermark: %s", exc)
+            return
+        if not new_entries:
             return
         task = asyncio.create_task(
             capture_run(
                 self.db,
-                transcript,
+                new_entries,
                 self.config,
                 session_id=record.session_id,
                 run_id=record.run_id,

@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS claudio_sessions (
     last_context_tokens INTEGER NOT NULL DEFAULT 0,
     compaction_disabled INTEGER NOT NULL DEFAULT 0,
     turns_since_todo INTEGER NOT NULL DEFAULT 0,
-    todos TEXT NOT NULL DEFAULT '[]'
+    todos TEXT NOT NULL DEFAULT '[]',
+    learning_captured_entries INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS claudio_config_history (
@@ -266,6 +267,15 @@ class Database:
         if "todos" not in scols:
             await self.conn.execute(
                 "ALTER TABLE claudio_sessions ADD COLUMN todos TEXT NOT NULL DEFAULT '[]'"
+            )
+            await self.conn.commit()
+        # Self-improvement capture watermark: how many transcript entries have
+        # already been handed to the learning extractor. Each run captures only
+        # the entries appended since this number, so a fixed incident is not
+        # re-read (and its recurrence not re-inflated) on every later run.
+        if "learning_captured_entries" not in scols:
+            await self.conn.execute(
+                "ALTER TABLE claudio_sessions ADD COLUMN learning_captured_entries INTEGER NOT NULL DEFAULT 0"
             )
             await self.conn.commit()
         # Task types: 'prompt' (agent playbook) vs 'script' (direct shell).

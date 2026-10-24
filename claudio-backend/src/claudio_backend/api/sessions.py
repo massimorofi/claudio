@@ -117,6 +117,9 @@ async def clear_session(request: Request, session_id: str) -> dict:
         raise ApiError(404, "not_found", f"No session {session_id}")
     supervisor.session_store.clear(session_id)
     await supervisor.db.update_session(
-        session_id, message_count=0, turns_since_todo=0
+        session_id,
+        message_count=0,
+        turns_since_todo=0,
+        learning_captured_entries=0,
     )
     return {"cleared": True}
