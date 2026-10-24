@@ -418,7 +418,11 @@ class AdkEngine:
     # -- construction helpers -------------------------------------------
 
     def _model(self, spec: ModelSpec) -> Any:
-        from google.adk.integrations.openai import OpenAILlm
+        # ReasoningOpenAILlm is a thin subclass of the ADK's OpenAILlm that
+        # forwards the model's ``reasoning_content`` deltas as thought parts.
+        # The stock OpenAILlm drops them, so the model's thinking never reached
+        # the event stream and was never persisted to the session transcript.
+        from .reasoning_llm import ReasoningOpenAILlm
 
         # max_tokens MUST be passed explicitly. OpenAILlm defaults to 4096, and
         # a reasoning model spends that budget on its reasoning before any
@@ -426,7 +430,7 @@ class AdkEngine:
         # truncated call arrives as plain text (not a parsed tool call), and the
         # agent mistakes it for a final answer and stops. The configured value
         # lives in ModelSpec; forward it to the client.
-        return OpenAILlm(
+        return ReasoningOpenAILlm(
             model=spec.model,
             base_url=spec.base_url,
             api_key=spec.api_key or "local",

@@ -151,14 +151,24 @@ async def notify_test(request: Request) -> dict:
 
 @router.post("/autonomous/issues/{issue_id}/propose-fix")
 async def propose_fix(request: Request, issue_id: int) -> dict:
-    """Ask the agent to propose a single fix command for this issue."""
+    """Ask the agent to propose a fix command for this issue.
+
+    Commands already suggested for this issue are fed back to the agent so it
+    proposes something new rather than repeating a fix that was already tried.
+    """
     require_auth(request)
     supervisor = request.app.state.supervisor
     issue = await supervisor.db.get_issue(issue_id)
     if not issue:
         raise ApiError(404, "not_found", f"No issue {issue_id}")
+    prior = await supervisor.db.list_suggestions_for_issue(issue_id)
+    tried = [
+        (s["command"], f"already proposed (status: {s.get('status')})")
+        for s in prior
+        if s.get("command")
+    ]
     try:
-        proposal = await fixer.propose_fix(issue, supervisor.config)
+        proposal = await fixer.propose_fix(issue, supervisor.config, tried=tried)
     except Exception as exc:  # noqa: BLE001
         raise ApiError(502, "proposal_failed", f"Could not generate a fix: {exc}")
     sid = await supervisor.db.add_suggestion(
@@ -234,10 +244,51 @@ async def accept_suggestion(
         )
         resolved = True
 
+    # If the fix didn't clear the issue, keep the agent working rather than
+    # stopping: propose a different fix (bounded by max_fix_attempts) so the
+    # operator gets a fresh fix to try instead of a dead end.
+    next_suggestion = None
+    if not resolved:
+        issue = await supervisor.db.get_issue(issue_id)
+        prior = await supervisor.db.list_suggestions_for_issue(issue_id)
+        max_attempts = int(
+            getattr(
+                supervisor.config.autonomous, "max_fix_attempts", fixer.MAX_FIX_ATTEMPTS
+            )
+        )
+        if issue and len(prior) < max_attempts:
+            tried: list[tuple[str, str]] = []
+            for s in prior:
+                if not s.get("command"):
+                    continue
+                if s.get("status") == "failed":
+                    why = f"failed (exit {s.get('exit_code')})"
+                else:
+                    why = "ran but the issue is still present"
+                tried.append((s["command"], why))
+            try:
+                np = await fixer.propose_fix(issue, supervisor.config, tried=tried)
+                nsid = await supervisor.db.add_suggestion(
+                    issue_id=issue_id,
+                    command=np.command,
+                    explanation=np.explanation,
+                    risk=np.risk,
+                    reversible=np.reversible,
+                )
+                await supervisor.db.add_audit(
+                    action="suggestion_proposed",
+                    command=np.command,
+                    detail=f"auto after failed fix for issue {issue_id}",
+                )
+                next_suggestion = await supervisor.db.get_suggestion(nsid)
+            except Exception:  # noqa: BLE001 - the next fix is best-effort
+                next_suggestion = None
+
     return {
         "executed": result,
         "recheck": {"verdict": recheck["verdict"], "summary": recheck["summary"]},
         "issue_resolved": resolved,
+        "next_suggestion": next_suggestion,
     }
 
 

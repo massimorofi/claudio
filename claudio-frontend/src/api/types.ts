@@ -624,4 +624,7 @@ export interface AcceptFixResult {
   executed: FixExecutionResult
   recheck: { verdict: HealthVerdict; summary: string }
   issue_resolved: boolean
+  // When the fix did not resolve the issue, the agent proposes a different one
+  // here (null once the attempt ceiling is reached).
+  next_suggestion: FixSuggestion | null
 }

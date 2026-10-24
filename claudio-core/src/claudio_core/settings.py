@@ -258,6 +258,10 @@ class RecoveryConfig(BaseModel):
 class AutonomousConfig(BaseModel):
     enabled: bool = False
     report_only: bool = True
+    # How many distinct fix attempts the agent will work through for one issue
+    # before giving up. Each attempt is a different command, proposed with the
+    # previous failures fed back to it.
+    max_fix_attempts: int = 3
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)

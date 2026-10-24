@@ -462,6 +462,10 @@ function IssueCard({ issue }: { issue: Issue }) {
       queryClient.invalidateQueries({ queryKey: ['autonomous-issues'] })
       queryClient.invalidateQueries({ queryKey: ['autonomous-status'] })
       queryClient.invalidateQueries({ queryKey: ['autonomous-history'] })
+      // If this fix didn't clear the issue and the agent proposed a different
+      // one, present it as the next fix to approve. If it gave up, drop the
+      // proposal so the operator isn't offered the same failed command again.
+      setProposal(data.issue_resolved ? null : data.next_suggestion)
     },
   })
 
@@ -527,7 +531,7 @@ function IssueCard({ issue }: { issue: Issue }) {
             </div>
           )}
 
-          {proposal && !acceptResult && (
+          {proposal && (
             <div className="mt-2 rounded-lg border border-black/10 bg-black/[0.02] p-3">
               <div className="mb-1 flex items-center gap-2">
                 <span className="text-xs font-semibold text-black/60">
@@ -606,17 +610,24 @@ function IssueCard({ issue }: { issue: Issue }) {
             <div className="mt-2 space-y-2">
               <div
                 className={`rounded-lg border p-2 text-xs ${
-                  acceptResult.executed.ok
-                    ? 'border-green-200 bg-green-50 text-green-700'
-                    : 'border-red-200 bg-red-50 text-red-700'
+                  !acceptResult.executed.ok
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : acceptResult.issue_resolved
+                      ? 'border-green-200 bg-green-50 text-green-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
                 }`}
               >
                 <span className="font-semibold">
-                  Command {acceptResult.executed.ok ? 'succeeded' : 'failed'}
+                  {!acceptResult.executed.ok
+                    ? `Command failed${
+                        acceptResult.executed.exit_code != null
+                          ? ` (exit ${acceptResult.executed.exit_code})`
+                          : ''
+                      }`
+                    : acceptResult.issue_resolved
+                      ? 'Command succeeded — issue resolved'
+                      : 'Command ran (exit 0) but the issue is still present'}
                 </span>
-                {acceptResult.executed.exit_code != null && (
-                  <span> (exit {acceptResult.executed.exit_code})</span>
-                )}
                 {!acceptResult.executed.ok && acceptResult.executed.stderr && (
                   <div className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px]">
                     {acceptResult.executed.stderr}
@@ -638,11 +649,16 @@ function IssueCard({ issue }: { issue: Issue }) {
                 <div className="flex items-center gap-1.5 text-xs text-green-700">
                   <ShieldCheck size={13} /> Issue resolved — the check now passes.
                 </div>
-              ) : (
+              ) : acceptResult.next_suggestion ? (
                 <div className="flex items-center gap-1.5 text-xs text-amber-700">
                   <AlertTriangle size={13} />
-                  Still not clear. The command ran but the health check still reports a
-                  problem — this issue may need a different fix.
+                  Still not clear — the agent is working on a different fix.
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 text-xs text-red-700">
+                  <AlertTriangle size={13} />
+                  We've worked through every fix and the issue persists — this needs
+                  manual attention.
                 </div>
               )}
             </div>

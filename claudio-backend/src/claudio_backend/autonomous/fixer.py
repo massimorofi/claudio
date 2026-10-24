@@ -48,6 +48,13 @@ _CATASTROPHIC_PATTERNS = [
 ]
 _CATASTROPHIC_RE = [re.compile(p) for p in _CATASTROPHIC_PATTERNS]
 
+# Unit tokens (``foo.service``, ``snap.x.y.service``, ``foo@bar.timer`` ...) that
+# appear in a systemctl-style command. Used to check each named unit actually
+# exists on this host before we offer the command as a fix.
+_UNIT_TOKEN_RE = re.compile(
+    r"\b([\w@.\-]+\.(?:service|socket|timer|mount|target|slice|path|device))\b"
+)
+
 
 @dataclass
 class FixProposal:
@@ -62,6 +69,49 @@ class FixProposal:
 
 def _is_catastrophic(command: str) -> bool:
     return any(rx.search(command) for rx in _CATASTROPHIC_RE)
+
+
+async def _validate_command(command: str) -> tuple[bool, str]:
+    """Check a proposed command can actually run on this system.
+
+    Catches the common failure mode where the model proposes a command that
+    references a non-existent systemd unit (or other missing resource), which
+    would fail the moment it is run. We probe each unit named in the command
+    with ``systemctl cat`` (read-only, no privileges needed) and report any
+    that don't exist.
+
+    Returns ``(ok, reason)``. ``ok`` is False only when we can positively
+    identify a missing resource; commands we can't validate (no units named,
+    or the probe itself failing) pass through as ok so we never block a
+    legitimate fix on a probe limitation.
+    """
+    units = _UNIT_TOKEN_RE.findall(command)
+    if not units:
+        return True, ""
+
+    missing: list[str] = []
+    for unit in sorted(set(units)):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl",
+                "cat",
+                unit,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode != 0:
+                missing.append(unit)
+        except (OSError, asyncio.TimeoutError):
+            # Can't probe (systemctl unavailable / hung) — don't block.
+            return True, ""
+
+    if missing:
+        return False, (
+            "command references systemd unit(s) that do not exist on this host: "
+            + ", ".join(missing)
+        )
+    return True, ""
 
 
 def _ensure_sudo_stdin(command: str) -> str:
@@ -110,7 +160,7 @@ Issue title: {title}
 Severity: {severity}
 Evidence:
 {detail}
-
+{tried}
 Propose exactly ONE shell command that will fix this issue. Think about what the evidence actually shows and pick the single most appropriate, safe remediation.
 
 Respond with ONLY a JSON object, no prose, in this exact shape:
@@ -120,43 +170,100 @@ Rules:
 - One command only. No chained destructive operations.
 - If the fix needs elevated privileges, prefix with sudo.
 - Prefer reversible, low-risk actions. If no safe automated fix exists, set risk to "high" and explain that a human should handle it manually.
+- Only reference systemd units, files, paths and services that actually exist on this host. Do not invent unit names.
 """
 
 
-async def propose_fix(issue: dict[str, Any], config: AppConfig) -> FixProposal:
-    """Ask the LLM for a single fix command for the given issue."""
-    prompt = _PROMPT.format(
-        title=issue.get("title", ""),
-        severity=issue.get("severity", ""),
-        detail=issue.get("detail", "") or issue.get("summary", ""),
-    )
-    raw = await openai_chat_completion(
-        base_url=config.llm.base_url,
-        model=config.llm.model,
-        api_key=config.llm.api_key or "local",
-        messages=[
-            {"role": "system", "content": "You propose safe, specific Linux remediation commands and nothing else."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-        max_tokens=1024,
-        timeout=float(config.llm.timeout_seconds),
-    )
-    data = _extract_json(raw)
-    command = str(data.get("command", "")).strip()
-    if not command:
-        raise ValueError("proposal contained no command")
-    if _is_catastrophic(command):
-        raise ValueError(f"refused catastrophic command: {command}")
-    risk = str(data.get("risk", "low")).lower()
-    if risk not in ("low", "medium", "high"):
-        risk = "medium"
-    reversible = bool(data.get("reversible", True))
-    return FixProposal(
-        command=command,
-        explanation=str(data.get("explanation", "")).strip(),
-        risk=risk,
-        reversible=reversible,
+MAX_FIX_ATTEMPTS = 3
+
+
+def _format_tried(tried: list[tuple[str, str]]) -> str:
+    """Render the already-attempted commands for the prompt (empty if none)."""
+    if not tried:
+        return ""
+    lines = [
+        "",
+        "Previously attempted fixes that did NOT work. Do NOT repeat any of these,",
+        "and do not propose a command that is essentially the same — pick a",
+        "genuinely different approach:",
+    ]
+    for cmd, why in tried:
+        lines.append(f"- {cmd if cmd else '(empty)'} — {why}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def propose_fix(
+    issue: dict[str, Any],
+    config: AppConfig,
+    tried: list[tuple[str, str]] | None = None,
+) -> FixProposal:
+    """Propose a valid fix command, retrying with feedback until one passes.
+
+    A single generation can come back with a command that references a unit that
+    doesn't exist, is catastrophic, or repeats something already tried. Rather
+    than stopping, we feed the rejection reason back to the model and ask for a
+    different command, up to ``max_fix_attempts`` times. ``tried`` seeds the
+    rejection history with commands already run on this issue in earlier rounds,
+    so a fresh proposal doesn't repeat a fix that already failed.
+
+    Returns the first proposal that passes validation. Raises if none does.
+    """
+    history: list[tuple[str, str]] = list(tried or [])
+    max_attempts = int(getattr(config.autonomous, "max_fix_attempts", MAX_FIX_ATTEMPTS))
+    if max_attempts < 1:
+        max_attempts = 1
+    last_error = "no attempt made"
+    for _attempt in range(max_attempts):
+        prompt = _PROMPT.format(
+            title=issue.get("title", ""),
+            severity=issue.get("severity", ""),
+            detail=issue.get("detail", "") or issue.get("summary", ""),
+            tried=_format_tried(history),
+        )
+        raw = await openai_chat_completion(
+            base_url=config.llm.base_url,
+            model=config.llm.model,
+            api_key=config.llm.api_key or "local",
+            messages=[
+                {"role": "system", "content": "You propose safe, specific Linux remediation commands and nothing else."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=1024,
+            timeout=float(config.llm.timeout_seconds),
+        )
+        data = _extract_json(raw)
+        command = str(data.get("command", "")).strip()
+        if not command:
+            last_error = "proposal contained no command"
+            history.append(("", last_error))
+            continue
+        if _is_catastrophic(command):
+            last_error = f"refused catastrophic command: {command}"
+            history.append((command, last_error))
+            continue
+        valid, reason = await _validate_command(command)
+        if not valid:
+            last_error = reason
+            history.append((command, reason))
+            continue
+        if any(command == prior for prior, _ in history):
+            last_error = "model repeated an already-tried command"
+            history.append((command, last_error))
+            continue
+        risk = str(data.get("risk", "low")).lower()
+        if risk not in ("low", "medium", "high"):
+            risk = "medium"
+        reversible = bool(data.get("reversible", True))
+        return FixProposal(
+            command=command,
+            explanation=str(data.get("explanation", "")).strip(),
+            risk=risk,
+            reversible=reversible,
+        )
+    raise ValueError(
+        f"could not produce a valid fix after {max_attempts} attempts: {last_error}"
     )
 
 

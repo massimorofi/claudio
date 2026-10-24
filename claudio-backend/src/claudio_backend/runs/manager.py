@@ -750,6 +750,11 @@ class RunManager:
         """Fold one forwarded event into the record's accumulators."""
         if name == EventName.TOOL_CALL.value:
             _track_produced(record, data)
+            # Persist the call itself, not just its result. The client rebuilds
+            # tool cards and the workflow panel from tool_call entries (a later
+            # tool_result only closes the pending card), so without this the
+            # workflow panel and tool cards are empty after a view remount.
+            self._mirror_tool_event(record, {"event": name, "data": data})
             tool = data.get("name") or ""
             if tool in _WRITE_TOOL_NAMES:
                 record.deliverable_written = True
