@@ -158,10 +158,22 @@ export interface SelfImprovementCfg {
   max_auto_skills: number
 }
 
+export interface SearchCfg {
+  provider: 'auto' | 'brave' | 'serper' | 'tavily' | 'scraping'
+  brave_api_key: string
+  serper_api_key: string
+  tavily_api_key: string
+  language: string
+  country: string
+  min_relevance: number
+  timeout_seconds: number
+}
+
 export interface AppConfig {
   server: ServerCfg
   llm: LlmCfg
   agent: AgentCfg
+  search: SearchCfg
   mcp: { servers: McpServerEntry[] }
   monitoring: MonitoringCfg
   autonomous: AutonomousCfg

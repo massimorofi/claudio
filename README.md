@@ -16,6 +16,38 @@ serves traffic.
 
 ---
 
+## Recent updates
+
+### Web search reliability
+
+The `web_search` tool no longer relies on keyless HTML scraping as its primary
+path. A CAPTCHA-blocked provider used to return HTTP 200 with cached, unrelated
+junk, and the old tool accepted it as success — so a capable agent looked
+incompetent on any web-dependent task. What changed:
+
+- **Keyed search APIs** (Brave / Serper / Tavily) are now the preferred path.
+  They return stable, structured JSON and are not subject to bot-walls. Keyless
+  scraping (Bing / DuckDuckGo) is kept only as a fallback.
+- **Relevance gate.** Every provider's results are scored against the query; a
+  response that shares no content with the query is treated as a failure and the
+  next provider is tried, instead of junk passing through as success.
+- **Bot-wall detection.** CAPTCHA / block pages are recognized and rejected
+  rather than parsed as results.
+- **Honest degraded output.** If no provider yields relevant results, the call
+  returns `ok=false` with a `degraded` flag instead of fabricating success.
+- **Search-hygiene rules** added to the system prompt and the
+  `information-gathering` skill: run a control query first, stop rephrasing a
+  failing query, route around a dead search with a direct fetch, treat results
+  as untrusted, and report verified vs. unverifiable claims.
+- **Pre-flight health check** in the benchmark harness: backend, LLM and search
+  are probed before any scoring, so an environment failure is reported up front
+  instead of being charged to the agent.
+- **New `search:` config section** — provider selection, per-provider API keys,
+  language/country, `min_relevance`, `timeout_seconds`. See
+  [Configuration](#configuration) below.
+
+---
+
 ## Why this refactor
 
 The original coupling ran deeper than an import statement. `agents.*` appeared in
@@ -39,6 +71,34 @@ The result: swapping the engine later is a change to one subpackage.
 
 ---
 
+## Architecture
+
+Claudio is **one long-lived agent** with **two independent client surfaces**. The
+agent is the only component that owns state and guarantees that running work stays
+consistent; the Web UI and the VS Code extension are clients that display what the
+agent is doing and let a human steer it. Either client can be closed, crash, or be
+restarted at any moment and the agent keeps running exactly as before — when a
+client comes back it reconnects and catches up. Two disposable windows, one
+durable process.
+
+The agent is five cooperating components, each with one job:
+
+| Component | Responsibility |
+|---|---|
+| **RunManager** | Owns every run's lifecycle — create, start, pause, resume, complete, cancel. |
+| **Tool execution** | Runs file edits, shell commands, web fetch/search in order, in one process. |
+| **Approvals** | Gates destructive actions; a run pauses until a decision arrives from any client. |
+| **Scheduled jobs** | Cron-style tasks that fire on the agent's own clock, independent of clients. |
+| **Self-maintenance loop** | Watches the system, runs upkeep, recovers from failures, turns learnings into skills. |
+
+Both clients are peers: identical access over the same versioned HTTP API
+(`/api/v1`) and the same frozen SSE event protocol (`claudio_core/events.py`),
+no local authority. The full write-up — guarantees, the component view,
+disconnect/reconnect semantics, invariants and diagrams — is in
+[doc/architecture.md](./doc/architecture.md).
+
+---
+
 ## Layout
 
 ```
@@ -48,6 +108,7 @@ claudio/
 ├── claudio-backend/          Google ADK engine + FastAPI deployable + daemon
 ├── claudio-frontend/         React SPA
 ├── doc/
+│   ├── architecture.md       one agent, two clients — system architecture
 │   ├── core.md               capabilities, API, structure
 │   ├── backend.md            engine internals, full endpoint reference
 │   ├── frontend.md           views, SSE handling, contract mirror
@@ -288,6 +349,42 @@ The same schema is available without a server from
 **merge-patch** over the current config — send only the keys you want to
 change.
 
+## Core skills documentation
+
+### Claudio self-management
+claudio-autonomy — full self-management loop (self-check, self-config, scheduling, learning, escalation)
+claudio-self-check — health check on services, config drift, skills, tasks, cost, logs
+claudio-self-config — read/validate/change/roll back my own config via HTTP API
+claudio-self-scheduling — create, update, enable and verify cron-scheduled tasks
+
+### Planning & tool use
+agent-planning — authoring plans, decomposing goals, sequencing, tracking, recovery, multi-agent orchestration
+agent-tools-usage — tool selection, correct calls, error handling, chaining, MCP servers and .mcp.json wiring
+claude-extension-authoring — skills, slash commands, subagents, hooks, plugin scaffolding, hookify rules
+
+### Engineering
+coding — writing, reviewing, refactoring, testing, lint, PR stacking, ticket-to-scope
+debugging — hypotheses, isolation, traces/logs, debuggers, fix confirmation
+software-architecture — boundaries, patterns, services and data models, tradeoffs
+testing-and-verification — e2e/behavior/integration/smoke/pre-commit tests, snapshots
+web-and-cli-frameworks — FastAPI (routing, validation, DI) and Typer (typed CLIs)
+python-typing-and-tooling — type stubs/annotations, inference, version support, venv managers, path handling, profiling, safe monkey-patching
+linux — shell/bash, files & processes, permissions, services, networking, performance, hardening, repo security scanning
+embedded-devices — M5Stack ESP32 onboarding (UIFlow 2.0 flash), Cardputer-Adv MicroPython app iteration
+
+### Research & analysis
+information-gathering — search, source evaluation, synthesis, browser automation, multi-source research with citation
+mathematics — olympiad/competition problem solving (IMO, Putnam, USAMO, AIME) with adversarial verification and sustained proof work
+usage-analytics-and-cost — usage/impact reports, HTML session reports, token & cache audits, JSONL log diagnosis
+
+### Documents & design
+documents-and-knowledge-artifacts — PDF/DOCX/XLSX/PPTX, LaTeX, explainers, reports, meeting notes, CLAUDE.md quality
+visual-design-and-artifacts — frontend aesthetic direction, components, dataviz, sketch whiteboards, HTML playgrounds, design-system sync
+
+### Integration
+messaging-channel-integration — Discord, Telegram, iMessage setup, tokens, pairing approval, allowlists
+Plus the SkillMD.com MCP server for searching/downloading/recommending community skills.
+
 ---
 
 ## Verification
@@ -332,6 +429,7 @@ flag-switch mechanism is in place for a future second engine.
 
 | Document | Contents |
 |---|---|
+| [doc/architecture.md](./doc/architecture.md) | one agent, two clients — guarantees, components, disconnect/reconnect, invariants |
 | [doc/core.md](./doc/core.md) | core capabilities, module-by-module API, file structure |
 | [doc/backend.md](./doc/backend.md) | engine internals, complete endpoint reference, self-improvement loop, ADK integration notes |
 | [doc/frontend.md](./doc/frontend.md) | views, SSE handling, contract mirror, build |

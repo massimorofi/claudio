@@ -31,6 +31,9 @@ SECRET_PATHS = [
     "llm.api_key",
     "server.auth_token",
     "autonomous.notification.email.password",
+    "search.brave_api_key",
+    "search.serper_api_key",
+    "search.tavily_api_key",
 ]
 REDACTED = "***"
 
@@ -76,6 +79,48 @@ class LLMConfig(BaseModel):
     retry_attempts: int = 3
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0
+
+
+class SearchConfig(BaseModel):
+    """Web search backend configuration.
+
+    A keyed search API (Brave / Serper / Tavily) is strongly preferred over
+    keyless HTML scraping: keyed APIs return stable, structured JSON and are
+    not subject to the CAPTCHA bot-walls that silently break scraping. When
+    no key is configured the tool falls back to scraping, but every provider's
+    output is then gated on a relevance check so a blocked provider cannot
+    pass junk off as a successful result.
+    """
+
+    # auto: try every provider that has a key, then the scraping fallback.
+    # An explicit name uses only that provider.
+    provider: str = "auto"  # auto | brave | serper | tavily | scraping
+    brave_api_key: str = ""
+    serper_api_key: str = ""
+    tavily_api_key: str = ""
+    # Locale pinning: stops results geo-drifting to the exit-IP region.
+    language: str = "en"
+    country: str = "us"
+    # Minimum query-term overlap (0..1) a provider's top result must reach to
+    # be accepted. Below it the provider is treated as failed. 0 disables.
+    min_relevance: float = 0.2
+    timeout_seconds: int = 12
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, v: str) -> str:
+        allowed = ("auto", "brave", "serper", "tavily", "scraping")
+        norm = (v or "auto").strip().lower()
+        if norm not in allowed:
+            raise ValueError(f"provider must be one of: {', '.join(allowed)}")
+        return norm
+
+    @field_validator("min_relevance")
+    @classmethod
+    def _check_min_relevance(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("min_relevance must be between 0.0 and 1.0")
+        return v
 
 
 class SubagentConfig(BaseModel):
@@ -316,6 +361,7 @@ class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     autonomous: AutonomousConfig = Field(default_factory=AutonomousConfig)
