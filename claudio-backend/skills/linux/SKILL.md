@@ -1,11 +1,11 @@
 ---
 name: linux
-description: 'Linux command-line and system administration: shell and bash scripting,
-  file and process management, permissions, services, networking, and performance
-  triage.'
+description: 'Linux operations and security: shell and bash scripting, file and process
+  management, permissions, services, networking, performance and incident triage,
+  system hardening, and repository/diff security scanning with targeted patch suggestions.'
 license: mixed — see Credits
 metadata:
-  last_reviewed: '2026-10-23'
+  last_reviewed: '2026-10-25'
   sources:
   - owner: github
     name: centos-linux-triage
@@ -27,6 +27,18 @@ metadata:
     name: fedora-linux-triage
     license: unknown
     url: https://skillmd.com/skills/github/fedora-linux-triage
+  - owner: super-* pack
+    name: super-linux-ops
+    license: unknown
+  - owner: super-* pack
+    name: super-linux-triage
+    license: unknown
+  - owner: super-* pack
+    name: super-linux-hardening
+    license: unknown
+  - owner: claude-security
+    name: claude-security
+    license: unknown
 ---
 
 You are a CentOS Linux expert. Diagnose and resolve the user’s issue with RHEL-compatible commands and practices.
@@ -485,3 +497,55 @@ You are a Fedora Linux expert. Diagnose and resolve the user’s issue using Fed
 - **dokhacgiakhoa/bash-linux** — license: unknown — https://skillmd.com/skills/dokhacgiakhoa/bash-linux
 - **neuralblitz/bash** — license: MIT — https://skillmd.com/skills/neuralblitz/bash
 - **github/fedora-linux-triage** — license: unknown — https://skillmd.com/skills/github/fedora-linux-triage
+
+---
+
+## Linux Ops And Security (merged from `temp/linux-ops-and-security`, 2026-10-25)
+
+# Linux Operations & Security
+
+Two axes that must not be confused: **operations** (is the system working?)
+and **security** (can it be attacked?). Both are scoped the same way:
+observe first, change second, prove the change held.
+
+## Constituent skills (4)
+
+| Skill | Origin | What it contributes |
+|---|---|---|
+| super-linux-ops | super-* pack | Routine Linux operation: services, processes, files, networking |
+| super-linux-triage | super-* pack | Incident triage on a misbehaving host |
+| super-linux-hardening | super-* pack | Reducing attack surface: permissions, services, config |
+| claude-security | claude-security | Security scan of the whole repo or a scoped part, of branch/PR diffs or a single commit, with targeted patch suggestions |
+
+## Consolidated guidance
+
+1. **Triage before fixing.** Establish what is actually broken (symptoms,
+   scope, timeline) before touching anything. A guessed fix destroys the
+   evidence you needed.
+2. **Read the system's own reports first.** `dmesg`, `journalctl`, service
+   status, `ss`, `top`/`htop`, disk and inode usage. The system usually
+   already told you what went wrong.
+3. **Scan the diff, not just the repo.** `claude-security` principle: the
+   smallest useful scope is the change under review. A whole-repo scan finds
+   old problems; a diff scan finds the one you are about to ship.
+4. **Hardening is subtraction.** Disable unused services, close unused
+   ports, minimize permissions, remove default credentials. Every
+   capability you
+   remove is one that cannot be exploited.
+5. **Least privilege, applied concretely.** File ownership and modes,
+   service users, sudo scope. "Only root can" is not a strategy; a
+   dedicated unprivileged service user is.
+6. **Every finding needs a patch, not just a report.** The value of a
+   security scan is the targeted suggested fix; an unactioned finding list
+   changes nothing.
+7. **Verify after hardening.** Hardening that silently breaks a working
+   service is a worse security posture than before. Re-test the service
+   after each change.
+8. **Secrets are the top finding.** Credentials in the repo, in env files,
+   in logs and in shell history are the most common and most exploitable
+   issue in both scans.
+
+## When to use this skill
+
+"The server is slow/down", "check this host", "harden this machine",
+"scan this repo/PR for security issues", "is this commit safe to merge?".

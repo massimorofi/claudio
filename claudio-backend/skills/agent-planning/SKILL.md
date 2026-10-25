@@ -1,11 +1,13 @@
 ---
 name: agent-planning
-description: 'Planning discipline for autonomous agents: decompose goals into ordered,
-  verifiable tasks, sequence and estimate work, track progress against a plan, and
-  recover when a plan stalls.'
+description: 'Planning discipline for autonomous agents: authoring plans, decomposing
+  goals into ordered verifiable tasks, sequencing and estimating work, tracking progress
+  and recovering when a plan stalls, running facilitated co-design workshops one decision
+  at a time, making explicit risk/reward decisions, and orchestrating multiple agents
+  on one objective.'
 license: mixed — see Credits
 metadata:
-  last_reviewed: '2026-10-23'
+  last_reviewed: '2026-10-25'
   sources:
   - owner: jrennie99-glitch
     name: agent-planner
@@ -27,6 +29,21 @@ metadata:
     name: sprint-planning
     license: MIT
     url: https://skillmd.com/skills/kursku/sprint-planning
+  - owner: super-* pack
+    name: super-plan-authoring
+    license: unknown
+  - owner: super-* pack
+    name: super-plan-execution
+    license: unknown
+  - owner: built-in
+    name: workshop
+    license: unknown
+  - owner: super-* pack
+    name: super-risk-decision
+    license: unknown
+  - owner: GitHub app
+    name: orchestrate
+    license: unknown
 ---
 
 ---
@@ -1227,3 +1244,53 @@ Tarefas Detalhadas (com estimativa em horas e responsável):
 - **builderio/visual-plan** — license: unknown — https://skillmd.com/skills/builderio/visual-plan
 - **akillness/task-planning** — license: MIT — https://skillmd.com/skills/akillness/task-planning
 - **kursku/sprint-planning** — license: MIT — https://skillmd.com/skills/kursku/sprint-planning
+
+---
+
+## Planning And Execution (merged from `temp/planning-and-execution`, 2026-10-25)
+
+# Planning, Orchestration & Decision-Making
+
+The full lifecycle from *intent* to *done*: write the plan down, decide
+what is risky, run it, and coordinate multiple workers without losing the
+thread.
+
+## Constituent skills (5)
+
+| Skill | Origin | What it contributes |
+|---|---|---|
+| super-plan-authoring | super-* pack | Writing a plan: scope, decomposition, sequencing, estimates |
+| super-plan-execution | super-* pack | Executing a plan: tracking, deviation handling, completion |
+| workshop | built-in | Co-design with the user one decision at a time, publishing an evolving plan Artifact |
+| super-risk-decision | super-* pack | Explicit risk/reward judgment calls |
+| orchestrate | GitHub app | Coordinating multiple agents/workers on one objective |
+
+## Consolidated guidance
+
+1. **A plan is a written artifact, not a mental state.** If it is not
+   written, it cannot be tracked, shared or challenged.
+2. **Decompose into verifiable tasks.** Every task needs a check that
+   proves it done. "Improve performance" is not a task; "get p95 under
+   200ms on the listed endpoints" is.
+3. **One decision at a time with the human.** `workshop` posture: do not
+   present a 20-decision document and ask for approval. Pose the single
+   next decision, get an answer, publish the updated plan, repeat.
+4. **Plans deviate; the plan must be updated, not abandoned.** When reality
+   diverges, write the change into the plan and note why. Restarting the
+   plan from scratch every deviation is the failure mode.
+5. **Risk decisions need explicit numbers.** State what you lose if it
+   fails, what you gain if it succeeds, and how reversible it is.
+   Reversibility is the cheapest risk reducer available.
+6. **Orchestration is mostly interfaces.** Multiple agents fail on unclear
+   boundaries: give each worker a scoped, non-overlapping deliverable with
+   its own verification, and integrate explicitly. Overlapping ownership
+   produces conflicts, not parallelism.
+7. **Sequence by dependency, not by preference.** Do the work that
+   unblocks others first; identify the risky assumption and test it early.
+8. **Small batches.** Short plan → execute → check beats a long plan that
+   is wrong by chapter three.
+
+## When to use this skill
+
+"Plan this project", "break this down", "run a design workshop", "should
+we do X or Y?", "coordinate these agents", "we've drifted from the plan".

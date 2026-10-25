@@ -284,13 +284,13 @@ def test_skill_freshness() -> None:
 
 def test_manifest_exists() -> None:
     _require_skills()
-    manifest = SKILLS_DIR / "SKILLS_MANIFEST.md"
+    manifest = SKILLS_DIR / "README.md"
     assert manifest.is_file(), f"manifest missing: {manifest}"
 
 
 def test_manifest_lists_every_area_with_credits() -> None:
     _require_skills()
-    manifest = (SKILLS_DIR / "SKILLS_MANIFEST.md").read_text(encoding="utf-8")
+    manifest = (SKILLS_DIR / "README.md").read_text(encoding="utf-8")
     low = manifest.lower()
     assert "license" in low, "manifest does not record licenses"
     assert "skillmd.com/skills/" in manifest, "manifest has no source URLs"

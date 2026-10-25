@@ -1,11 +1,13 @@
 ---
 name: agent-tools-usage
-description: 'Effective tool use by agents: selecting the right tool, calling functions
-  correctly, handling tool errors and retries, and chaining tools to accomplish multi-step
-  tasks.'
+description: 'Effective tool use by agents and MCP integration: selecting the right
+  tool, calling functions correctly, handling errors and retries, chaining tools for
+  multi-step tasks, building MCP servers, interactive MCP apps and .mcpb bundles,
+  wiring MCP servers into plugins via .mcp.json, and discovering existing connectors,
+  tools and agents before building.'
 license: mixed — see Credits
 metadata:
-  last_reviewed: '2026-10-23'
+  last_reviewed: '2026-10-25'
   sources:
   - owner: github
     name: mcp-create-declarative-agent
@@ -27,6 +29,27 @@ metadata:
     name: mcp-builder
     license: unknown
     url: https://skillmd.com/skills/microsoft/mcp-builder
+  - owner: mcp-server-dev
+    name: build-mcp-server
+    license: unknown
+  - owner: mcp-server-dev
+    name: build-mcp-app
+    license: unknown
+  - owner: mcp-server-dev
+    name: build-mcpb
+    license: unknown
+  - owner: plugin-dev
+    name: mcp-integration
+    license: unknown
+  - owner: GitHub app
+    name: connector-finder
+    license: unknown
+  - owner: GitHub app
+    name: agentfinder
+    license: unknown
+  - owner: GitHub app
+    name: af
+    license: unknown
 ---
 
 ````prompt
@@ -912,3 +935,52 @@ Load these resources as needed during development:
 - **github/mcp-cli** — license: unknown — https://skillmd.com/skills/github/mcp-cli
 - **github/python-mcp-server-generator** — license: unknown — https://skillmd.com/skills/github/python-mcp-server-generator
 - **microsoft/mcp-builder** — license: unknown — https://skillmd.com/skills/microsoft/mcp-builder
+
+---
+
+## Mcp Integration (merged from `temp/mcp-integration`, 2026-10-25)
+
+# MCP Server & App Development
+
+Three distinct deliverables get confused constantly: an **MCP server** (tools),
+an **MCP app** (interactive UI rendered in chat) and an **MCP bundle**
+(`.mcpb`, distribution format with a runtime). Pick the shape before writing code.
+
+## Constituent skills (7)
+
+| Skill | Origin | What it contributes |
+|---|---|---|
+| build-mcp-server | mcp-server-dev | Entry point: interrogate the use case, pick deployment model (remote HTTP / MCPB / local stdio), pick a tool-design pattern |
+| build-mcp-app | mcp-server-dev | Interactive UI/widgets in chat: components, forms, pickers |
+| build-mcpb | mcp-server-dev | Package a server as `.mcpb` incl. bundled Node or Python runtime |
+| mcp-integration | plugin-dev | Adding/integrating MCP servers in a plugin via `.mcp.json` |
+| connector-finder | GitHub app | Locating an existing connector instead of building a new one |
+| agentfinder | GitHub app | Discover installable MCP servers, tools, skills and agents for a task via the ARD Agent Finder |
+| af | GitHub app | Shorthand alias that immediately invokes `agentfinder` |
+
+## Consolidated guidance
+
+1. **Discovery before code.** Determine the use case, the data volume, who
+   authenticates, and where the data lives *before* scaffolding. The deployment
+   model chosen first is very hard to change later.
+2. **Pick the deployment model deliberately:**
+   - *Remote HTTP* — shared, multi-user, needs OAuth, scales.
+   - *Local stdio* — single user, local files, zero infra, fastest to ship.
+   - *MCPB* — must ship to others and needs a pinned runtime.
+3. **Search before you build.** `connector-finder`: an existing MCP server for
+   the target system is almost always better than a new one.
+4. **Tools are verbs with narrow contracts.** Each tool: one action, explicit
+   typed inputs, a description that says exactly when to call it and when not to.
+5. **Apps need a reason to exist.** Only add interactive UI (form, picker,
+   preview) when the user's input cannot be captured cleanly in one message.
+6. **Integration is a config file.** In a plugin, MCP servers are declared in
+   `.mcp.json`; verify the server actually starts and lists its tools before
+   claiming the integration works.
+7. **Check the live spec.** The MCP spec and Claude's auth/review criteria move
+   faster than local knowledge — consult the current Claude connector docs
+   before finalizing auth and review-sensitive decisions.
+
+## When to use this skill
+
+"Build an MCP server for…", "wrap this API so Claude can use it", "make a
+widget/form in chat", "package this as .mcpb", "add this MCP server to my plugin".

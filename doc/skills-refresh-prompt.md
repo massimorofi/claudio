@@ -168,8 +168,9 @@ After all areas: write the credits manifest, then commit.
 >
 > ### Credits manifest
 >
-> Create `claudio-backend/skills/SKILLS_MANIFEST.md` listing every merged
-> area skill with:
+> Record the credits in `claudio-backend/skills/README.md` (the manifest
+> lives inside the README — there is no separate `SKILLS_MANIFEST.md` file),
+> listing every merged area skill with:
 >
 > - **Area** and **merged skill name**
 > - **Sources merged** — for each: owner (SkillMD/GitHub username), skill name,
