@@ -45,6 +45,7 @@ from .api import (
     system,
     tasks,
     workspace,
+    workspaces,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ def build_app(supervisor: Supervisor, lifespan: Callable | None = None) -> FastA
     app.include_router(sessions.router, prefix=API_PREFIX)
     app.include_router(monitoring.router, prefix=API_PREFIX)
     app.include_router(workspace.router, prefix=API_PREFIX)
+    app.include_router(workspaces.router, prefix=API_PREFIX)
     app.include_router(autonomous.router, prefix=API_PREFIX)
     app.include_router(tasks.router, prefix=API_PREFIX)
     app.include_router(learning.router, prefix=API_PREFIX)

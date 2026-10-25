@@ -24,6 +24,7 @@ export function openChatStream(
     message: string
     approval_mode?: string
     files?: string[]
+    workspace_dir?: string
   },
   opts: StreamOptions,
 ): SseHandle {

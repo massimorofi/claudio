@@ -25,6 +25,14 @@ class ToolContext:
     workspace: Path
     approval_mode: str  # off | on_request | always
     db: "Database"
+    # Per-workspace runtime state root (ADK DBs, file-history). Lives under the
+    # backend's own ``data/`` tree, never inside the user's workspace, so
+    # Claudio's runtime state cannot pollute a code repo. Computed by the
+    # backend from the session's bound ``workspace_id``. When absent (legacy
+    # callers, tests) file-history falls back to the old location beside the
+    # workspace.
+    workspace_id: str = ""
+    workspace_state_dir: Path | None = None
     # Mutable per-run accumulators.
     run_id: str = ""
     cost_usd: float = 0.0

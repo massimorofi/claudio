@@ -27,7 +27,22 @@ CREATE TABLE IF NOT EXISTS claudio_sessions (
     compaction_disabled INTEGER NOT NULL DEFAULT 0,
     turns_since_todo INTEGER NOT NULL DEFAULT 0,
     todos TEXT NOT NULL DEFAULT '[]',
-    learning_captured_entries INTEGER NOT NULL DEFAULT 0
+    learning_captured_entries INTEGER NOT NULL DEFAULT 0,
+    workspace_dir TEXT NOT NULL DEFAULT '',
+    workspace_origin TEXT NOT NULL DEFAULT 'default'
+);
+
+-- Workspace registry: the set of folders the user has made available to
+-- Claudio. ``workspace_dir`` on a session is the mechanical value; this table
+-- is the picker's source of truth (a SELECT DISTINCT over sessions only shows
+-- the past and can never add a never-used folder). ``id`` is a stable uuid so a
+-- rename could later be tracked without breaking references.
+CREATE TABLE IF NOT EXISTS claudio_workspaces (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS claudio_config_history (
@@ -278,6 +293,20 @@ class Database:
                 "ALTER TABLE claudio_sessions ADD COLUMN learning_captured_entries INTEGER NOT NULL DEFAULT 0"
             )
             await self.conn.commit()
+        # Per-session workspace: the workspace is a property of a session, fixed
+        # at creation, not a global mutable setting. ``workspace_origin`` records
+        # provenance ('default' | 'vscode' | 'webui') so the UI can show where a
+        # session came from and flag an assumed (backfilled) workspace.
+        if "workspace_dir" not in scols:
+            await self.conn.execute(
+                "ALTER TABLE claudio_sessions ADD COLUMN workspace_dir TEXT NOT NULL DEFAULT ''"
+            )
+            await self.conn.commit()
+        if "workspace_origin" not in scols:
+            await self.conn.execute(
+                "ALTER TABLE claudio_sessions ADD COLUMN workspace_origin TEXT NOT NULL DEFAULT 'default'"
+            )
+            await self.conn.commit()
         # Task types: 'prompt' (agent playbook) vs 'script' (direct shell).
         # Existing rows default to 'prompt' with no script, preserving behavior.
         async with self.conn.execute("PRAGMA table_info(claudio_tasks)") as cur:
@@ -339,11 +368,23 @@ class Database:
 
     # ---- sessions -------------------------------------------------------
 
-    async def create_session(self, session_id: str, title: str = "") -> dict[str, Any]:
+    async def create_session(
+        self,
+        session_id: str,
+        title: str = "",
+        *,
+        workspace_dir: str | None = None,
+        workspace_origin: str = "default",
+    ) -> dict[str, Any]:
+        # ``workspace_dir`` is optional so every existing caller keeps working
+        # unchanged; when omitted the session stores the empty string and is
+        # treated as having no bound workspace until one is set.
         now = utcnow()
         await self.conn.execute(
-            "INSERT INTO claudio_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (session_id, title, now, now),
+            "INSERT INTO claudio_sessions "
+            "(id, title, created_at, updated_at, workspace_dir, workspace_origin) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, title, now, now, workspace_dir or "", workspace_origin),
         )
         await self.conn.commit()
         return await self.get_session(session_id)  # type: ignore[return-value]
@@ -388,6 +429,76 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
             return [r["id"] for r in rows]
+
+    async def get_session_workspace(self, session_id: str) -> str | None:
+        """Return the workspace path stored on a session, or None if unset."""
+        async with self.conn.execute(
+            "SELECT workspace_dir FROM claudio_sessions WHERE id = ?", (session_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return row["workspace_dir"] or None
+
+    # ---- workspace registry --------------------------------------------
+
+    async def register_workspace(self, path: str, label: str = "") -> dict[str, Any]:
+        """Register a workspace folder, idempotent on path.
+
+        If ``path`` is already registered the existing record is returned and
+        its ``last_used_at`` refreshed; no duplicate row is created. Otherwise
+        a new record with a fresh uuid is inserted and returned.
+        """
+        now = utcnow()
+        async with self.conn.execute(
+            "SELECT * FROM claudio_workspaces WHERE path = ?", (path,)
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            await self.conn.execute(
+                "UPDATE claudio_workspaces SET last_used_at = ? WHERE id = ?",
+                (now, existing["id"]),
+            )
+            await self.conn.commit()
+            return dict(existing)
+        ws_id = str(uuid.uuid4())
+        await self.conn.execute(
+            "INSERT INTO claudio_workspaces "
+            "(id, path, label, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)",
+            (ws_id, path, label, now, now),
+        )
+        await self.conn.commit()
+        return await self.get_workspace(ws_id)  # type: ignore[return-value]
+
+    async def get_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_workspaces WHERE id = ?", (workspace_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def touch_workspace(self, workspace_id: str) -> None:
+        """Refresh a workspace's ``last_used_at`` to now."""
+        await self.conn.execute(
+            "UPDATE claudio_workspaces SET last_used_at = ? WHERE id = ?",
+            (utcnow(), workspace_id),
+        )
+        await self.conn.commit()
+
+    async def list_workspaces(self) -> list[dict[str, Any]]:
+        """All registered workspaces, most-recently-used first."""
+        async with self.conn.execute(
+            "SELECT * FROM claudio_workspaces ORDER BY last_used_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_workspace(self, workspace_id: str) -> None:
+        """Remove a workspace from the registry. Does not touch the disk."""
+        await self.conn.execute(
+            "DELETE FROM claudio_workspaces WHERE id = ?", (workspace_id,)
+        )
+        await self.conn.commit()
 
     # ---- config history -------------------------------------------------
 

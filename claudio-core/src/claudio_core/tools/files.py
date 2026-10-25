@@ -1,10 +1,11 @@
 """File tools with per-edit history backups (Claudio §5.4).
 
-Every write/edit backs up the previous content under
-``data/file-history/<session_id>/`` before modifying the file, so changes can be
-rewound. File tools are confined to the workspace: in ``on_request`` mode the
-read-only tools refuse paths that resolve outside it (destructive tools are gated
-by approval instead).
+Every write/edit backs up the previous content before modifying the file, so
+changes can be rewound. Backups live in the per-workspace runtime state dir
+(``<workspace_state_dir>/file-history/<session_id>/``), never inside the
+user's workspace. File tools are confined to the workspace: in ``on_request``
+mode the read-only tools refuse paths that resolve outside it (destructive
+tools are gated by approval instead).
 """
 from __future__ import annotations
 
@@ -23,7 +24,13 @@ def _clip(text: str, max_chars: int) -> str:
 
 
 def _history_dir(ctx: ToolContext) -> Path:
-    d = ctx.workspace.parent / "file-history" / ctx.session_id
+    # Prefer the per-workspace runtime state dir (under the backend's data
+    # tree). Fall back to the legacy location beside the workspace only when
+    # the caller did not supply one, so old call sites keep working.
+    if ctx.workspace_state_dir is not None:
+        d = Path(ctx.workspace_state_dir) / "file-history" / ctx.session_id
+    else:
+        d = ctx.workspace.parent / "file-history" / ctx.session_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -135,13 +135,13 @@ def build_static_instructions(
     Keeping the static text first also lets the model cache the prompt prefix.
 
     ``workspace`` is the already-resolved absolute workspace path. When omitted
-    it falls back to resolving ``agent.workspace_dir`` against the process cwd
-    (the legacy behaviour); callers that anchor the workspace themselves should
-    pass it in so the prompt's environment block and memory discovery agree
-    with the workspace the tools actually use.
+    it falls back to resolving ``agent.default_workspace_dir`` against the
+    process cwd (the legacy behaviour); callers that anchor the workspace
+    themselves should pass it in so the prompt's environment block and memory
+    discovery agree with the workspace the tools actually use.
     """
     if workspace is None:
-        workspace = Path(config.agent.workspace_dir).resolve()
+        workspace = Path(config.agent.default_workspace_dir).resolve()
     config_dir = workspace.parent.parent if workspace.parent else workspace
 
     sections: list[str] = [BASE_IDENTITY, OPERATING_PROCEDURE, SEARCH_HYGIENE]

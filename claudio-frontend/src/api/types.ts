@@ -66,7 +66,8 @@ export interface AgentCfg {
   max_turns: number
   max_budget_usd: number
   approval_mode: 'off' | 'always' | 'on_request'
-  workspace_dir: string
+  default_workspace_dir: string
+  workspace_allowed_roots: string[]
   context_window: number
   compaction_reserve: number
   max_output_chars: number
@@ -364,6 +365,19 @@ export interface RunRestartingEvent {
 }
 
 // ---- Workspace ----
+
+export interface WorkspaceRecord {
+  id: string
+  path: string
+  label: string
+  created_at: string
+  last_used_at: string
+}
+
+export interface WorkspaceSuggestDir {
+  path: string
+  name: string
+}
 
 export interface WorkspaceFile {
   path: string

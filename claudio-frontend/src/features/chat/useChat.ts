@@ -12,7 +12,7 @@ import {
 
 export interface UseChatResult {
   state: ChatState
-  send: (message: string, files?: string[]) => void
+  send: (message: string, files?: string[], workspaceDir?: string) => void
   stop: () => void
   approve: (approvalId: string) => void
   deny: (approvalId: string) => void
@@ -236,7 +236,7 @@ export function useChat(
   )
 
   const send = useCallback(
-    (message: string, files?: string[]) => {
+    (message: string, files?: string[], workspaceDir?: string) => {
       if (!message.trim()) return
       dispatch({ type: 'SEND_USER', text: message })
       lastEventIdRef.current = undefined
@@ -247,6 +247,9 @@ export function useChat(
           message,
           approval_mode: approvalMode,
           files: files && files.length ? files : undefined,
+          // Only meaningful when this message creates the session; the backend
+          // ignores it on a resumed session (the stored workspace wins).
+          workspace_dir: workspaceDir || undefined,
         },
         {
           onEvent: (ev) => {

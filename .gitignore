@@ -40,6 +40,11 @@ claudio-frontend/data/
 # backups under file-history/, and ADK session databases under .claudio/.
 /data/
 
+# Claudio's own runtime state must never be tracked, wherever it appears.
+# Belt-and-braces: the relocated state lives under data/workspaces/, but a
+# stray .claudio/ from an older layout should never slip into a commit.
+.claudio/
+
 # Generated database / log / pid files wherever they appear
 *.db
 *.db-journal

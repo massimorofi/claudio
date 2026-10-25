@@ -1,11 +1,14 @@
 """Session endpoints."""
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Request
 
 from claudio_core.context import context_usage_payload
 
 from .deps import require_auth, ApiError
+from ..paths import validate_workspace_dir, WorkspaceValidationError
 
 router = APIRouter()
 
@@ -28,6 +31,41 @@ async def list_sessions(request: Request) -> dict:
             for r in rows
         ]
     }
+
+
+@router.post("/sessions")
+async def create_session(request: Request) -> dict:
+    """Create a new session bound to a workspace.
+
+    Lets a client (the VS Code extension) own an explicit session bound to a
+    folder up front, instead of mutating shared config or letting the first
+    chat message mint a session implicitly. The workspace is validated and
+    registered exactly as a new chat session's would be (see
+    ``chat._bind_workspace``), so the binding is identical — we just make it
+    before any message is sent.
+    """
+    require_auth(request)
+    supervisor = request.app.state.supervisor
+    body = await request.json()
+    raw = body.get("workspace_dir") or supervisor.config.agent.default_workspace_dir
+    origin = body.get("origin") or body.get("workspace_origin") or "vscode"
+    title = body.get("title") or "New session"
+    allowed = supervisor.config.agent.workspace_allowed_roots
+    try:
+        ws = validate_workspace_dir(raw, allowed_roots=allowed)
+    except WorkspaceValidationError as e:
+        raise ApiError(422, "validation_error", f"Invalid workspace: {e}")
+    ws.mkdir(parents=True, exist_ok=True)
+    await supervisor.db.register_workspace(str(ws))
+    session_id = str(uuid.uuid4())
+    await supervisor.db.create_session(
+        session_id,
+        title=title,
+        workspace_dir=str(ws),
+        workspace_origin=origin,
+    )
+    row = await supervisor.db.get_session(session_id)
+    return {"session": row}
 
 
 @router.get("/sessions/{session_id}")

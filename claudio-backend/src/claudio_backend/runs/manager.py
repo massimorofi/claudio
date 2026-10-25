@@ -124,6 +124,10 @@ class BudgetExceededError(Exception):
 class RunRecord:
     run_id: str
     session_id: str
+    # Workspace this run operates on, bound at session creation and carried on
+    # the record so the run never re-resolves it from (mutable) global config.
+    workspace: Path = Path(".")
+    workspace_id: str = ""
     state: str = "running"  # running | awaiting_approval | completed | failed | cancelled
     events: deque = field(default_factory=lambda: deque(maxlen=RING_BUFFER_SIZE))
     seq: int = 0
@@ -184,9 +188,18 @@ class RunManager:
         session_id: str,
         message: str,
         approval_mode: str | None = None,
+        *,
+        workspace: Path | None = None,
+        workspace_id: str = "",
     ) -> RunRecord:
         async with self._lock:
-            record = RunRecord(run_id=run_id, session_id=session_id)
+            record = RunRecord(
+                run_id=run_id,
+                session_id=session_id,
+                workspace=workspace if workspace is not None
+                else resolve_workspace_dir(self.config),
+                workspace_id=workspace_id,
+            )
             record.started_at = time.time()
             self._runs[run_id] = record
         await self.db.create_run(run_id, session_id)
@@ -203,11 +216,20 @@ class RunManager:
         approval_id: str,
         decision: str,
         rejection_message: str | None = None,
+        *,
+        workspace: Path | None = None,
+        workspace_id: str = "",
     ) -> RunRecord:
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
-                record = RunRecord(run_id=run_id, session_id=session_id)
+                record = RunRecord(
+                    run_id=run_id,
+                    session_id=session_id,
+                    workspace=workspace if workspace is not None
+                    else resolve_workspace_dir(self.config),
+                    workspace_id=workspace_id,
+                )
                 record.started_at = time.time()
                 self._runs[run_id] = record
             record.state = "running"
@@ -373,7 +395,11 @@ class RunManager:
         *,
         model_override: str | None = None,
     ) -> RunRequest:
-        workspace = resolve_workspace_dir(self.config)
+        # The workspace is bound at session creation and carried on the record;
+        # never re-resolve it from (mutable) global config here, or a config
+        # change mid-conversation would silently repoint the tools at a
+        # different tree than the transcript's paths refer to.
+        workspace = record.workspace
         workspace.mkdir(parents=True, exist_ok=True)
         instructions = build_instructions(
             self.config,
@@ -388,6 +414,7 @@ class RunManager:
             run_id=record.run_id,
             session_id=record.session_id,
             workspace=workspace,
+            workspace_id=record.workspace_id,
             instructions=instructions,
             user_input=user_input,
             model=self._model_spec(model_override),
@@ -887,9 +914,10 @@ class RunManager:
         ]
         deliverable_written = bool(record.files_written)
         if record.files_written:
-            workspace = resolve_workspace_dir(self.config)
+            # Verify against the workspace bound to this run, not the current
+            # global default — the files were written into the bound tree.
             deliverable_ok, deliverable_bytes, deliverable_details = _verify_deliverable(
-                list(record.files_written), workspace
+                list(record.files_written), record.workspace
             )
         else:
             deliverable_ok, deliverable_bytes, deliverable_details = True, 0, []

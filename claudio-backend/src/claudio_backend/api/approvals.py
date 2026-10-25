@@ -1,9 +1,12 @@
 """Human-in-the-loop approval endpoints."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Request
 
 from .deps import require_auth, ApiError
+from ..paths import validate_workspace_dir, WorkspaceValidationError
 
 router = APIRouter()
 
@@ -60,6 +63,23 @@ async def resolve_approval(request: Request, approval_id: str) -> dict:
     if not run or not run.get("resume_state_json"):
         raise ApiError(409, "no_resume_state", "Cannot resume: no saved run state")
 
+    # The resumed run must operate on the workspace the session was bound to,
+    # not the current global default — otherwise a config change made while the
+    # run was paused would silently repoint its tools at a different tree.
+    session = await supervisor.db.get_session(approval["session_id"])
+    stored = (session or {}).get("workspace_dir") or ""
+    allowed = supervisor.config.agent.workspace_allowed_roots
+    try:
+        ws = validate_workspace_dir(
+            stored or supervisor.config.agent.default_workspace_dir,
+            allowed_roots=allowed,
+            must_exist=bool(stored),
+        )
+    except WorkspaceValidationError as e:
+        raise ApiError(409, "workspace_unavailable", f"Cannot resume: {e}")
+    ws.mkdir(parents=True, exist_ok=True)
+    ws_rec = await supervisor.db.register_workspace(str(ws))
+
     await supervisor.run_manager.resume_run(
         run_id=approval["run_id"],
         session_id=approval["session_id"],
@@ -67,5 +87,7 @@ async def resolve_approval(request: Request, approval_id: str) -> dict:
         approval_id=approval_id,
         decision=decision,
         rejection_message=reason or None,
+        workspace=ws,
+        workspace_id=ws_rec["id"],
     )
     return {"resolved": True, "decision": decision, "run_id": approval["run_id"]}

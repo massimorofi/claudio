@@ -67,6 +67,8 @@ from claudio_core.settings import AppConfig, MCPServerEntry
 from claudio_core.skill_loader import build_skill_functions, scan_skills
 from claudio_core.tools.registry import TOOL_FUNCTIONS, TOOL_META, needs_approval_for
 
+from ..paths import workspace_state_dir
+
 logger = logging.getLogger(__name__)
 
 CONFIRMATION_TOOL = "adk_request_confirmation"
@@ -326,12 +328,13 @@ def usage_from_event(event: Any) -> tuple[int, int]:
 def adk_state_path(request: RunRequest) -> Path:
     """Where ADK keeps its own session state for this Claudio session.
 
-    The parent directory is created here because the engine owns this path and
-    opens a SQLite file in it; without it the first ``SqliteSessionService``
+    Lives under the per-workspace runtime state dir (the backend's data tree),
+    never inside the user's workspace, so Claudio's own state cannot pollute a
+    code repo. The directory is created here because the engine owns this path
+    and opens a SQLite file in it; without it the first ``SqliteSessionService``
     open fails with "unable to open database file".
     """
-    parent = Path(request.workspace) / ".claudio"
-    parent.mkdir(parents=True, exist_ok=True)
+    parent = workspace_state_dir(request.workspace_id)
     return parent / f"adk-{request.session_id}.db"
 
 
@@ -522,6 +525,8 @@ class AdkEngine:
             workspace=request.workspace,
             approval_mode=request.tools.approval_mode,
             db=self.db,
+            workspace_id=request.workspace_id,
+            workspace_state_dir=workspace_state_dir(request.workspace_id),
             run_id=request.run_id,
         )
 

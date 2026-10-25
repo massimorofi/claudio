@@ -16,8 +16,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import logging
+
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 ENV_PREFIX = "CLAUDIO__"
 
@@ -148,7 +150,18 @@ class AgentConfig(BaseModel):
     max_auto_continues: int = 10
     max_budget_usd: float = 5.0
     approval_mode: str = "on_request"  # off | on_request | always
-    workspace_dir: str = "./data/workspace"
+    # The default workspace for NEW sessions. The workspace is a property of a
+    # session, fixed at creation; this is only the fallback used when a session
+    # is created without an explicit workspace. (Formerly the single global
+    # ``workspace_dir``; demoted to a default.)
+    default_workspace_dir: str = "./data/workspace"
+    # A workspace is exactly what the agent's file tools can read and write, so
+    # the set of selectable roots can be restricted. A candidate workspace must
+    # fall inside one of these (compared on resolved paths). An empty list
+    # disables this check — the dangerous-root backstop in
+    # ``claudio_backend.paths`` still refuses ``/``, ``/home``, ``/etc`` and the
+    # other system roots, so the default is safe; set this to tighten it.
+    workspace_allowed_roots: list[str] = Field(default_factory=list)
     context_window: int = 32768
     compaction_reserve: int = 8192
     # HTTP timeout for the compaction summarizer call specifically. Compaction is
@@ -171,6 +184,28 @@ class AgentConfig(BaseModel):
         if v not in ("off", "on_request", "always"):
             raise ValueError("approval_mode must be one of: off, on_request, always")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backcompat_workspace_dir(cls, data: Any) -> Any:
+        """Accept the old ``workspace_dir`` key as ``default_workspace_dir``.
+
+        The workspace was demoted from a single global setting to a per-session
+        value, with this key as the default for new sessions. Older configs and
+        the VS Code extension before its Phase 4 change write ``workspace_dir``;
+        map it across so they keep working. The old key, when present, wins over
+        the default.
+        """
+        if isinstance(data, dict) and "workspace_dir" in data:
+            data = {**data}
+            old = data.pop("workspace_dir")
+            if old:
+                data["default_workspace_dir"] = old
+            logging.getLogger(__name__).warning(
+                "deprecated config key 'agent.workspace_dir'; use "
+                "'agent.default_workspace_dir'"
+            )
+        return data
 
 
 class MCPServerEntry(BaseModel):

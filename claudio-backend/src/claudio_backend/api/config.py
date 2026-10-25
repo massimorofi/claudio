@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import time
 from typing import Any
 
@@ -21,8 +22,30 @@ from claudio_core.settings import (
 )
 
 from .deps import require_auth, ApiError
+from ..paths import validate_workspace_dir, WorkspaceValidationError
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _normalize_workspace_key(payload: dict) -> dict:
+    """Map a deprecated ``agent.workspace_dir`` to ``agent.default_workspace_dir``.
+
+    Older clients (and the VS Code extension before its Phase 4 change) send
+    the old key. Rewrite it in the payload before merging so the stored config
+    only ever carries the new key.
+    """
+    agent = payload.get("agent")
+    if isinstance(agent, dict) and "workspace_dir" in agent:
+        agent = {**agent}
+        old = agent.pop("workspace_dir")
+        if old:
+            agent["default_workspace_dir"] = old
+        payload = {**payload, "agent": agent}
+        logger.warning(
+            "deprecated config key 'agent.workspace_dir' → 'default_workspace_dir'"
+        )
+    return payload
 
 
 def _current_dict(supervisor) -> dict:
@@ -53,6 +76,10 @@ async def put_config(request: Request, payload: dict) -> dict:
     supervisor = request.app.state.supervisor
     current = _current_dict(supervisor)
 
+    # Back-compat: rewrite a deprecated 'workspace_dir' to 'default_workspace_dir'
+    # before merging, so the stored config only carries the new key.
+    payload = _normalize_workspace_key(payload)
+
     # Merge-patch: candidate over current.
     merged = _merge(current, payload)
     # The client only ever sees redacted secrets; a '***' in the payload means
@@ -62,6 +89,19 @@ async def put_config(request: Request, payload: dict) -> dict:
         validated = AppConfig.model_validate(merged)
     except Exception as e:  # noqa: BLE001
         raise ApiError(422, "validation_error", f"Invalid config: {e}")
+
+    # The default workspace defines what the agent's file tools can read and
+    # write, so validate it here rather than discovering a bad value at first
+    # run. The directory itself is created lazily, so existence is not required
+    # at save time.
+    try:
+        validate_workspace_dir(
+            validated.agent.default_workspace_dir,
+            allowed_roots=validated.agent.workspace_allowed_roots,
+            must_exist=False,
+        )
+    except WorkspaceValidationError as e:
+        raise ApiError(422, "validation_error", f"Invalid workspace: {e}")
 
     changed = changed_keys(current, merged)
     required = restart_required_for(changed)

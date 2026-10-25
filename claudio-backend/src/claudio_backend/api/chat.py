@@ -13,11 +13,65 @@ from fastapi.responses import StreamingResponse
 from claudio_core.file_context import compose_message_with_files
 
 from .deps import require_auth, ApiError
-from ..paths import resolve_workspace_dir
+from ..paths import validate_workspace_dir, WorkspaceValidationError
 
 router = APIRouter()
 
 HEARTBEAT_SECONDS = 15
+
+
+async def _bind_workspace(
+    supervisor, body: dict, *, session_id: str, is_new: bool
+) -> tuple[Path, str]:
+    """Resolve the ``(workspace path, workspace_id)`` this turn operates on.
+
+    New session: use the workspace the client asked for (or the configured
+    default), validate it, register it, and bind it to the new session row.
+
+    Resume: the session's stored workspace **always wins**. If the stored path
+    no longer exists, fail loudly with ``409 workspace_unavailable`` — never
+    silently fall back to the default, which is exactly the bug this change
+    removes: a transcript whose file paths refer to one tree while the tools
+    operate on another.
+    """
+    allowed = supervisor.config.agent.workspace_allowed_roots
+
+    if is_new:
+        raw = body.get("workspace_dir") or supervisor.config.agent.default_workspace_dir
+        try:
+            ws = validate_workspace_dir(raw, allowed_roots=allowed)
+        except WorkspaceValidationError as e:
+            raise ApiError(422, "validation_error", f"Invalid workspace: {e}")
+        ws.mkdir(parents=True, exist_ok=True)
+        rec = await supervisor.db.register_workspace(str(ws))
+        return ws, rec["id"]
+
+    existing = await supervisor.db.get_session(session_id)
+    stored = (existing or {}).get("workspace_dir") or ""
+    if not stored:
+        # Legacy session with no workspace bound: adopt the configured default
+        # now and backfill the row so the binding is durable from here on.
+        raw = supervisor.config.agent.default_workspace_dir
+        try:
+            ws = validate_workspace_dir(raw, allowed_roots=allowed)
+        except WorkspaceValidationError as e:
+            raise ApiError(422, "validation_error", f"Invalid workspace: {e}")
+        ws.mkdir(parents=True, exist_ok=True)
+        rec = await supervisor.db.register_workspace(str(ws))
+        await supervisor.db.update_session(session_id, workspace_dir=str(ws))
+        return ws, rec["id"]
+
+    try:
+        ws = validate_workspace_dir(stored, allowed_roots=allowed, must_exist=True)
+    except WorkspaceValidationError as e:
+        raise ApiError(
+            409,
+            "workspace_unavailable",
+            f"Session '{session_id}' was created in {stored}, which no longer "
+            "exists. Start a new session, or restore the folder.",
+        )
+    rec = await supervisor.db.register_workspace(stored)
+    return ws, rec["id"]
 
 
 def _resolve_files(message: str, files: Any, workspace_dir: str) -> tuple[str, list[str]]:
@@ -67,19 +121,31 @@ async def chat_stream(request: Request) -> StreamingResponse:
     approval_mode = body.get("approval_mode")
     files = body.get("files") or []
 
-    # Build the model-facing message with any attached file contents.
-    model_message, file_names = _resolve_files(
-        message, files, resolve_workspace_dir(supervisor.config)
+    # Resolve the workspace this turn operates on. A new session takes the
+    # workspace the client asked for (or the configured default); a resumed
+    # session keeps the workspace it was created with, whatever the current
+    # default is.
+    if session_id:
+        existing = await supervisor.db.get_session(session_id)
+        is_new = existing is None
+    else:
+        is_new = True
+    workspace, workspace_id = await _bind_workspace(
+        supervisor, body, session_id=session_id or "", is_new=is_new
     )
 
-    # Create a session if none provided.
-    if not session_id:
-        session_id = str(uuid.uuid4())
-        await supervisor.db.create_session(session_id, title=message[:60])
-    else:
-        existing = await supervisor.db.get_session(session_id)
-        if not existing:
-            await supervisor.db.create_session(session_id, title=message[:60])
+    # Build the model-facing message with any attached file contents, into the
+    # workspace this turn operates on.
+    model_message, file_names = _resolve_files(message, files, str(workspace))
+
+    if is_new:
+        session_id = session_id or str(uuid.uuid4())
+        await supervisor.db.create_session(
+            session_id,
+            title=message[:60],
+            workspace_dir=str(workspace),
+            workspace_origin=body.get("workspace_origin", "webui"),
+        )
 
     # Mirror the user message to the transcript so a reload can show the full
     # conversation even while this run is still in flight. The transcript keeps
@@ -99,6 +165,8 @@ async def chat_stream(request: Request) -> StreamingResponse:
         session_id=session_id,
         message=model_message,
         approval_mode=approval_mode,
+        workspace=workspace,
+        workspace_id=workspace_id,
     )
 
     async def event_stream():
@@ -154,13 +222,27 @@ async def chat(request: Request) -> dict:
     approval_mode = body.get("approval_mode")
     files = body.get("files") or []
 
-    model_message, file_names = _resolve_files(
-        message, files, resolve_workspace_dir(supervisor.config)
+    # Resolve the workspace this turn operates on (new session binds, resumed
+    # session keeps its own — see ``_bind_workspace``).
+    if session_id:
+        existing = await supervisor.db.get_session(session_id)
+        is_new = existing is None
+    else:
+        is_new = True
+    workspace, workspace_id = await _bind_workspace(
+        supervisor, body, session_id=session_id or "", is_new=is_new
     )
 
-    if not session_id:
-        session_id = str(uuid.uuid4())
-        await supervisor.db.create_session(session_id, title=message[:60])
+    model_message, file_names = _resolve_files(message, files, str(workspace))
+
+    if is_new:
+        session_id = session_id or str(uuid.uuid4())
+        await supervisor.db.create_session(
+            session_id,
+            title=message[:60],
+            workspace_dir=str(workspace),
+            workspace_origin=body.get("workspace_origin", "webui"),
+        )
 
     display = message
     if file_names:
@@ -176,6 +258,8 @@ async def chat(request: Request) -> dict:
         session_id=session_id,
         message=model_message,
         approval_mode=approval_mode,
+        workspace=workspace,
+        workspace_id=workspace_id,
     )
     # Wait for the run to reach a terminal state.
     try:

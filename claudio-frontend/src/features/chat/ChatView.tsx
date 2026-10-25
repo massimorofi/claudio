@@ -22,6 +22,7 @@ import { groupIntoTurns } from './workflow'
 import WorkflowPanel from './WorkflowPanel'
 import PlanPanel from './PlanPanel'
 import ContextGauge from './ContextGauge'
+import WorkspacePicker, { WorkspaceBadge } from './WorkspacePicker'
 
 // localStorage key holding the sidebar split ratio (plan panel height, in %).
 const PLAN_SPLIT_KEY = 'claudio.planSplitPct'
@@ -41,6 +42,11 @@ export default function ChatView() {
   // the chat never silently disagrees with the backend's own setting.
   const approvalTouchedRef = useRef(false)
   const [input, setInput] = useState('')
+  // Workspace chosen for a not-yet-created chat. Frozen into the session on the
+  // first message; after that the stored workspace (shown as a badge) wins.
+  const [selectedWorkspace, setSelectedWorkspace] = useState('')
+  const [sessionWorkspace, setSessionWorkspace] = useState('')
+  const [sessionOrigin, setSessionOrigin] = useState('')
   const [showSessions, setShowSessions] = useState(false)
   const [restoring, setRestoring] = useState(true)
   const [toast, setToast] = useState<string | null>(null)
@@ -231,13 +237,33 @@ export default function ChatView() {
   useEffect(() => {
     if (approvalTouchedRef.current) return
     api
-      .get<{ config?: { agent?: { approval_mode?: string } } }>('/config')
+      .get<{ config?: { agent?: { approval_mode?: string; default_workspace_dir?: string } } }>(
+        '/config',
+      )
       .then((res) => {
         const mode = res?.config?.agent?.approval_mode
         if (mode && !approvalTouchedRef.current) setApprovalMode(mode)
+        const def = res?.config?.agent?.default_workspace_dir
+        if (def) setSelectedWorkspace((cur) => cur || def)
       })
       .catch(() => undefined)
   }, [])
+
+  // When a session is opened, surface the workspace it is bound to.
+  useEffect(() => {
+    if (!sessionId) {
+      setSessionWorkspace('')
+      setSessionOrigin('')
+      return
+    }
+    api
+      .get<Record<string, unknown>>(`/sessions/${sessionId}`)
+      .then((row) => {
+        setSessionWorkspace((row?.workspace_dir as string) || '')
+        setSessionOrigin((row?.workspace_origin as string) || '')
+      })
+      .catch(() => undefined)
+  }, [sessionId])
 
   const isAtBottom = () => {
     const el = scrollRef.current
@@ -295,7 +321,7 @@ export default function ChatView() {
     // A new message should always bring the view back to the bottom.
     stickRef.current = true
     setShowJump(false)
-    send(text, paths)
+    send(text, paths, selectedWorkspace || undefined)
   }
 
   const openFilePicker = () => {
@@ -341,6 +367,8 @@ export default function ChatView() {
     clear()
     setSessionId(null)
     saveActiveSession(null)
+    setSessionWorkspace('')
+    setSessionOrigin('')
     stickRef.current = true
     setShowJump(false)
   }
@@ -472,6 +500,17 @@ export default function ChatView() {
           </div>
           <div className="hidden lg:block text-sm font-medium text-black/70">
             {sessionId ? 'Active session' : 'New conversation'}
+          </div>
+          <div className="hidden lg:flex">
+            {sessionId ? (
+              <WorkspaceBadge path={sessionWorkspace} origin={sessionOrigin} />
+            ) : (
+              <WorkspacePicker
+                value={selectedWorkspace}
+                onChange={setSelectedWorkspace}
+                disabled={state.streaming}
+              />
+            )}
           </div>
           <div className="ml-auto flex items-center gap-2">
             <ContextGauge

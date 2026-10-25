@@ -64,6 +64,10 @@ class RunRequest:
     user_input: str
     model: ModelSpec
     tools: ToolPolicy
+    # Registry id of the workspace this run operates on. Drives where Claudio
+    # keeps its own per-workspace runtime state (ADK DBs, file-history), so
+    # that state never lands inside the user's workspace.
+    workspace_id: str = ""
     max_turns: int = 30
     # Prior conversation to seed the engine with, as OpenAI-style message
     # dicts. Empty for a first run; populated after a compaction or when an

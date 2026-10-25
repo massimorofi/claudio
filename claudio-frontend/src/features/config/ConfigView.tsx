@@ -417,11 +417,31 @@ function AgentSection({
             onChange={(e) => upd({ max_output_chars: Number(e.target.value) })}
           />
         </Field>
-        <Field label="Workspace dir">
+        <Field
+          label="Default workspace dir"
+          hint="Used for new sessions started without an explicit workspace. Each session keeps its own workspace once created."
+        >
           <input
             className={inputCls}
-            value={agent.workspace_dir}
-            onChange={(e) => upd({ workspace_dir: e.target.value })}
+            value={agent.default_workspace_dir}
+            onChange={(e) => upd({ default_workspace_dir: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="Allowed workspace roots"
+          hint="Comma-separated. A workspace must fall inside one of these. Empty disables the check."
+        >
+          <input
+            className={inputCls}
+            value={(agent.workspace_allowed_roots ?? []).join(', ')}
+            onChange={(e) =>
+              upd({
+                workspace_allowed_roots: e.target.value
+                  .split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              })
+            }
           />
         </Field>
         <Field
