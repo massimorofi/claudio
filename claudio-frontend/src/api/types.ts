@@ -374,7 +374,6 @@ export interface WorkspaceFile {
 export interface WorkspaceListResponse {
   workspace: string
   files: WorkspaceFile[]
-  truncated: boolean
 }
 
 export interface WorkspaceDeleteResponse {
@@ -395,7 +394,6 @@ export interface WorkspaceNode {
 export interface WorkspaceTreeResponse {
   workspace: string
   tree: WorkspaceNode[]
-  truncated: boolean
 }
 
 // ---- File upload (chat attachments) ----

@@ -338,11 +338,6 @@ export default function WorkspaceView() {
             ))}
           </div>
         )}
-        {treeQ.data?.truncated && (
-          <div className="px-4 py-2 text-xs text-amber-600">
-            Listing truncated — too many files to show all.
-          </div>
-        )}
       </div>
 
       {confirmDelete && (

@@ -20,8 +20,7 @@ from ..paths import resolve_workspace_dir
 
 router = APIRouter()
 
-# Safety caps so a pathological workspace can't blow up a single request.
-_MAX_LIST = 5000
+# Safety cap so a pathological zip request can't blow up a single response.
 _MAX_ZIP_FILES = 1000
 
 
@@ -52,22 +51,14 @@ def _safe_join(ws: Path, rel: str) -> Path:
     return candidate
 
 
-def _build_tree(directory: Path, ws: Path, state: dict) -> list[dict]:
-    """Recursively build a nested tree of the workspace.
-
-    ``state`` tracks the global entry count and truncation flag so the cap is
-    enforced across the whole recursion, not per directory.
-    """
+def _build_tree(directory: Path, ws: Path) -> list[dict]:
+    """Recursively build a nested tree of the workspace."""
     nodes: list[dict] = []
     try:
         entries = sorted(directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except OSError:
         return nodes
     for entry in entries:
-        if state["count"] >= _MAX_LIST:
-            state["truncated"] = True
-            break
-        state["count"] += 1
         try:
             st = entry.stat()
         except OSError:
@@ -80,7 +71,7 @@ def _build_tree(directory: Path, ws: Path, state: dict) -> list[dict]:
                     "path": rel,
                     "type": "dir",
                     "modified": _iso(st.st_mtime),
-                    "children": _build_tree(entry, ws, state),
+                    "children": _build_tree(entry, ws),
                 }
             )
         else:
@@ -102,13 +93,9 @@ async def list_files(request: Request) -> dict:
     require_auth(request)
     ws = _workspace(request)
     files = []
-    truncated = False
     for p in sorted(ws.rglob("*")):
         if not p.is_file():
             continue
-        if len(files) >= _MAX_LIST:
-            truncated = True
-            break
         try:
             st = p.stat()
         except OSError:
@@ -120,7 +107,7 @@ async def list_files(request: Request) -> dict:
                 "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
             }
         )
-    return {"workspace": str(ws), "files": files, "truncated": truncated}
+    return {"workspace": str(ws), "files": files}
 
 
 @router.get("/workspace/tree")
@@ -128,9 +115,8 @@ async def get_tree(request: Request) -> dict:
     """Return the workspace as a nested tree (files and directories)."""
     require_auth(request)
     ws = _workspace(request)
-    state = {"count": 0, "truncated": False}
-    tree = _build_tree(ws, ws, state)
-    return {"workspace": str(ws), "tree": tree, "truncated": state["truncated"]}
+    tree = _build_tree(ws, ws)
+    return {"workspace": str(ws), "tree": tree}
 
 
 @router.post("/workspace/files/delete")
