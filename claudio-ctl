@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# claudio-ctl — start/stop/status for the Claudio docker stack.
+#
+#   ./claudio-ctl status  [agent|web|all] [-v]   default: all
+#   ./claudio-ctl start   [agent|web|all]        default: all
+#   ./claudio-ctl stop    [agent|web|all]        default: all
+#   ./claudio-ctl restart [agent|web|all]        default: all
+#   ./claudio-ctl logs    [agent|web|all] [-f]
+#   ./claudio-ctl build   [agent|web|all]
+#   ./claudio-ctl health                         HTTP-level probe only
+#   ./claudio-ctl down                           stop and remove containers
+#
+# Exit codes:
+#   0  everything requested is up and healthy
+#   1  a service is down / unhealthy / a probe failed
+#   2  bad usage (unknown action or service)
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR" || exit 2
+
+# Load .env BEFORE defaults so the CLI sees the same ports/tokens compose does.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
+COMPOSE="docker compose"
+ALL_SERVICES=(agent web)
+
+AGENT_PORT="${CLAUDIO__SERVER__PORT:-8100}"
+WEB_PORT="${CLAUDIO_HTTP_PORT:-8080}"
+WEB_URL="http://127.0.0.1:${WEB_PORT}"
+TOKEN="${CLAUDIO__SERVER__AUTH_TOKEN:-dev-token-change-me}"
+
+if [ -t 1 ]; then
+  c_ok=$'\033[32m'; c_bad=$'\033[31m'; c_warn=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+else
+  c_ok=""; c_bad=""; c_warn=""; c_dim=""; c_off=""
+fi
+
+VERBOSE=0
+
+die() { printf '%s\n' "${c_bad}$*${c_off}" >&2; exit 2; }
+
+usage() {
+  cat <<'EOF'
+claudio-ctl — start/stop/status for the Claudio docker stack.
+
+  status  [agent|web|all] [-v]   container state + health (default: all)
+  start   [agent|web|all]        bring services up, wait for health
+  stop    [agent|web|all]        stop services (web before agent)
+  restart [agent|web|all]        stop then start
+  logs    [agent|web|all] [-f]  tail logs
+  build   [agent|web|all]        rebuild images
+  health                         HTTP-level probe only
+  down                           stop and remove containers
+
+Exit: 0 = all good, 1 = something down/unhealthy, 2 = bad usage.
+EOF
+}
+
+# Normalise arguments into a service list. "all" expands; unknown names are fatal.
+resolve_services() {
+  local out=() a
+  if [ "$#" -eq 0 ]; then
+    out=("${ALL_SERVICES[@]}")
+  else
+    for a in "$@"; do
+      case "$a" in
+        all)      out+=("${ALL_SERVICES[@]}") ;;
+        agent|web) out+=("$a") ;;
+        *)      die "unknown service '$a' (expected: agent | web | all)" ;;
+      esac
+    done
+  fi
+  printf '%s\n' "${out[@]}"
+}
+
+require_docker() {
+  docker info >/dev/null 2>&1 || die "docker daemon is not running / not accessible"
+}
+
+# --- status ------------------------------------------------------------------
+svc_status() {
+  local svc="$1" cid state health
+  # -a is required: without it `compose ps -q` lists only RUNNING containers, so a
+  # cleanly stopped service would be misreported as never having been created.
+  cid=$($COMPOSE ps -aq "$svc" 2>/dev/null | head -n1)
+  if [ -z "$cid" ]; then
+    printf '  %-6s %s\n' "$svc" "${c_bad}not created${c_off}"
+    return 1
+  fi
+  state=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)
+  health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo unknown)
+  case "$health" in
+    healthy)   printf '  %-6s %s %s\n' "$svc" "${c_ok}$state${c_off}" "${c_dim}(health: $health)${c_off}" ;;
+    unhealthy) printf '  %-6s %s %s\n' "$svc" "${c_bad}$state${c_off}" "${c_dim}(health: $health)${c_off}" ;;
+    none)      printf '  %-6s %s\n' "$svc" "${c_warn}$state (no healthcheck)${c_off}" ;;
+    *)         printf '  %-6s %s %s\n' "$svc" "${c_warn}$state${c_off}" "${c_dim}(health: $health)${c_off}" ;;
+  esac
+  if [ "$VERBOSE" = "1" ]; then
+    local img started restarts
+    img=$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null || echo '?')
+    started=$(docker inspect -f '{{.State.StartedAt}}' "$cid" 2>/dev/null || echo '?')
+    restarts=$(docker inspect -f '{{.RestartCount}}' "$cid" 2>/dev/null || echo '?')
+    printf '         %s\n' "${c_dim}image=$img started=$started restarts=$restarts${c_off}"
+  fi
+  [ "$state" = "running" ]
+}
+
+# Deep health: HTTP-level, not just container-level.
+#
+# IMPORTANT: a non-empty response is NOT proof of health. An auth failure returns
+# a JSON error envelope, which is non-empty. Every check below asserts the
+# response is not an error envelope, otherwise a completely dead agent runtime
+# still reads as "up".
+is_error_envelope() {
+  printf '%s' "$1" | grep -q '"error"'
+}
+
+health_only() {
+  local ok=0 st
+
+  if curl -fsS -m 3 "$WEB_URL/healthz" >/dev/null 2>&1; then
+    printf '  %-12s %s\n' "web->agent" "${c_ok}reachable${c_off}"
+  else
+    printf '  %-12s %s\n' "web->agent" "${c_bad}unreachable${c_off}"
+    ok=1
+  fi
+
+  st=$(curl -fsS -m 5 -H "Authorization: Bearer $TOKEN" \
+        "$WEB_URL/api/v1/agent/status" 2>/dev/null)
+  if [ -z "$st" ]; then
+    printf '  %-12s %s\n' "agent run" "${c_warn}no response${c_off}"
+    ok=1
+  elif is_error_envelope "$st"; then
+    printf '  %-12s %s\n' "agent run" "${c_bad}$st${c_off}"
+    ok=1
+  else
+    printf '  %-12s %s\n' "agent run" "${c_ok}$st${c_off}"
+  fi
+
+  st=$(curl -fsS -m 5 -H "Authorization: Bearer $TOKEN" \
+        "$WEB_URL/api/v1/version" 2>/dev/null)
+  if [ -n "$st" ] && ! is_error_envelope "$st"; then
+    printf '  %-12s %s\n' "version" "${c_ok}$st${c_off}"
+  else
+    printf '  %-12s %s\n' "version" "${c_warn}${st:-no response}${c_off}"
+    ok=1
+  fi
+  return $ok
+}
+
+cmd_status() {
+  local rc=0 s
+  printf 'Claudio stack — status\n'
+  while read -r s; do svc_status "$s" || rc=1; done < <(resolve_services "$@")
+  return $rc
+}
+
+# --- start / stop ------------------------------------------------------------
+wait_healthy() {
+  local timeout="${1:-60}" waited=0
+  while [ "$waited" -lt "$timeout" ]; do
+    if curl -fsS -m 3 "http://127.0.0.1:${WEB_PORT}/healthz" >/dev/null 2>&1; then
+      printf '%s\n' "${c_ok}Stack healthy after ${waited}s${c_off}"
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  printf '%s\n' "${c_bad}Stack not healthy after ${timeout}s${c_off}"
+  printf 'Recent agent logs:\n'
+  $COMPOSE logs --tail 30 agent 2>&1 | tail -n 30 || true
+  return 1
+}
+
+cmd_start() {
+  require_docker
+  local services
+  services="$(resolve_services "$@")"
+  printf 'Starting: %s\n' "$(echo "$services" | tr '\n' ' ')"
+  # compose honours depends_on: service_healthy, so "start web" waits on the agent.
+  $COMPOSE up -d $services || die "compose up failed"
+  wait_healthy 90
+}
+
+cmd_stop() {
+  require_docker
+  local services ordered=() s want
+  services="$(resolve_services "$@")"
+  # Reverse order: web before agent. Killing the agent while clients are still
+  # routed to it produces a visible error storm; the reverse is silent.
+  for s in web agent; do
+    for want in $services; do
+      [ "$s" = "$want" ] && ordered+=("$s")
+    done
+  done
+  [ "${#ordered[@]}" -eq 0 ] && die "nothing to stop"
+  printf 'Stopping: %s\n' "${ordered[*]}"
+  $COMPOSE stop "${ordered[@]}" || die "compose stop failed"
+  printf 'Stopped.\n'
+}
+
+cmd_restart() {
+  require_docker
+  local services
+  services="$(resolve_services "$@")"
+  # shellcheck disable=SC2086
+  cmd_stop $services
+  # shellcheck disable=SC2086
+  cmd_start $services
+}
+
+cmd_logs() {
+  local follow="" svc_args=() a
+  for a in "$@"; do
+    if [ "$a" = "-f" ] || [ "$a" = "--follow" ]; then
+      follow="-f"
+    else
+      svc_args+=("$a")
+    fi
+  done
+  [ "${#svc_args[@]}" -eq 0 ] && svc_args=("${ALL_SERVICES[@]}")
+  $COMPOSE logs $follow --tail 200 "${svc_args[@]}"
+}
+
+cmd_build() {
+  require_docker
+  local services
+  services="$(resolve_services "$@")"
+  $COMPOSE build $services
+}
+
+cmd_down() {
+  require_docker
+  $COMPOSE down "$@"
+}
+
+# --- dispatch ----------------------------------------------------------------
+ACTION="${1:-}"
+if [ -z "$ACTION" ]; then
+  usage
+  exit 2
+fi
+shift || true
+
+# Pull a global -v/--verbose out of the argument list.
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    -v|--verbose) VERBOSE=1 ;;
+    *)            ARGS+=("$a") ;;
+  esac
+done
+
+case "$ACTION" in
+  status)  cmd_status "${ARGS[@]}" ;;
+  start)   cmd_start "${ARGS[@]}" ;;
+  stop)    cmd_stop "${ARGS[@]}" ;;
+  restart) cmd_restart "${ARGS[@]}" ;;
+  logs)    cmd_logs "${ARGS[@]}" ;;
+  build)   cmd_build "${ARGS[@]}" ;;
+  down)    cmd_down "${ARGS[@]}" ;;
+  health)  health_only ;;
+  -h|--help|help) usage ;;
+  *)       die "unknown action '$ACTION'. Use: status|start|stop|restart|logs|build|down|health" ;;
+esac

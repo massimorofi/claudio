@@ -1,4 +1,5 @@
 import { getToken } from './auth'
+import { apiUrl } from './connection'
 import type { ErrorEnvelope } from './types'
 
 export class ApiRequestError extends Error {
@@ -16,8 +17,6 @@ export class ApiRequestError extends Error {
   }
 }
 
-const BASE = '/api/v1'
-
 async function request<T>(
   method: string,
   path: string,
@@ -31,7 +30,7 @@ async function request<T>(
 
   let res: Response
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(apiUrl(path), {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -90,7 +89,7 @@ export async function uploadFile<T>(
 
   let res: Response
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(apiUrl(path), {
       method: 'POST',
       headers: { Authorization: `Bearer ${getToken()}` },
       body: form,
@@ -136,7 +135,7 @@ async function download(method: string, path: string, body?: unknown): Promise<B
 
   let res: Response
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(apiUrl(path), {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,

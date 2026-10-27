@@ -1,0 +1,108 @@
+name: claudio
+
+x-common: &common
+  restart: unless-stopped
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  # ---------------------------------------------------------------- agent ----
+  agent:
+    <<: *common
+    image: claudio/agent:${CLAUDIO_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
+      args:
+        CLAUDIO_UID: ${CLAUDIO_UID:-1000}
+        CLAUDIO_GID: ${CLAUDIO_GID:-1000}
+    container_name: claudio-agent
+    environment:
+      # Server. The agent binds all interfaces INSIDE the container only; it
+      # publishes no host port (D2), so it is unreachable off-box.
+      CLAUDIO__SERVER__HOST: "0.0.0.0"
+      CLAUDIO__SERVER__PORT: "8100"
+      CLAUDIO__SERVER__AUTH_TOKEN: ${CLAUDIO__SERVER__AUTH_TOKEN:?set CLAUDIO__SERVER__AUTH_TOKEN in .env}
+      CLAUDIO__SERVER__CORS_ORIGINS: ${CLAUDIO__SERVER__CORS_ORIGINS:-["http://localhost:8080"]}
+
+      # LLM endpoint (LAN or internet). Must be reachable from the bridge NAT.
+      CLAUDIO__LLM__BASE_URL: ${CLAUDIO__LLM__BASE_URL:?set CLAUDIO__LLM__BASE_URL in .env}
+      CLAUDIO__LLM__API_KEY: ${CLAUDIO__LLM__API_KEY:?set CLAUDIO__LLM__API_KEY in .env}
+      CLAUDIO__LLM__MODEL: ${CLAUDIO__LLM__MODEL:-halogen-qwen3.8-flash-next}
+
+      # Search providers (optional).
+      CLAUDIO__SEARCH__BRAVE_API_KEY: ${CLAUDIO__SEARCH__BRAVE_API_KEY:-}
+      CLAUDIO__SEARCH__SERPER_API_KEY: ${CLAUDIO__SEARCH__SERPER_API_KEY:-}
+      CLAUDIO__SEARCH__TAVILY_API_KEY: ${CLAUDIO__SEARCH__TAVILY_API_KEY:-}
+
+      # The agent's workspace is the bind-mounted host dir, not a config-relative path.
+      CLAUDIO__AGENT__DEFAULT_WORKSPACE_DIR: /workspace
+      CLAUDIO__AGENT__WORKSPACE_ALLOWED_ROOTS: '["/workspace"]'
+
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Paths are <backend_base>/... because the app resolves its base from
+      # Path(__file__).resolve().parents[2] == claudio-backend. Mounting at
+      # /srv/claudio/config would leave the app looking somewhere else.
+      - claudio-config:/srv/claudio/claudio-backend/config
+      - claudio-data:/srv/claudio/claudio-backend/data
+      - claudio-skills:/srv/claudio/claudio-backend/skills
+      # The repo(s) the agent edits. Bind mount, not a named volume, so the
+      # user sees the files on the host.
+      - ${CLAUDIO_WORKSPACE_DIR:-./workspace}:/workspace
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks: [claudio-net]
+    # No published ports by default. For direct debugging, uncomment:
+    # ports:
+    #   - "127.0.0.1:8100:8100"
+
+  # ------------------------------------------------------------------ web ----
+  web:
+    <<: *common
+    image: claudio/web:${CLAUDIO_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+    container_name: claudio-web
+    depends_on:
+      agent:
+        condition: service_healthy
+    ports:
+      - "${CLAUDIO_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks: [claudio-net]
+
+  # ----------------------------------------------------------- debug (opt) ---
+  # Throwaway network debugging box, off by default:
+  #   docker compose --profile debug run --rm debug
+  debug:
+    <<: *common
+    profiles: ["debug"]
+    image: alpine:3.20
+    container_name: claudio-debug
+    restart: "no"
+    command: ["sh", "-c", "apk add --no-cache curl jq bind-tools >/dev/null 2>&1; sleep infinity"]
+    networks: [claudio-net]
+
+networks:
+  claudio-net:
+    driver: bridge
+
+volumes:
+  claudio-config:
+  claudio-data:
+  claudio-skills:

@@ -1,0 +1,48 @@
+# Docker build context filter.
+#
+# The build context is the whole repo. Without this, every build copies ~470 MB of
+# virtualenvs, node_modules and live runtime state, and risks baking secrets into
+# image layers. Keep this list in sync with .gitignore for anything secret.
+
+# --- VCS / tooling caches ----------------------------------------------------
+.git
+.gitignore
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/node_modules/
+**/dist/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.import_linter_cache/
+**/*.tsbuildinfo
+**/.vite/
+**/build/
+**/*.egg-info/
+
+# --- Runtime state: must never enter an image --------------------------------
+# The backend rewrites config.yaml and owns data/ at runtime; both arrive as
+# volumes. A stale copy baked into the image would mask the volume on first run.
+claudio-backend/data/
+claudio-frontend/data/
+/data/
+.claudio/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log
+**/*.pid
+
+# --- Local config & secrets --------------------------------------------------
+claudio-backend/config/config.yaml
+.env
+.env.*
+!.env.example
+
+# --- Host-only scratch / non-deployed content --------------------------------
+*.bat
+temp/
+todo/
+doc/

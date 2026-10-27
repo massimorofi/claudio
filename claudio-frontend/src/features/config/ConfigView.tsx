@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, RotateCcw, Play, AlertTriangle, History } from 'lucide-react'
 import { api } from '../../api/client'
 import type { AppConfig, ConfigHistoryEntry, LlmTestResult } from '../../api/types'
+import ConnectionSection from './ConnectionSection'
 
 type SetField = <K extends keyof AppConfig>(k: K, v: AppConfig[K]) => void
 type TestMut = {
@@ -20,7 +21,9 @@ const commandToString = (cmd: unknown): string =>
 const stringToCommand = (s: string): string[] => s.split(/\s+/).filter(Boolean)
 
 export default function ConfigView() {
-  const [tab, setTab] = useState<'llm' | 'agent' | 'mcp' | 'memory' | 'danger'>('llm')
+  const [tab, setTab] = useState<'connection' | 'llm' | 'agent' | 'mcp' | 'memory' | 'danger'>(
+    'connection',
+  )
   const [draft, setDraft] = useState<AppConfig | null>(null)
   const [restartNeeded, setRestartNeeded] = useState(false)
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
@@ -108,14 +111,6 @@ export default function ConfigView() {
     onError: (e: Error) => setMessage({ kind: 'err', text: e.message }),
   })
 
-  if (!draft) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-black/40">
-        Loading configuration…
-      </div>
-    )
-  }
-
   const set = <K extends keyof AppConfig>(key: K, value: AppConfig[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d))
 
@@ -123,7 +118,7 @@ export default function ConfigView() {
     <div className="flex h-full flex-col">
       <div className="border-b border-black/10 bg-white px-4 py-3">
         <div className="flex gap-1 overflow-x-auto">
-          {(['llm', 'agent', 'mcp', 'memory', 'danger'] as const).map((t) => (
+          {(['connection', 'llm', 'agent', 'mcp', 'memory', 'danger'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -131,7 +126,13 @@ export default function ConfigView() {
                 tab === t ? 'bg-brand text-white' : 'text-black/60 hover:bg-black/5'
               }`}
             >
-              {t === 'mcp' ? 'MCP Servers' : t === 'memory' ? 'Self-Improvement' : t}
+              {t === 'mcp'
+                ? 'MCP Servers'
+                : t === 'memory'
+                  ? 'Self-Improvement'
+                  : t === 'connection'
+                    ? 'Connection'
+                    : t}
             </button>
           ))}
         </div>
@@ -160,16 +161,22 @@ export default function ConfigView() {
       )}
 
       <div className="scroll-thin flex-1 overflow-y-auto p-4">
-        {tab === 'llm' && (
+        {tab === 'connection' && <ConnectionSection />}
+        {tab !== 'connection' && !draft && (
+          <div className="flex h-full items-center justify-center text-sm text-black/40">
+            Loading configuration…
+          </div>
+        )}
+        {tab === 'llm' && draft && (
           <LlmSection draft={draft} setDraft={set} testMut={testMut} />
         )}
-        {tab === 'agent' && <AgentSection draft={draft} setDraft={set} />}
-        {tab === 'mcp' && <McpSection draft={draft} setDraft={set} />}
-        {tab === 'memory' && <SelfImprovementSection draft={draft} setDraft={set} />}
+        {tab === 'agent' && draft && <AgentSection draft={draft} setDraft={set} />}
+        {tab === 'mcp' && draft && <McpSection draft={draft} setDraft={set} />}
+        {tab === 'memory' && draft && <SelfImprovementSection draft={draft} setDraft={set} />}
         {tab === 'danger' && <DangerSection />}
       </div>
 
-      {tab !== 'danger' && (
+      {tab !== 'danger' && tab !== 'connection' && draft && (
         <div className="border-t border-black/10 bg-white p-3">
           <button
             onClick={() => saveMut.mutate(draft)}

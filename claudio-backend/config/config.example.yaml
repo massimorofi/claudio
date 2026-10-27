@@ -1,0 +1,155 @@
+# Claudio backend configuration — TEMPLATE
+#
+# Copy to `claudio-backend/config/config.yaml` for a host-native run, or let the
+# container entrypoint seed it into the config volume on first boot.
+#
+# The live config file is gitignored because it holds secrets. Every value here is
+# a placeholder or a safe default; replace the CHANGE_ME entries before starting.
+#
+# Precedence: defaults < this file < CLAUDIO__SECTION__KEY environment variables.
+# NOTE: env overrides only support exactly two levels (section + key). Deeper
+# values such as `agent.tools.enabled` cannot be set from the environment and
+# must live in this YAML.
+
+server:
+  # 0.0.0.0 inside the container so nginx can reach it; 127.0.0.1 for a
+  # host-native run you do not want exposed on the LAN.
+  host: 0.0.0.0
+  port: 8100
+  auth_token: dev-token-change-me
+  cors_origins:
+    - http://localhost:8080
+  expose_raw_config: false
+
+llm:
+  provider: openai
+  model: CHANGE_ME_MODEL_ID
+  api_key: CHANGE_ME_API_KEY
+  base_url: http://192.168.1.172:8731/v1
+  temperature: 0.2
+  max_tokens: 16384
+  fallback_model: null
+  timeout_seconds: 300
+  retry_attempts: 3
+  price_input_per_mtok: 0.0
+  price_output_per_mtok: 0.0
+
+agent:
+  name: claudio
+  instructions_file: instructions.md
+  instructions: null
+  max_turns: 150
+  max_auto_continues: 10
+  max_budget_usd: 100.0
+  approval_mode: 'off'
+  # Inside the container the agent edits the bind-mounted /workspace.
+  default_workspace_dir: /workspace
+  workspace_allowed_roots:
+    - /workspace
+  context_window: 262144
+  compaction_reserve: 8192
+  compaction_timeout_seconds: 300
+  max_output_chars: 8000
+  strict_tools: false
+  skills_enabled: true
+  skills_dir: ./skills
+  tools:
+    enabled:
+      - read_file
+      - list_dir
+      - web_search
+      - spawn_subagent
+      - write_file
+      - run_command
+      - edit_file
+      - web_fetch
+      - rewind_files
+      - todo_write
+    disabled: []
+  subagents: {}
+
+search:
+  provider: auto
+  brave_api_key: ''
+  serper_api_key: ''
+  tavily_api_key: ''
+  language: en
+  country: us
+  min_relevance: 0.2
+  timeout_seconds: 12
+
+mcp:
+  servers:
+    - id: SkillMD.com
+      transport: streamable_http
+      command:
+        - https://api.skillmd.com/mcp
+      url: https://api.skillmd.com/mcp
+      enabled: true
+
+monitoring:
+  log_level: INFO
+  log_retention_days: 7
+  metrics_snapshot_interval_seconds: 5
+
+autonomous:
+  enabled: false
+  report_only: true
+  max_fix_attempts: 3
+  health_check:
+    enabled: true
+    interval_minutes: 10
+    disk_warn_percent: 85.0
+    disk_crit_percent: 95.0
+    mem_crit_percent: 95.0
+    swap_warn_percent: 80.0
+    load_warn_factor: 1.0
+    load_crit_factor: 2.0
+    backup_path: ''
+    backup_max_age_hours: 26.0
+    journal_lookback_minutes: 15
+    script: ''
+  maintenance:
+    enabled: false
+    schedule: 0 3 * * *
+    vacuum_size: 200M
+    temp_dirs:
+      - /tmp
+      - /var/tmp
+    audit_retention_days: 90
+    apt_update: true
+    vacuum_logs: true
+    temp_cleanup: true
+    autoremove: true
+    full_upgrade: false
+    docker_prune: false
+    script: ''
+  recovery:
+    enabled: false
+    expected_services: []
+    restart_allowlist: []
+  notification:
+    enabled: false
+    email:
+      enabled: false
+      smtp_host: ''
+      smtp_port: 587
+      username: ''
+      password: ''
+      from_addr: ''
+      to_addr: ''
+      use_tls: true
+    webhook:
+      enabled: false
+      url: ''
+  command_allowlist: null
+
+self_improvement:
+  enabled: true
+  capture_enabled: true
+  consolidation_schedule: 0 4 * * 1
+  promotion_threshold: 3
+  auto_promote: false
+  max_learnings: 5000
+  retention_days: 180
+  max_auto_skills: 20

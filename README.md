@@ -228,6 +228,26 @@ npm run dev           # http://localhost:5173, Ctrl-C to stop
 To run the frontend against the backend, start the backend first, then the
 frontend (Vite proxies `/api` to `http://127.0.0.1:8100`).
 
+### Docker (containerised)
+
+The same stack also runs as two containers — `claudio-agent` (backend) and
+`claudio-web` (built SPA + nginx reverse proxy) — orchestrated with Compose.
+The host-native scripts above stay working; nothing is deleted.
+
+```bash
+cp .env.example .env      # then edit: auth token, LLM URL, model, workspace
+./claudio-ctl start       # build if needed, wait for health
+./docker/smoke_test.sh    # post-build verification gate
+```
+
+`./claudio-ctl` takes `status`, `start`, `stop`, `restart`, `logs`, `build`,
+`health` and `down`, each accepting `agent`, `web` or `all` (default `all`).
+Only nginx publishes a host port (8080); the agent publishes nothing and is
+reachable only over the internal Docker network.
+
+Full runbook, verification results and rollback procedures:
+[`doc/docker-deployment.md`](doc/docker-deployment.md).
+
 ### Rebuild everything
 
 After pulling changes, or to rebuild all three projects from scratch:
@@ -436,3 +456,5 @@ flag-switch mechanism is in place for a future second engine.
 | [doc/skills-and-workspace.md](./doc/skills-and-workspace.md) | where the skills directory and workspace live, path resolution, skill folder format |
 | [doc/skills-refresh-prompt.md](./doc/skills-refresh-prompt.md) | reusable prompt to refresh the curated skill set from skillmd.com, with owner/repo/credits manifest |
 | [doc/claudio_full_spec.md](./doc/claudio_full_spec.md) | the original rebuild specification (historical design doc) |
+| [doc/docker-deployment-plan.md](./doc/docker-deployment-plan.md) | the containerised deployment plan (design, rationale, risk analysis) |
+| [doc/docker-deployment.md](./doc/docker-deployment.md) | docker runbook: quick start, corrections made to the plan, verification results, rollback, security posture |

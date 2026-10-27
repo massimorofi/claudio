@@ -1,5 +1,6 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { getToken } from './auth'
+import { apiUrl } from './connection'
 import type { EventName, StreamEvent } from './types'
 
 export interface SseHandle {
@@ -43,7 +44,7 @@ export function openChatStream(
   }
 
   const startPost = () => {
-    fetchEventSource('/api/v1/chat/stream', {
+    fetchEventSource(apiUrl('/chat/stream'), {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${getToken()}`,
@@ -86,7 +87,7 @@ export function openChatStream(
   const startGet = () => {
     if (closed || !runId) return
     const qs = lastEventId ? `?last_event_id=${encodeURIComponent(lastEventId)}` : ''
-    fetchEventSource(`/api/v1/chat/runs/${runId}/stream${qs}`, {
+    fetchEventSource(apiUrl(`/chat/runs/${runId}/stream${qs}`), {
       method: 'GET',
       headers: { Authorization: `Bearer ${getToken()}` },
       signal: ctrl.signal,
@@ -139,7 +140,7 @@ export function resumeRunStream(
   const ctrl = new AbortController()
   const qs = lastEventId ? `?last_event_id=${encodeURIComponent(String(lastEventId))}` : ''
 
-  fetchEventSource(`/api/v1/chat/runs/${runId}/stream${qs}`, {
+  fetchEventSource(apiUrl(`/chat/runs/${runId}/stream${qs}`), {
     method: 'GET',
     headers: { Authorization: `Bearer ${getToken()}` },
     signal: ctrl.signal,
