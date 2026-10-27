@@ -34,7 +34,7 @@ import logging
 import random
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +108,36 @@ WRAPUP_INSTRUCTIONS = (
     "call any tools.\n\n"
 )
 
+# Fed as the input when the engine cuts a run at its turn cap. Unlike
+# AUTO_CONTINUE_PROMPT -- a push-harder nudge that assumes the plan is fine
+# and only the momentum ran out -- this treats the cap as evidence the
+# strategy itself is failing: name what did not work, then take a different
+# route instead of repeating it.
+REPLAN_PROMPT = (
+    "You hit the turn limit without finishing the task. The approach so far "
+    "is not working -- repeating it will not get a different result. "
+    "First, state plainly what you tried and why it failed. Then choose a "
+    "DIFFERENT route: a different tool, a different technique, or a smaller "
+    "decomposition of the problem. If you are missing knowledge, go get it: "
+    "search the web, read the relevant docs, load a skill. Do not repeat a "
+    "failed step unchanged. Break the remaining work into smaller verifiable "
+    "steps and take the first one now."
+)
+
+# Failures that replanning cannot fix. Even in approval-off mode -- where the
+# agent keeps going through recoverable failures -- these stop the run: a
+# rejected credential, a rejected input, an exhausted budget or a corrupt
+# resume state will fail exactly the same way on the next attempt.
+_TERMINAL_FAILURE_CODES = frozenset(
+    {
+        "cancelled",
+        "budget_exceeded",
+        "llm_auth_error",
+        "input_rejected",
+        "bad_resume_state",
+    }
+)
+
 
 class BudgetExceededError(Exception):
     """Raised when a session's cumulative spend reaches ``max_budget_usd``."""
@@ -129,6 +159,10 @@ class RunRecord:
     workspace: Path = Path(".")
     workspace_id: str = ""
     state: str = "running"  # running | awaiting_approval | completed | failed | cancelled
+    # Effective approval mode for this run, resolved once at start. The
+    # recovery loop reads it to decide whether a failure is something to
+    # replan around (off) or a reason to stop.
+    approval_mode: str = "on_request"
     events: deque = field(default_factory=lambda: deque(maxlen=RING_BUFFER_SIZE))
     seq: int = 0
     subscribers: set = field(default_factory=set)
@@ -199,6 +233,7 @@ class RunManager:
                 workspace=workspace if workspace is not None
                 else resolve_workspace_dir(self.config),
                 workspace_id=workspace_id,
+                approval_mode=approval_mode or self.config.agent.approval_mode,
             )
             record.started_at = time.time()
             self._runs[run_id] = record
@@ -229,6 +264,7 @@ class RunManager:
                     workspace=workspace if workspace is not None
                     else resolve_workspace_dir(self.config),
                     workspace_id=workspace_id,
+                    approval_mode=self.config.agent.approval_mode,
                 )
                 record.started_at = time.time()
                 self._runs[run_id] = record
@@ -517,6 +553,7 @@ class RunManager:
         total_output = 0
         total_cost = 0.0
         auto_continues = 0
+        replans = 0
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
@@ -526,6 +563,7 @@ class RunManager:
                 total_input += int(usage.get("input_tokens") or 0)
                 total_output += int(usage.get("output_tokens") or 0)
                 total_cost += float(usage.get("cost_usd") or 0.0)
+                record.turns_used += int(data.get("turns") or 0)
                 merged = {
                     **data,
                     "usage": {
@@ -564,12 +602,67 @@ class RunManager:
             if kind == "approval":
                 await self._handle_approval(record, data)
                 return
+            if kind == "cancelled":
+                # The cancel event was observed between events; stop now.
+                # Checked before the failure handling so the keep-going
+                # replan path can never run over a user's cancellation.
+                await self._finalize_cancelled(record)
+                return
             # kind == "failed"
             err = data.get("error") or {}
             code = err.get("code", "engine_error")
             retryable = bool(err.get("retryable", False))
             if code == "cancelled":
                 await self._finalize_cancelled(record)
+                return
+            if code == "max_turns_exceeded":
+                # The engine cut the run at its turn cap. In approval-off
+                # mode this is not a stop signal but a "change tack" signal:
+                # replan with a fresh budget and keep going. The only
+                # guardrail is the cost budget -- with budget 0 the run is
+                # effectively unbounded, which is the point.
+                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                if record.approval_mode == "off" and not over_budget:
+                    replans += 1
+                    self._publish(
+                        record,
+                        {
+                            "event": EventName.RUN_RESTARTING.value,
+                            "data": {
+                                "reason": "max_turns_replan",
+                                "attempt": replans,
+                            },
+                        },
+                    )
+                    request = self._build_request(
+                        record, REPLAN_PROMPT, record.approval_mode
+                    )
+                    continue
+                # Not in keep-going mode (or out of budget): degrade
+                # gracefully instead of ending on an error with nothing
+                # produced.
+                w_kind, w_data = await self._run_wrapup(record)
+                if w_kind == "completed":
+                    w_usage = w_data.get("usage") or {}
+                    total_input += int(w_usage.get("input_tokens") or 0)
+                    total_output += int(w_usage.get("output_tokens") or 0)
+                    total_cost += float(w_usage.get("cost_usd") or 0.0)
+                    record.turns_used += int(w_data.get("turns") or 0)
+                    merged = {
+                        **w_data,
+                        "usage": {
+                            "input_tokens": total_input,
+                            "output_tokens": total_output,
+                            "cost_usd": total_cost,
+                        },
+                    }
+                    await self._finalize_completed(record, merged)
+                elif w_kind == "cancelled":
+                    await self._finalize_cancelled(record)
+                else:
+                    await self._finalize_failed(
+                        record, code, err.get("message", "Run failed")
+                    )
                 return
             if code == "context_overflow":
                 if record.mid_run_compactions >= MAX_MID_RUN_COMPACTIONS:
@@ -616,6 +709,28 @@ class RunManager:
                     record, CONTINUE_PROMPT, None, model_override=fallback
                 )
                 continue
+            # Approval-off mode means "find a way, no matter how long it
+            # takes": a failure that isn't genuinely terminal is a reason
+            # to change approach, not to give up. Back off between attempts
+            # so a hard-down dependency doesn't spin the loop.
+            if (
+                record.approval_mode == "off"
+                and code not in _TERMINAL_FAILURE_CODES
+                and not (budget > 0 and (base_cost + total_cost) >= budget)
+            ):
+                replans += 1
+                self._publish(
+                    record,
+                    {
+                        "event": EventName.RUN_RESTARTING.value,
+                        "data": {"reason": "replan", "attempt": replans},
+                    },
+                )
+                await asyncio.sleep(_backoff_seconds(min(replans, 6)))
+                request = self._build_request(
+                    record, REPLAN_PROMPT, record.approval_mode
+                )
+                continue
             await self._finalize_failed(
                 record, code, err.get("message", "Run failed")
             )
@@ -642,6 +757,7 @@ class RunManager:
         total_output = 0
         total_cost = 0.0
         auto_continues = 0
+        replans = 0
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
@@ -651,6 +767,7 @@ class RunManager:
                 total_input += int(usage.get("input_tokens") or 0)
                 total_output += int(usage.get("output_tokens") or 0)
                 total_cost += float(usage.get("cost_usd") or 0.0)
+                record.turns_used += int(data.get("turns") or 0)
                 merged = {
                     **data,
                     "usage": {
@@ -686,11 +803,56 @@ class RunManager:
             if kind == "approval":
                 await self._handle_approval(record, data)
                 return
+            if kind == "cancelled":
+                await self._finalize_cancelled(record)
+                return
             err = data.get("error") or {}
             code = err.get("code", "engine_error")
             retryable = bool(err.get("retryable", False))
             if code == "cancelled":
                 await self._finalize_cancelled(record)
+                return
+            if code == "max_turns_exceeded":
+                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                if record.approval_mode == "off" and not over_budget:
+                    replans += 1
+                    self._publish(
+                        record,
+                        {
+                            "event": EventName.RUN_RESTARTING.value,
+                            "data": {
+                                "reason": "max_turns_replan",
+                                "attempt": replans,
+                            },
+                        },
+                    )
+                    request = self._build_request(
+                        record, REPLAN_PROMPT, record.approval_mode
+                    )
+                    state = None
+                    continue
+                w_kind, w_data = await self._run_wrapup(record)
+                if w_kind == "completed":
+                    w_usage = w_data.get("usage") or {}
+                    total_input += int(w_usage.get("input_tokens") or 0)
+                    total_output += int(w_usage.get("output_tokens") or 0)
+                    total_cost += float(w_usage.get("cost_usd") or 0.0)
+                    record.turns_used += int(w_data.get("turns") or 0)
+                    merged = {
+                        **w_data,
+                        "usage": {
+                            "input_tokens": total_input,
+                            "output_tokens": total_output,
+                            "cost_usd": total_cost,
+                        },
+                    }
+                    await self._finalize_completed(record, merged)
+                elif w_kind == "cancelled":
+                    await self._finalize_cancelled(record)
+                else:
+                    await self._finalize_failed(
+                        record, code, err.get("message", "Run failed")
+                    )
                 return
             if retryable and attempt < max_retries:
                 attempt += 1
@@ -719,6 +881,25 @@ class RunManager:
                 )
                 request = self._build_request(
                     record, CONTINUE_PROMPT, None, model_override=fallback
+                )
+                state = None
+                continue
+            if (
+                record.approval_mode == "off"
+                and code not in _TERMINAL_FAILURE_CODES
+                and not (budget > 0 and (base_cost + total_cost) >= budget)
+            ):
+                replans += 1
+                self._publish(
+                    record,
+                    {
+                        "event": EventName.RUN_RESTARTING.value,
+                        "data": {"reason": "replan", "attempt": replans},
+                    },
+                )
+                await asyncio.sleep(_backoff_seconds(min(replans, 6)))
+                request = self._build_request(
+                    record, REPLAN_PROMPT, record.approval_mode
                 )
                 state = None
                 continue
@@ -887,6 +1068,73 @@ class RunManager:
             },
         )
 
+    # ---- wrap-up --------------------------------------------------------
+
+    async def _run_wrapup(self, record: RunRecord) -> dict[str, Any] | None:
+        """One tool-less pass that writes out the partial deliverable.
+
+        The turn cap cut the run short. Rather than ending on an error with
+        nothing produced, give the agent a final turn whose only job is to
+        write down whatever it has actually accomplished. The engine's own
+        conversation holds the full history, so the wrap-up input only
+        needs the durable summary the instruction refers to.
+
+        Tools are stripped for this pass: the wrap-up must produce the
+        deliverable as text, not start another round of work that could
+        hit the cap again. Returns the terminal outcome of the wrap-up
+        stream: ``("completed", data)`` on success, otherwise
+        ``("failed"|"cancelled", data)``.
+        """
+        summary = await self._build_wrapup_summary(record)
+        try:
+            request = self._build_request(
+                record, WRAPUP_INSTRUCTIONS + summary, "off"
+            )
+        except Exception as exc:  # noqa: BLE001 - wrap-up is best-effort
+            logger.warning("could not build wrap-up request: %s", exc)
+            return None
+        request = replace(
+            request,
+            tools=ToolPolicy(
+                enabled=(),
+                disabled=request.tools.disabled,
+                approval_mode="off",
+                strict_mode=False,
+            ),
+            max_turns=2,
+        )
+        kind, data = await self._consume(record, request)
+        if kind == "completed":
+            return ("completed", data)
+        if kind == "cancelled":
+            return ("cancelled", {})
+        return ("failed", data)
+
+    async def _build_wrapup_summary(self, record: RunRecord) -> str:
+        """The context block the wrap-up instruction promises the model."""
+        todos = await self._load_todos(record.session_id)
+        done = [
+            t.get("content", "")
+            for t in todos
+            if isinstance(t, dict) and t.get("status") == "done"
+        ]
+        outstanding = [
+            t.get("content", "")
+            for t in todos
+            if isinstance(t, dict) and t.get("status") != "done"
+        ]
+        parts: list[str] = []
+        if done:
+            parts.append("Completed:\n" + "\n".join(f"- {c}" for c in done))
+        if outstanding:
+            parts.append("Still open:\n" + "\n".join(f"- {c}" for c in outstanding))
+        if record.files_written:
+            parts.append("Files written: " + ", ".join(record.files_written))
+        text = "\n\n".join(parts)
+        if len(text) > WRAPUP_MAX_CHARS:
+            text = text[:WRAPUP_MAX_CHARS]
+        return text
+
     # ---- finalisation ---------------------------------------------------
 
     async def _finalize_completed(self, record: RunRecord, data: dict[str, Any]) -> None:
@@ -962,6 +1210,7 @@ class RunManager:
                     "run_id": record.run_id,
                     "session_id": record.session_id,
                     "final_output": record.final_output,
+                    "turns": record.turns_used,
                     "usage": {
                         "input_tokens": record.input_tokens,
                         "output_tokens": record.output_tokens,
@@ -1055,6 +1304,7 @@ class RunManager:
             finished_at=utcnow(),
             error_code=code,
             error_message=record.error_message,
+            turns_used=record.turns_used,
         )
         self._append_turn_status(
             record,

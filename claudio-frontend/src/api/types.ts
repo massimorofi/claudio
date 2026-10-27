@@ -317,6 +317,7 @@ export interface RunCompletedEvent {
   final_output: string
   usage: UsageInfo
   summary?: TurnSummary
+  turns?: number
 }
 
 // ---- Phase 4: context usage ----

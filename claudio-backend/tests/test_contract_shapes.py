@@ -167,28 +167,18 @@ async def test_approval_request_matches_ts(env, ts_types):
 
 @pytest.mark.asyncio
 async def test_run_failed_frame_matches_ts(env, ts_types):
-    # max_turns is 5 in the fixture; a plan that never stops trips
-    # max_turns_exceeded, which surfaces as a run_failed frame.
-    set_plan(
-        [
-            {
-                "tool_calls": [
-                    {"id": f"c{i}", "name": "read_file", "arguments": {"path": "hello.txt"}}
-                ]
-                if i % 2 == 0
-                else {"id": f"c{i}", "name": "write_file", "arguments": {"path": "o.txt", "content": "x"}},
-                "finish_reason": "tool_calls",
-            }
-            for i in range(8)
-        ]
-    )
+    # A rejected credential is terminal in every approval mode: the engine
+    # surfaces it as a non-retryable llm_auth_error and the run fails, so
+    # this exercises the run_failed wire shape. (max_turns no longer ends a
+    # run -- it replans or wraps up -- so it can no longer be used here.)
+    set_plan([{"content": "unused", "finish_reason": "stop"}])
     reset_reqs()
     async with httpx.AsyncClient(base_url=env["base_url"], timeout=30) as client:
         failed = None
         async with client.stream(
             "POST",
             "/api/v1/chat/stream",
-            json={"message": "loop forever", "approval_mode": "off"},
+            json={"message": "TRIGGER_AUTH_FAIL", "approval_mode": "off"},
             headers=auth(),
         ) as resp:
             assert resp.status_code == 200

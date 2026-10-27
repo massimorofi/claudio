@@ -72,6 +72,24 @@ async def fake_app(scope, receive, send):
     if path.endswith("/chat/completions"):
         req = json.loads(body) if body else {}
         _REQS.append(req)
+        # Sentinel: a message carrying this string makes the endpoint reject
+        # the credential, so tests can exercise a non-recoverable auth
+        # failure regardless of the scripted plan.
+        last_content = ""
+        msgs = req.get("messages") or []
+        if msgs:
+            c = msgs[-1].get("content")
+            if isinstance(c, str):
+                last_content = c
+            elif isinstance(c, list):
+                last_content = " ".join(
+                    str(p.get("text", "")) for p in c if isinstance(p, dict)
+                )
+        if "TRIGGER_AUTH_FAIL" in last_content:
+            await _json(
+                send, 401, {"error": {"message": "Incorrect API key provided"}}
+            )
+            return
         idx = len(_REQS) - 1
         turn = _PLAN[idx] if idx < len(_PLAN) else {"content": "ok", "finish_reason": "stop"}
         if req.get("stream"):
@@ -488,3 +506,63 @@ async def test_sessions_lifecycle(env):
         messages = msgs.json()["messages"]
         # The user message was mirrored to the transcript.
         assert any(m.get("type") == "user" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_turn_count_matches_model_responses(env):
+    """``turns`` counts model responses, not every non-user event.
+
+    ADK authors the function-response echo with the agent's name too, so a
+    naive ``author != "user"`` count adds one per tool round-trip on top of
+    the model's own reply. Three scripted model responses -- two tool-call
+    turns and a final text turn -- must report three turns, and the same
+    number must reach the persisted run row.
+    """
+    set_plan(
+        [
+            {
+                "tool_calls": [
+                    {"id": "t1", "name": "read_file", "arguments": {"path": "hello.txt"}}
+                ],
+                "finish_reason": "tool_calls",
+            },
+            {
+                "tool_calls": [
+                    {"id": "t2", "name": "read_file", "arguments": {"path": "hello.txt"}}
+                ],
+                "finish_reason": "tool_calls",
+            },
+            {"content": "All done.", "finish_reason": "stop"},
+        ]
+    )
+    reset_reqs()
+    async with httpx.AsyncClient(base_url=env["base_url"], timeout=30) as client:
+        completed = None
+        async with client.stream(
+            "POST",
+            "/api/v1/chat/stream",
+            json={"message": "read the file twice", "approval_mode": "off"},
+            headers=auth(),
+        ) as resp:
+            assert resp.status_code == 200
+            name = None
+            async for line in resp.aiter_lines():
+                if line.startswith("event: "):
+                    name = line[len("event: ") :]
+                elif line.startswith("data: "):
+                    data = json.loads(line[len("data: ") :])
+                    if name == "run_completed":
+                        completed = data
+                        break
+                    if name == "run_failed":
+                        raise AssertionError(f"run failed: {data}")
+        assert completed is not None
+        assert completed.get("turns") == 3, (
+            f"expected 3 model responses, got turns={completed.get('turns')}"
+        )
+        run_id = completed["run_id"]
+        rr = await client.get(f"/api/v1/chat/runs/{run_id}", headers=auth())
+        assert rr.status_code == 200
+        assert rr.json().get("turns_used") == 3, (
+            f"turns_used not persisted: {rr.json().get('turns_used')}"
+        )

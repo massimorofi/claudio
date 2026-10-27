@@ -320,6 +320,36 @@ def usage_from_event(event: Any) -> tuple[int, int]:
     return int(tin or 0), int(tout or 0)
 
 
+def is_model_response(event: Any) -> bool:
+    """True when this event is one completed model response.
+
+    ADK authors *both* the model's own reply and the function-response
+    echo with the agent's name (see ``tools/_caller.py``: the function
+    response event is built with ``author=_require_agent_name(...)``).
+    Counting ``author != "user"`` therefore adds two events per tool
+    round-trip and inflates the turn count ~2x -- a ``max_turns: 150``
+    cap really stops after ~75 model calls.
+
+    A model turn is an agent-authored event that carries the model's own
+    output (text or function calls) and no ``function_response`` part.
+    Partial streaming chunks are not counted: the merged final event is
+    the turn.
+    """
+    if getattr(event, "partial", False):
+        return False
+    author = getattr(event, "author", "") or ""
+    if author in ("", "user"):
+        return False
+    content = getattr(event, "content", None)
+    parts = getattr(content, "parts", None) or []
+    if not parts:
+        return False
+    for part in parts:
+        if getattr(part, "function_response", None) is not None:
+            return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
@@ -761,26 +791,41 @@ class AdkEngine:
                         final_text += evt["data"]["text"]
                     yield evt
 
-                if getattr(event, "author", "") != "user":
+                if is_model_response(event):
                     turns += 1
                     if request.max_turns and turns >= request.max_turns:
                         await agen.aclose()
-                        yield _failed(
-                            request.run_id,
-                            "max_turns_exceeded",
-                            f"Run stopped after {turns} turns (max_turns reached)",
-                            False,
-                        )
+                        # The turn cap is not a terminal verdict: the
+                        # RunManager may replan and continue with a fresh
+                        # budget, so hand it the consumption so far.
+                        yield {
+                            "event": EventName.RUN_FAILED.value,
+                            "data": {
+                                "run_id": request.run_id,
+                                "error": {
+                                    "code": "max_turns_exceeded",
+                                    "message": f"Run stopped after {turns} turns (max_turns reached)",
+                                    "retryable": False,
+                                },
+                                "usage": {
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "cost_usd": self._cost(input_tokens, output_tokens),
+                                },
+                                "turns": turns,
+                            },
+                        }
                         return
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - surface as run_failed
             logger.exception("ADK run failed")
+            code, retryable = _classify_engine_error(exc)
             yield _failed(
                 request.run_id,
-                "engine_error",
+                code,
                 str(exc) or exc.__class__.__name__,
-                True,
+                retryable,
             )
             return
 
@@ -795,6 +840,7 @@ class AdkEngine:
                     "output_tokens": output_tokens,
                     "cost_usd": self._cost(input_tokens, output_tokens),
                 },
+                "turns": turns,
             },
         }
 
@@ -804,6 +850,28 @@ def _failed(run_id: str, code: str, message: str, retryable: bool) -> dict[str, 
         "event": EventName.RUN_FAILED.value,
         "data": {"run_id": run_id, "error": {"code": code, "message": message, "retryable": retryable}},
     }
+
+
+def _classify_engine_error(exc: Exception) -> tuple[str, bool]:
+    """Map an engine exception to ``(code, retryable)``.
+
+    Everything is a generic retryable ``engine_error`` except the failures
+    that replanning and retrying cannot fix: a rejected credential. Surfacing
+    an auth failure as non-retryable matters because approval-off mode keeps
+    re-running the agent on any recoverable failure -- looping on a bad API
+    key would spin forever.
+    """
+    msg = str(exc).lower()
+    if (
+        "401" in msg
+        or "403" in msg
+        or "unauthorized" in msg
+        or "invalid api key" in msg
+        or "incorrect api key" in msg
+        or "invalid_api_key" in msg
+    ):
+        return "llm_auth_error", False
+    return "engine_error", True
 
 
 def create_engine(
