@@ -10,6 +10,10 @@ requires-python = ">=3.11"
 dependencies = [
     "claudio-core",
     "google-adk[openai]>=2.0,<3",
+    # google-adk does not install the mcp package itself; its mcp_tool module
+    # silently skips exporting McpToolset when mcp is absent, which breaks
+    # backend startup. Declare it explicitly.
+    "mcp>=1.0",
     "fastapi>=0.133",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.12",

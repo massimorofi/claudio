@@ -45,7 +45,7 @@ from claudio_core.events import EventName
 from claudio_core.instructions import build_instructions
 from claudio_core.learning import capture_run
 from claudio_core.llm import LlmCallError, openai_chat_completion
-from claudio_core.settings import AppConfig
+from claudio_core.settings import AppConfig, LLMConfig
 from claudio_core.tools.registry import select_tool_names
 
 from ..errors import ApiError
@@ -365,12 +365,18 @@ class RunManager:
         return max(0, int(self.compactor.context_window) - int(self.compactor.reserve) - used)
 
     def _model_spec(self, model_override: str | None = None) -> ModelSpec:
+        # ``max_tokens: 0`` in the config means "use the default", not "send
+        # zero". A literal 0 reaches the model as max_completion_tokens=0 and
+        # every request fails with "integer below minimum value". The ModelSpec
+        # default (4096) is too small for reasoning models, so fall back to the
+        # LLMConfig default (16384).
         return ModelSpec(
             model=model_override or self.config.llm.model,
             base_url=self.config.llm.base_url,
             api_key=self.config.llm.api_key or "local",
             temperature=float(self.config.llm.temperature),
-            max_tokens=int(self.config.llm.max_tokens),
+            max_tokens=int(self.config.llm.max_tokens)
+            or LLMConfig.model_fields["max_tokens"].default,
             timeout_seconds=float(self.config.llm.timeout_seconds),
             fallback_model=self.config.llm.fallback_model,
         )

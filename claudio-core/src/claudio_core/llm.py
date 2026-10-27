@@ -49,11 +49,22 @@ async def openai_chat_completion(
         "max_tokens": max_tokens,
         "stream": False,
     }
-    headers = {"Authorization": f"Bearer {api_key or 'local'}"}
+    # ``api-key`` is sent alongside the standard bearer header because some
+    # enterprise gateways (e.g. Merck's GPTeal) strip ``Authorization`` and
+    # ``x-api-key`` entirely. OpenAI-compatible servers ignore the extra
+    # header, so adding it is harmless for local backends.
+    key = api_key or "local"
+    headers = {"Authorization": f"Bearer {key}", "api-key": key}
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
+            # gpt-5/6-class reasoning models reject ``max_tokens`` and require
+            # ``max_completion_tokens``. When the endpoint says so explicitly,
+            # rename the field and resend once.
+            if resp.status_code == 400 and "max_completion_tokens" in resp.text:
+                payload["max_completion_tokens"] = payload.pop("max_tokens")
+                resp = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         raise LlmCallError(f"LLM request failed: {exc}") from exc
 

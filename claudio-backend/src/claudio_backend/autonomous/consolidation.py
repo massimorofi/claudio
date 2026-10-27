@@ -38,7 +38,7 @@ from claudio_core.llm import openai_chat_completion
 from claudio_core.settings import AppConfig
 from claudio_core.skill_loader import scan_skills
 
-from ..engine.adk_engine import resolve_skills_dir
+from ..paths import resolve_skills_dir
 from .promotion import promote_draft
 from .report import TaskReport
 

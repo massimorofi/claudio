@@ -73,10 +73,13 @@ export function openChatStream(
         // sole error callback. Calling onError here too fired it twice per drop.
         throw err
       },
-    }).catch(() => {
+    }).catch((err) => {
       if (closed) return
       if (runId) startGet()
-      else opts.onError?.(new Error('stream_ended'))
+      // No run was started: the stream itself failed to open (e.g. a 422
+      // validation rejection). Surface the real error -- status and body --
+      // instead of a generic 'stream_ended' that hides it.
+      else opts.onError?.(err)
     })
   }
 

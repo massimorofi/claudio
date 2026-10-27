@@ -3,6 +3,30 @@ name: debugging
 description: A systematic debugging skill that reproduces failures, reads errors,
   isolates causes, fixes one layer at a time, verifies with tests, maintains a debug
   changelog, and probes external providers directly when tool output looks wrong.
+license: mixed — see Credits
+metadata:
+  last_reviewed: '2026-10-23'
+  sources:
+  - owner: haongo232
+    name: debug
+    license: unknown
+    url: https://skillmd.com/skills/haongo232/debug
+  - owner: github
+    name: power-bi-performance-troubleshooting
+    license: unknown
+    url: https://skillmd.com/skills/github/power-bi-performance-troubleshooting
+  - owner: georgeqle
+    name: debug
+    license: unknown
+    url: https://skillmd.com/skills/georgeqle/debug
+  - owner: nvidia
+    name: dynamo-troubleshoot
+    license: Apache-2.0
+    url: https://skillmd.com/skills/nvidia/dynamo-troubleshoot
+  - owner: projectious-work
+    name: debugging
+    license: unknown
+    url: https://skillmd.com/skills/projectious-work/debugging
 ---
 
 $ARGUMENTS

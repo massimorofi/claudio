@@ -29,11 +29,69 @@ import json
 import logging
 from typing import Any, AsyncGenerator
 
+import openai
 from google.adk.integrations.openai import OpenAILlm
 from google.adk.integrations.openai import _openai_llm as _adk_openai
 from google.genai import types
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+def _is_max_tokens_rejection(exc: openai.BadRequestError) -> bool:
+    """Whether a 400 is the endpoint rejecting ``max_tokens``.
+
+    The OpenAI SDK exposes the offending field as ``param``; gateways that do
+    not fill it in are caught by the message text, which always names both
+    the rejected field and the replacement.
+    """
+    if getattr(exc, "param", None) == "max_tokens":
+        return True
+    msg = str(exc).lower()
+    return "max_tokens" in msg and "max_completion_tokens" in msg
+
+
+def make_openai_client(base_url: str | None, api_key: str | None) -> AsyncOpenAI:
+    """Build an ``AsyncOpenAI`` client that survives header-stripping gateways.
+
+    Two adaptations for enterprise LLM gateways (e.g. Merck's GPTeal) that
+    plain OpenAI-compatible clients do not handle:
+
+    1. **Auth header.** The gateway drops ``Authorization`` and ``x-api-key``
+       and only accepts the key in an ``api-key`` header. Standard servers
+       ignore the extra header, so sending it is safe everywhere.
+    2. **``max_tokens`` rejection.** gpt-5/6-class reasoning models reject
+       ``max_tokens`` and require ``max_completion_tokens``. The model name
+       alone (``auto``, a gateway alias) is not always enough to know that in
+       advance, so ``chat.completions.create`` is wrapped to rename the field
+       and retry once when the endpoint rejects it. This covers both the
+       streaming and non-streaming paths.
+    """
+    key = api_key or "local"
+    client = AsyncOpenAI(
+        base_url=base_url,
+        api_key=key,
+        default_headers={"api-key": key},
+    )
+    _patch_max_tokens_retry(client)
+    return client
+
+
+def _patch_max_tokens_retry(client: AsyncOpenAI) -> None:
+    """Replace ``chat.completions.create`` with a max_tokens-rename retry."""
+    original_create = client.chat.completions.create
+
+    async def create_with_retry(*args: Any, **kwargs: Any):
+        try:
+            return await original_create(*args, **kwargs)
+        except openai.BadRequestError as exc:
+            if "max_tokens" not in kwargs or not _is_max_tokens_rejection(exc):
+                raise
+            kwargs = dict(kwargs)
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+            return await original_create(*args, **kwargs)
+
+    client.chat.completions.create = create_with_retry  # type: ignore[method-assign]
 
 
 # Capture the upstream function BEFORE patching, so the wrapper calls the real
@@ -232,4 +290,4 @@ class ReasoningOpenAILlm(OpenAILlm):
         )
 
 
-__all__ = ["ReasoningOpenAILlm"]
+__all__ = ["ReasoningOpenAILlm", "make_openai_client"]

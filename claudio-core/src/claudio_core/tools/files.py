@@ -39,14 +39,16 @@ def _load_index(ctx: ToolContext) -> dict:
     idx_path = _history_dir(ctx) / "index.json"
     if idx_path.exists():
         try:
-            return json.loads(idx_path.read_text())
+            return json.loads(idx_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
 
 def _save_index(ctx: ToolContext, index: dict) -> None:
-    (_history_dir(ctx) / "index.json").write_text(json.dumps(index, indent=2))
+    (_history_dir(ctx) / "index.json").write_text(
+        json.dumps(index, indent=2), encoding="utf-8"
+    )
 
 
 def _backup_file(ctx: ToolContext, target: Path) -> str | None:
@@ -88,7 +90,7 @@ async def read_file(
     if not target.is_file():
         return {"ok": False, "error": f"Not a file: {path}"}
     try:
-        text = target.read_text(errors="replace")
+        text = target.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return {"ok": False, "error": f"Cannot read {path}: {e}"}
     lines = text.splitlines()
@@ -129,7 +131,7 @@ async def write_file(
             with target.open("a", encoding="utf-8") as fh:
                 fh.write(content)
         else:
-            target.write_text(content)
+            target.write_text(content, encoding="utf-8")
     except OSError as e:
         return {"ok": False, "error": f"Cannot write {path}: {e}"}
     # A successful write is the signal that the agent has produced output: mark
@@ -166,7 +168,7 @@ async def edit_file(
     if not target.exists() or not target.is_file():
         return {"ok": False, "error": f"No such file: {path}"}
     try:
-        text = target.read_text(errors="replace")
+        text = target.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return {"ok": False, "error": f"Cannot read {path}: {e}"}
     count = text.count(old_string)
@@ -182,7 +184,7 @@ async def edit_file(
     )
     backup = _backup_file(ctx, target)
     try:
-        target.write_text(new_text)
+        target.write_text(new_text, encoding="utf-8")
     except OSError as e:
         return {"ok": False, "error": f"Cannot write {path}: {e}"}
     # Editing a file counts as producing output too (see write_file above).

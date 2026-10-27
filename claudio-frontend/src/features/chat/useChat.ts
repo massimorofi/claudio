@@ -218,14 +218,18 @@ export function useChat(
           clearTimer()
           timerRef.current = setTimeout(() => reattach(sid, attempt + 1), reattachDelay(attempt))
         } else {
+          // The reducer reads the error from data.error -- code/message at the
+          // top level of data are invisible to it and render as an empty message.
           dispatch({
             type: 'SSE',
             ev: {
               event: 'run_failed',
               data: {
-                code: 'connection_error',
-                message: 'Connection lost — could not reconnect',
-                retryable: false,
+                error: {
+                  code: 'connection_error',
+                  message: 'Connection lost — could not reconnect',
+                  retryable: false,
+                },
               },
             },
           })
@@ -267,27 +271,26 @@ export function useChat(
           onClose: () => {
             dispatch({ type: 'STOPPED' })
           },
-          onError: () => {
-            // A dropped stream is not a failed run. Flag it (non-terminal) and
-            // reconcile against the backend; only surface a hard error if the
-            // reattach loop itself gives up.
-            dispatch({ type: 'CONNECTION_LOST' })
-            const sid = sessionRef.current
-            if (sid) {
-              reattach(sid, 0)
-            } else {
-              dispatch({
-                type: 'SSE',
-                ev: {
-                  event: 'run_failed',
-                  data: {
-                    code: 'connection_error',
-                    message: 'Connection lost',
+          onError: (err) => {
+            // sse.ts only calls onError when the POST stream failed before a
+            // run was started (a run that drops mid-flight is reattached via
+            // the GET stream there). Report the real error -- status and body
+            // -- with code stream_open_failed so the user sees why the chat
+            // failed instead of a blank "Failed · 0.0s".
+            const message = err instanceof Error ? err.message : String(err)
+            dispatch({
+              type: 'SSE',
+              ev: {
+                event: 'run_failed',
+                data: {
+                  error: {
+                    code: 'stream_open_failed',
+                    message,
                     retryable: false,
                   },
                 },
-              })
-            }
+              },
+            })
           },
         },
       )
@@ -318,9 +321,11 @@ export function useChat(
         ev: {
           event: 'run_failed',
           data: {
-            code: 'approval_error',
-            message: (e as Error).message,
-            retryable: false,
+            error: {
+              code: 'approval_error',
+              message: (e as Error).message,
+              retryable: false,
+            },
           },
         },
       })
@@ -337,9 +342,11 @@ export function useChat(
         ev: {
           event: 'run_failed',
           data: {
-            code: 'approval_error',
-            message: (e as Error).message,
-            retryable: false,
+            error: {
+              code: 'approval_error',
+              message: (e as Error).message,
+              retryable: false,
+            },
           },
         },
       })

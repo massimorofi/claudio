@@ -67,7 +67,7 @@ from claudio_core.settings import AppConfig, MCPServerEntry
 from claudio_core.skill_loader import build_skill_functions, scan_skills
 from claudio_core.tools.registry import TOOL_FUNCTIONS, TOOL_META, needs_approval_for
 
-from ..paths import workspace_state_dir
+from ..paths import resolve_skills_dir, workspace_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -338,22 +338,6 @@ def adk_state_path(request: RunRequest) -> Path:
     return parent / f"adk-{request.session_id}.db"
 
 
-def resolve_skills_dir(config: AppConfig) -> Path:
-    """Resolve ``agent.skills_dir`` to an absolute path.
-
-    A relative ``skills_dir`` is anchored to the backend base directory (the
-    folder that contains ``src/``), derived from this module's own location so
-    it does not depend on the process cwd. An absolute ``skills_dir`` is used
-    as-is. Mirrors ``api.management._resolve_skills_dir`` so the engine and the
-    ``/skills`` endpoint agree on where skills live.
-    """
-    p = Path(config.agent.skills_dir).expanduser()
-    if p.is_absolute():
-        return p
-    backend_base = Path(__file__).resolve().parents[3]
-    return (backend_base / p).resolve()
-
-
 def _sanitize_mcp_prefix(raw: str) -> str:
     """Turn a server id into a safe tool-name prefix.
 
@@ -425,7 +409,7 @@ class AdkEngine:
         # forwards the model's ``reasoning_content`` deltas as thought parts.
         # The stock OpenAILlm drops them, so the model's thinking never reached
         # the event stream and was never persisted to the session transcript.
-        from .reasoning_llm import ReasoningOpenAILlm
+        from .reasoning_llm import ReasoningOpenAILlm, make_openai_client
 
         # max_tokens MUST be passed explicitly. OpenAILlm defaults to 4096, and
         # a reasoning model spends that budget on its reasoning before any
@@ -433,11 +417,18 @@ class AdkEngine:
         # truncated call arrives as plain text (not a parsed tool call), and the
         # agent mistakes it for a final answer and stops. The configured value
         # lives in ModelSpec; forward it to the client.
+        #
+        # The client is built explicitly (rather than letting ADK construct one
+        # from base_url/api_key) so it carries the ``api-key`` header that
+        # header-stripping gateways require and the max_tokens ->
+        # max_completion_tokens retry for reasoning models. When ``client`` is
+        # set, ADK ignores base_url/api_key.
         return ReasoningOpenAILlm(
             model=spec.model,
             base_url=spec.base_url,
             api_key=spec.api_key or "local",
             max_tokens=spec.max_tokens,
+            client=make_openai_client(spec.base_url, spec.api_key),
         )
 
     def _build_agent(self, request: RunRequest, ctx: ToolContext) -> LlmAgent:

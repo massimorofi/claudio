@@ -82,6 +82,21 @@ def workspace_state_dir(workspace_id: str) -> Path:
     return d
 
 
+def resolve_skills_dir(config: AppConfig) -> Path:
+    """Resolve ``agent.skills_dir`` to an absolute path.
+
+    A relative ``skills_dir`` is anchored to the backend base directory (the
+    folder that contains ``src/``) so it does not depend on the process cwd.
+    An absolute ``skills_dir`` is used as-is. Lives here rather than in the
+    engine so non-engine callers (the promotion gate, consolidation) can
+    resolve the skills location without pulling ADK into their import graph.
+    """
+    p = Path(config.agent.skills_dir).expanduser()
+    if p.is_absolute():
+        return p
+    return (backend_base() / p).resolve()
+
+
 def validate_workspace_dir(
     raw: str,
     *,
@@ -158,6 +173,7 @@ def validate_workspace_dir(
 
 __all__ = [
     "backend_base",
+    "resolve_skills_dir",
     "resolve_workspace_dir",
     "validate_workspace_dir",
     "workspace_state_dir",

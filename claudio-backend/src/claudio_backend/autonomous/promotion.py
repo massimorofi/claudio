@@ -26,8 +26,7 @@ from claudio_core.db import Database
 from claudio_core.settings import AppConfig
 from claudio_core.skill_loader import scan_skills
 
-from ..engine.adk_engine import resolve_skills_dir
-from ..paths import backend_base
+from ..paths import backend_base, resolve_skills_dir
 
 logger = logging.getLogger(__name__)
 
