@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, downloadApi, saveBlob } from '../../api/client'
+import { getActiveSession } from '../../api/storage'
 import type {
   WorkspaceTreeResponse,
   WorkspaceDeleteResponse,
@@ -153,9 +154,17 @@ export default function WorkspaceView() {
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const queryClient = useQueryClient()
 
+  // The workspace shown is the one the current chat session is bound to, so the
+  // file browser matches the conversation instead of the global default. With no
+  // active session we fall back to the configured default workspace.
+  const sessionId = getActiveSession()
+
   const treeQ = useQuery({
-    queryKey: ['workspace-tree'],
-    queryFn: () => api.get<WorkspaceTreeResponse>('/workspace/tree'),
+    queryKey: ['workspace-tree', sessionId],
+    queryFn: () =>
+      api.get<WorkspaceTreeResponse>(
+        `/workspace/tree${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`,
+      ),
   })
 
   const tree = treeQ.data?.tree ?? []
@@ -189,7 +198,10 @@ export default function WorkspaceView() {
 
   const deleteMut = useMutation({
     mutationFn: (paths: string[]) =>
-      api.post<WorkspaceDeleteResponse>('/workspace/files/delete', { paths }),
+      api.post<WorkspaceDeleteResponse>('/workspace/files/delete', {
+        paths,
+        session_id: sessionId,
+      }),
     onSuccess: (res) => {
       const failed = res.failed ?? []
       setMessage({
@@ -211,11 +223,14 @@ export default function WorkspaceView() {
       if (node.type === 'dir') {
         const blob = await downloadApi.post('/workspace/files/download', {
           paths: [node.path],
+          session_id: sessionId,
         })
         saveBlob(blob, `${node.name}.zip`)
       } else {
         const blob = await downloadApi.get(
-          `/workspace/files/download?path=${encodeURIComponent(node.path)}`,
+          `/workspace/files/download?path=${encodeURIComponent(node.path)}${
+            sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ''
+          }`,
         )
         saveBlob(blob, node.name)
       }
@@ -229,6 +244,7 @@ export default function WorkspaceView() {
     try {
       const blob = await downloadApi.post('/workspace/files/download', {
         paths: Array.from(selected),
+        session_id: sessionId,
       })
       saveBlob(blob, 'workspace-files.zip')
     } catch (e) {

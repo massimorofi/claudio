@@ -40,8 +40,12 @@ services:
       CLAUDIO__SEARCH__TAVILY_API_KEY: ${CLAUDIO__SEARCH__TAVILY_API_KEY:-}
 
       # The agent's workspace is the bind-mounted host dir, not a config-relative path.
+      # /workspace is the web UI's configured workspace. The host projects dir is
+      # mounted at its SAME host path (see volumes) so a VS Code session can bind to
+      # the folder opened in the editor: the extension sends the host path, and the
+      # agent resolves it identically because the mount preserves the path.
       CLAUDIO__AGENT__DEFAULT_WORKSPACE_DIR: /workspace
-      CLAUDIO__AGENT__WORKSPACE_ALLOWED_ROOTS: '["/workspace"]'
+      CLAUDIO__AGENT__WORKSPACE_ALLOWED_ROOTS: '["/workspace", "${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}"]'
 
       TZ: ${TZ:-UTC}
     volumes:
@@ -54,6 +58,9 @@ services:
       # The repo(s) the agent edits. Bind mount, not a named volume, so the
       # user sees the files on the host.
       - ${CLAUDIO_WORKSPACE_DIR:-./workspace}:/workspace
+      # The host projects root, mounted at its SAME host path so a VS Code
+      # session binding to the open folder resolves inside the container.
+      - ${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}:${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
       interval: 15s

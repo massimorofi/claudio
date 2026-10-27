@@ -28,10 +28,27 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat()
 
 
-def _workspace(request: Request) -> Path:
+async def _workspace(request: Request, session_id: str | None = None) -> Path:
+    """Resolve the workspace directory the file operations act on.
+
+    When ``session_id`` is supplied, the workspace is the one that session was
+    bound to at creation (``sessions.create_session``) — the per-session model:
+    opening a session shows *that* session's files, not the global default.
+    Without a session (or for a legacy session with no stored workspace) we fall
+    back to the configured default workspace.
+    """
     supervisor = request.app.state.supervisor
     if not supervisor.config:
         raise ApiError(503, "not_ready", "Configuration not loaded")
+    if session_id:
+        row = await supervisor.db.get_session(session_id)
+        if not row:
+            raise ApiError(404, "not_found", f"No session {session_id}")
+        raw = row.get("workspace_dir")
+        if raw:
+            ws = Path(raw)
+            ws.mkdir(parents=True, exist_ok=True)
+            return ws
     ws = resolve_workspace_dir(supervisor.config)
     ws.mkdir(parents=True, exist_ok=True)
     return ws
@@ -88,10 +105,14 @@ def _build_tree(directory: Path, ws: Path) -> list[dict]:
 
 
 @router.get("/workspace/files")
-async def list_files(request: Request) -> dict:
-    """Recursively list files in the workspace."""
+async def list_files(request: Request, session_id: str | None = None) -> dict:
+    """Recursively list files in the workspace.
+
+    Pass ``session_id`` to list the files of the workspace that session is
+    bound to; omit it to use the configured default workspace.
+    """
     require_auth(request)
-    ws = _workspace(request)
+    ws = await _workspace(request, session_id)
     files = []
     for p in sorted(ws.rglob("*")):
         if not p.is_file():
@@ -111,10 +132,14 @@ async def list_files(request: Request) -> dict:
 
 
 @router.get("/workspace/tree")
-async def get_tree(request: Request) -> dict:
-    """Return the workspace as a nested tree (files and directories)."""
+async def get_tree(request: Request, session_id: str | None = None) -> dict:
+    """Return the workspace as a nested tree (files and directories).
+
+    Pass ``session_id`` to browse the workspace that session is bound to;
+    omit it to use the configured default workspace.
+    """
     require_auth(request)
-    ws = _workspace(request)
+    ws = await _workspace(request, session_id)
     tree = _build_tree(ws, ws)
     return {"workspace": str(ws), "tree": tree}
 
@@ -126,9 +151,12 @@ async def delete_files(request: Request, payload: dict) -> dict:
     Directories are removed recursively. Paths are processed deepest-first so
     that selecting a folder together with some of its children never leaves a
     child reporting "not found" after its parent has already been removed.
+
+    Pass ``session_id`` in the body to delete within the workspace that
+    session is bound to; omit it to use the configured default workspace.
     """
     require_auth(request)
-    ws = _workspace(request)
+    ws = await _workspace(request, payload.get("session_id"))
     paths = payload.get("paths")
     if not isinstance(paths, list) or not paths:
         raise ApiError(422, "validation_error", "paths (non-empty list) is required")
@@ -156,10 +184,14 @@ async def delete_files(request: Request, payload: dict) -> dict:
 
 
 @router.get("/workspace/files/download")
-async def download_file(request: Request, path: str) -> FileResponse:
-    """Download a single workspace file."""
+async def download_file(request: Request, path: str, session_id: str | None = None) -> FileResponse:
+    """Download a single workspace file.
+
+    Pass ``session_id`` to download from the workspace that session is bound
+    to; omit it to use the configured default workspace.
+    """
     require_auth(request)
-    ws = _workspace(request)
+    ws = await _workspace(request, session_id)
     target = _safe_join(ws, path)
     if not target.exists() or not target.is_file():
         raise ApiError(404, "not_found", f"No such file: {path}")
@@ -172,9 +204,13 @@ async def download_file(request: Request, path: str) -> FileResponse:
 
 @router.post("/workspace/files/download")
 async def download_zip(request: Request, payload: dict) -> StreamingResponse:
-    """Download a batch of workspace files as a single zip archive."""
+    """Download a batch of workspace files as a single zip archive.
+
+    Pass ``session_id`` in the body to download from the workspace that
+    session is bound to; omit it to use the configured default workspace.
+    """
     require_auth(request)
-    ws = _workspace(request)
+    ws = await _workspace(request, payload.get("session_id"))
     paths = payload.get("paths")
     if not isinstance(paths, list) or not paths:
         raise ApiError(422, "validation_error", "paths (non-empty list) is required")

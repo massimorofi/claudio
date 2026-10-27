@@ -68,6 +68,33 @@ async def create_session(request: Request) -> dict:
     return {"session": row}
 
 
+@router.patch("/sessions/{session_id}")
+async def patch_session(request: Request, session_id: str) -> dict:
+    """Update mutable session fields (currently: title).
+
+    The extension creates its session up front (``POST /sessions``), before
+    any user message exists, so the title it can supply is a placeholder.
+    This lets it rename the session once the first message arrives — the
+    same title a session created implicitly by the first chat message gets
+    (see ``chat.chat_stream``).
+    """
+    require_auth(request)
+    supervisor = request.app.state.supervisor
+    row = await supervisor.db.get_session(session_id)
+    if not row:
+        raise ApiError(404, "not_found", f"No session {session_id}")
+    body = await request.json()
+    title = body.get("title")
+    if title is None:
+        raise ApiError(422, "validation_error", "title is required")
+    title = str(title).strip()
+    if not title:
+        raise ApiError(422, "validation_error", "title must not be empty")
+    await supervisor.db.update_session(session_id, title=title)
+    updated = await supervisor.db.get_session(session_id)
+    return {"session": updated}
+
+
 @router.get("/sessions/{session_id}")
 async def get_session(request: Request, session_id: str) -> dict:
     require_auth(request)
