@@ -109,7 +109,7 @@ Two facts drive most of the design:
 | D1 | **Agent binds `0.0.0.0:8100` inside the container.** | `127.0.0.1` inside a container is that container's own loopback; nginx could never reach it. Override with `CLAUDIO__SERVER__HOST=0.0.0.0`. |
 | D2 | **Only nginx publishes a host port (8080).** The agent publishes nothing by default. | The agent holds the LLM key and runs shell tools; it must not be LAN-reachable by default. |
 | D3 | **`config/`, `data/`, `skills/` become named volumes**, seeded on first run from a committed `config/config.example.yaml`. | The backend rewrites `config.yaml` at runtime; DB and transcripts must survive container replacement. |
-| D4 | **Secrets come from a host `.env` file**, injected as `CLAUDIO__*` env vars, never baked into the image. | `.env` is already gitignored; env beats YAML in the loader, so it is the authoritative override. |
+| D4 | **Secrets come from a host `.env` file**, injected as `CLAUDIO__*` env vars, never baked into the image. | `.env` is already gitignored; env bootstraps the config on first run (the loader order is defaults < env < YAML — a value explicitly saved through the config API later wins and persists). |
 | D5 | **The agent's workspace is a bind mount of a host directory**, not an anonymous volume. | The point of Claudio is editing real repos; the user must see the files on the host. |
 | D6 | **nginx serves the production build (`npm run build`), not `vite dev`.** | Vite's dev server is not a production server; `dist/` is static and needs no Node runtime. |
 | D7 | **Compose project name pinned** (`name: claudio`) so container names are stable. | `claudio-agent-1` / `claudio-web-1` regardless of checkout path. |

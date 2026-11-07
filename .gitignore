@@ -82,6 +82,7 @@ claudio-backend/config/config.yaml
 # outright once the migration is finished.
 _upstream/
 
-# --- To-do list -------------------------------------------------------
+# --- working dirs -------------------------------------------------------
 todo/
 temp/
+workspace/

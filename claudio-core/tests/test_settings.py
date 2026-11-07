@@ -47,12 +47,18 @@ def test_env_override(tmp_path: Path, monkeypatch):
     assert cfg.server.port == 7777
 
 
-def test_env_beats_yaml(tmp_path: Path, monkeypatch):
+def test_saved_yaml_beats_env(tmp_path: Path, monkeypatch):
+    """A value saved through the config API must survive a reload even when
+    the deployment pins the same key in CLAUDIO__* env vars."""
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("llm:\n  model: yaml-model\n")
     monkeypatch.setenv("CLAUDIO__LLM__MODEL", "env-model")
     cfg = load_config(cfg_file)
-    assert cfg.llm.model == "env-model"
+    assert cfg.llm.model == "yaml-model"
+    # Env still bootstraps keys the saved file does not carry.
+    monkeypatch.setenv("CLAUDIO__LLM__BASE_URL", "http://env:1234/v1")
+    cfg = load_config(cfg_file)
+    assert cfg.llm.base_url == "http://env:1234/v1"
 
 
 def test_invalid_approval_mode_rejected():

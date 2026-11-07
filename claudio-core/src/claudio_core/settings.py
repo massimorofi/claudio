@@ -1,10 +1,13 @@
-"""Configuration: load/validate/merge (env > yaml > defaults), atomic write, history.
+"""Configuration: load/validate/merge (defaults < env < yaml), atomic write, history.
 
 The live config lives at ``config/config.yaml``. The config API writes it atomically
 and keeps the last 20 versions in SQLite (see :mod:`claudio.db`).
 
-Env overrides use the ``CLAUDIO__SECTION__KEY`` convention, e.g.
-``CLAUDIO__LLM__MODEL=gpt-5``.
+Env vars use the ``CLAUDIO__SECTION__KEY`` convention, e.g.
+``CLAUDIO__LLM__MODEL=gpt-5``. They are a bootstrap layer: they set values the
+config file does not carry yet (a fresh deployment, a key nobody saved). Anything
+explicitly saved through the config API lives in the file and wins, so a save is
+never silently reverted by the deployment environment on the next reload.
 """
 from __future__ import annotations
 
@@ -435,15 +438,21 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def load_config_dict(config_path: Path) -> dict[str, Any]:
-    """Raw config dict: defaults < yaml < env."""
+    """Raw config dict: defaults < env < yaml.
+
+    The saved file is the authority — env only fills what it does not carry.
+    Reordering this (env last) silently reverted every explicit save whose key
+    the deployment also pinned in ``CLAUDIO__*`` env vars, because the config
+    API calls :func:`load_config` again right after writing.
+    """
     base = AppConfig().model_dump()
+    base = _deep_merge(base, _env_overrides())
     if config_path.exists():
         with open(config_path) as f:
             loaded = yaml.safe_load(f) or {}
         if not isinstance(loaded, dict):
             raise ValueError("config.yaml must contain a mapping at the top level")
         base = _deep_merge(base, loaded)
-    base = _deep_merge(base, _env_overrides())
     return base
 
 
