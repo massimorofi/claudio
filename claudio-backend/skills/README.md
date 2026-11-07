@@ -408,6 +408,32 @@ new merged skills from the `temp/` inventory.
 
 ---
 
+## Git & GitHub (`git-github`)
+
+- **Merged skill:** `git-github`
+- **License:** MIT
+- **Added:** 2026-11-07
+- **Scope:** Local git operations, GitHub via the `gh` CLI, GitHub Projects
+  V2 (GraphQL), and authentication — with specific guidance for running
+  inside a Docker container.
+- **Why added:** GitHub authentication is the most common failure point for
+  the agent, and it behaves very differently inside a container (different
+  uid, no root, host home not mounted, host `gh`/keyring invisible). This
+  skill records the diagnosis and the working procedures, including the
+  pitfalls hit while reading the "Claudio Agent" project board.
+
+| Owner | Skill | License | Source |
+|---|---|---|---|
+| trailofbits | gh-cli | unknown | https://skillmd.com/skills/trailofbits/gh-cli |
+| oakoss | github-cli | unknown | https://skillmd.com/skills/oakoss/github-cli |
+| q2805187159 | github-auth | unknown | https://skillmd.com/skills/q2805187159/github-auth |
+| infinition | github-auth | unknown | https://skillmd.com/skills/infinition/github-auth |
+| jasoncarreira | github | unknown | https://skillmd.com/skills/jasoncarreira/github |
+| mayarid | gh | unknown | https://skillmd.com/skills/mayarid/gh |
+| Claudio session 2026-11-07 | container auth field notes | MIT | first-hand (this repo) |
+
+---
+
 ## Attribution
 
 All skills are the work of their respective authors and are used under their

@@ -215,7 +215,76 @@ them to share state — they use separate `data/` trees.
 
 ---
 
-## 7. Remaining work (unchanged from the plan)
+## 7. GitHub authentication inside the container
+
+The agent frequently needs GitHub (reading the project board, issues, PRs).
+This is a recurring failure point because **the container is not the host**.
+The full operational guidance lives in the `git-github` skill
+(`claudio-backend/skills/git-github/SKILL.md`); the deployment-specific
+facts are here.
+
+### 7.1 Why host login does not transfer
+
+Verified on this stack (2026-11-07):
+
+- The agent runs as **uid 1000 `claudio`**, not the host user. `su <hostuser>`
+  fails — that user is not in the container's `/etc/passwd`.
+- **No root, no sudo** inside the container.
+- Only the project dir and the workspace are bind-mounted. The host's
+  `~/.config/gh/hosts.yml`, `~/.git-credentials`, `~/.netrc` and the GNOME
+  keyring are **outside the mount and invisible** to the agent.
+- `/var/run/docker.sock` is not mounted, so the agent cannot `docker exec`
+  into host containers either.
+
+A `gh auth login` performed on the host therefore does **nothing** for the
+agent. The agent needs its own credential.
+
+### 7.2 Recommended: inject a PAT via `.env`
+
+Create a Personal Access Token on GitHub and pass it through the environment.
+For **GitHub Projects V2** (the `.../projects/N` boards) the token **must**
+include the **`project`** scope — without it the board returns **404** even
+when the issues inside it are public.
+
+Add to the `agent` service in `compose.yaml`:
+
+```yaml
+    environment:
+      GH_TOKEN: ${GH_TOKEN:?set GH_TOKEN in .env}
+```
+
+and to `.env`:
+
+```
+GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+Remember the §3.2 rule: single-quote any JSON-valued key. A bare token is
+fine unquoted. `gh` and `git` both pick `GH_TOKEN` up automatically.
+
+### 7.3 Alternative: device-flow login inside the container
+
+`gh` is not in the base image and cannot be `apt-get` installed without
+root. Install it into `~/.local/bin` (no root needed) and run the OAuth
+device flow — the user opens `https://github.com/login/device` on their own
+machine and types a short code. Detach the blocking login with
+`setsid ... > log 2>&1 < /dev/null & disown`, read the one-time code from
+the log, and poll `gh auth status`. The token is written to
+`~/.config/gh/hosts.yml` **inside the container** and is lost when the
+container is recreated — prefer §7.2 for anything durable.
+
+### 7.4 Scope cheat-sheet
+
+| Task | Required scope |
+|---|---|
+| Code, PRs, issues | `repo` |
+| **Projects V2 board** | **`project`** |
+| Org / teams | `read:org` / `admin:org` |
+| Releases | `repo` |
+
+---
+
+## 8. Remaining work (unchanged from the plan)
 
 1. **`CLAUDIO_CONFIG_PATH` env override** — removes the `parents[2]`
    assumption entirely. Still worth doing; the current setup works but depends

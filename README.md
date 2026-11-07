@@ -402,6 +402,7 @@ documents-and-knowledge-artifacts — PDF/DOCX/XLSX/PPTX, LaTeX, explainers, rep
 visual-design-and-artifacts — frontend aesthetic direction, components, dataviz, sketch whiteboards, HTML playgrounds, design-system sync
 
 ### Integration
+git-github — local git (commits, branches, diffs, remotes) and GitHub via the authenticated `gh` CLI: issues, PRs, releases, Projects V2 boards, and authentication (incl. running inside a Docker container — PAT/env-var, device-flow, scopes)
 messaging-channel-integration — Discord, Telegram, iMessage setup, tokens, pairing approval, allowlists
 Plus the SkillMD.com MCP server for searching/downloading/recommending community skills.
 
