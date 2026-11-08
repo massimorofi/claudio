@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .settings import resolve_profile
+
 if TYPE_CHECKING:
     from .db import Database
     from .settings import AppConfig
@@ -79,8 +81,14 @@ def context_usage_payload(
     since the reserve is held back for the model's response. ``auto_disabled``
     reflects the compaction circuit-breaker state so the gauge can show
     "auto off".
+
+    The window is taken from the ``fast`` profile, not ``agent.context_window``:
+    compaction is performed by the fast-profile summariser, so the gauge must
+    report the threshold that actually triggers it. When no fast profile is
+    configured, :func:`resolve_profile` falls back to the ``llm`` section with
+    ``agent.context_window``, so an unprofiled config is unchanged.
     """
-    window = int(config.agent.context_window)
+    window = int(resolve_profile(config, "fast").context_window)
     reserve = int(config.agent.compaction_reserve)
     usable = max(1, window - reserve)
     free = max(0, usable - used_tokens)
