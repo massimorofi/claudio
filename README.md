@@ -7,6 +7,10 @@ compaction, and an autonomous maintenance daemon.
 Claudio is **one long-lived agent** with **two independent client surfaces** (Web UI, VS Code).
 The agent persists; clients come and go. See [doc/architecture.md](./doc/architecture.md).
 
+
+![image](doc/Claudio_Components_Architecture.jpeg)
+
+
 ---
 
 ## Quick Start
