@@ -84,8 +84,13 @@ agent:
   max_auto_continues: 10
   max_budget_usd: 100.0
   approval_mode: on_request
-  host_execution_enabled: false
-  host_execution_socket: null
+  # When true, the agent's run_command executes on the HOST machine (outside
+  # the Docker container) via the host executor daemon, instead of inside the
+  # container. The daemon must be running and listening on the socket below.
+  # This gives the agent real host access (bounded by the executor's allowed
+  # roots); leave false to keep commands sandboxed inside the container.
+  host_execution_enabled: true
+  host_execution_socket: /run/claudio-host/host-exec.sock
   # When true, a fast-model classifier routes clearly simple, tool-free requests
   # to the `fast` role. No effect while `fast` == primary (as in this example).
   auto_routing_enabled: true
