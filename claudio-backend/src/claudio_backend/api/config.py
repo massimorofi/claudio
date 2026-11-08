@@ -146,10 +146,15 @@ async def test_llm(request: Request, payload: dict) -> dict:
     """Live connectivity test with candidate LLM settings (not yet saved)."""
     require_auth(request)
     supervisor = request.app.state.supervisor
+    profile_name = payload.get("profile")
     llm = payload.get("llm", payload)
     # The client only ever sees the redacted key; a '***' means "keep the saved one".
     if llm.get("api_key") == REDACTED and supervisor.config:
-        llm = {**llm, "api_key": supervisor.config.llm.api_key}
+        if profile_name and profile_name in supervisor.config.model_profiles:
+            saved_key = supervisor.config.model_profiles[profile_name].api_key
+        else:
+            saved_key = supervisor.config.llm.api_key
+        llm = {**llm, "api_key": saved_key}
     base_url = llm.get("base_url")
     api_key = llm.get("api_key") or "local"
     model = llm.get("model")
@@ -173,6 +178,9 @@ async def test_llm(request: Request, payload: dict) -> dict:
     except (LlmCallError, Exception) as e:  # noqa: BLE001
         latency_ms = int((time.time() - start) * 1000)
         code = _classify_llm_error(e)
+        supervisor.model_health.mark(
+            str(profile_name or "llm"), healthy=False, error_code=code
+        )
         raise ApiError(
             422 if code == "llm_auth_error" else 503,
             code,
@@ -181,12 +189,22 @@ async def test_llm(request: Request, payload: dict) -> dict:
             details={"latency_ms": latency_ms},
         )
     latency_ms = int((time.time() - start) * 1000)
+    supervisor.model_health.mark(
+        str(profile_name or "llm"), healthy=True, latency_ms=latency_ms
+    )
     return {
         "ok": True,
         "model": model,
         "latency_ms": latency_ms,
         "echo": (content or "").strip()[:120],
     }
+
+
+@router.get("/config/models/health")
+async def model_health(request: Request) -> dict:
+    require_auth(request)
+    supervisor = request.app.state.supervisor
+    return {"profiles": supervisor.model_health.snapshot(supervisor.config)}
 
 
 @router.get("/config/history")

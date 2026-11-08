@@ -273,6 +273,9 @@ def translate_event(event: Any) -> list[dict[str, Any]]:
             name = getattr(fresp, "name", "") or ""
             if name == CONFIRMATION_TOOL:
                 continue
+            response = getattr(fresp, "response", None)
+            usage = response.get("usage") if isinstance(response, dict) else None
+            worker_model = usage.get("model") if isinstance(usage, dict) else None
             out.append(
                 {
                     "event": EventName.TOOL_RESULT.value,
@@ -281,6 +284,7 @@ def translate_event(event: Any) -> list[dict[str, Any]]:
                         "name": name,
                         "output": _stringify(getattr(fresp, "response", None)),
                         "is_error": _is_error_response(fresp),
+                        **({"worker_model": worker_model} if worker_model else {}),
                     },
                 }
             )
@@ -492,15 +496,17 @@ class AdkEngine:
 
     def _build_agent(self, request: RunRequest, ctx: ToolContext) -> LlmAgent:
         tools: list[Any] = []
-        for name in request.tools.enabled:
-            if name not in TOOL_FUNCTIONS:
-                continue
-            needs = needs_approval_for(TOOL_META[name], request.tools.approval_mode)
-            if name == "delegate_task":
-                needs = self._delegation_needs_approval(
-                    request.tools.approval_mode
-                )
-            tools.append(make_adk_tool(name, ctx, require_confirmation=needs))
+        fast_routed = request.metadata.get("model_role") == "fast"
+        if not fast_routed:
+            for name in request.tools.enabled:
+                if name not in TOOL_FUNCTIONS:
+                    continue
+                needs = needs_approval_for(TOOL_META[name], request.tools.approval_mode)
+                if name == "delegate_task":
+                    needs = self._delegation_needs_approval(
+                        request.tools.approval_mode
+                    )
+                tools.append(make_adk_tool(name, ctx, require_confirmation=needs))
 
         # Skills use a two-tier loading strategy so the always-on prompt stays
         # small. Tier 1 is the catalog -- skill names and one-line descriptions --
@@ -511,7 +517,7 @@ class AdkEngine:
         # edited on disk is picked up without a backend restart. If the scan
         # fails we run with no skills rather than failing the whole run.
         skill_entries: list[dict[str, Any]] | None = None
-        if self.config.agent.skills_enabled:
+        if self.config.agent.skills_enabled and not fast_routed:
             try:
                 scan = scan_skills(resolve_skills_dir(self.config))
             except (OSError, ValueError) as exc:
@@ -529,7 +535,8 @@ class AdkEngine:
         # injects into the model's function declarations. They are built once per
         # (config, approval-mode) by ``_ensure_mcp`` (called from stream/resume)
         # and reused here.
-        tools.extend(self._mcp_toolsets)
+        if not fast_routed:
+            tools.extend(self._mcp_toolsets)
 
         # The instruction is supplied as a provider rather than a fixed string so
         # the per-turn nudges (todo nag, write-first nudge) are re-evaluated on
@@ -537,12 +544,17 @@ class AdkEngine:
         # locks them to their initial values, which is why the todo nag never
         # fired and the plan never updated mid-run. The static text is built once
         # and kept first so the prompt prefix stays cacheable.
-        static_instruction = build_static_instructions(
-            self.config,
-            request.session_id,
-            skill_entries=skill_entries,
-            mcp_entries=self._mcp_entries,
-            workspace=request.workspace,
+        worker_instructions = request.metadata.get("worker_instructions")
+        static_instruction = (
+            str(worker_instructions)
+            if worker_instructions
+            else build_static_instructions(
+                self.config,
+                request.session_id,
+                skill_entries=skill_entries,
+                mcp_entries=self._mcp_entries,
+                workspace=request.workspace,
+            )
         )
 
         def _instruction_provider(_callback_context: Any) -> str:
@@ -560,6 +572,8 @@ class AdkEngine:
         )
 
     def _delegation_needs_approval(self, approval_mode: str) -> bool:
+        if self.config.agent.subagent_approval_mode == "passthrough":
+            return False
         if approval_mode == "always":
             return True
         if approval_mode != "on_request":
@@ -659,6 +673,19 @@ class AdkEngine:
         sub = self.config.agent.subagents.get(agent)
         if sub is None:
             return {"ok": False, "error": f"unknown subagent '{agent}'"}
+
+        if self.config.agent.subagent_approval_mode == "passthrough":
+            child_runner = request.metadata.get("subagent_run_factory")
+            if not callable(child_runner):
+                return {
+                    "ok": False,
+                    "error": "approval passthrough requires the run manager",
+                }
+            return await child_runner(
+                agent=agent,
+                task=task,
+                instructions=self._subagent_instruction(sub),
+            )
 
         profile = resolve_profile(self.config, "worker")
         if not profile.model:
@@ -911,10 +938,12 @@ class AdkEngine:
     # -- RunEngine API ---------------------------------------------------
 
     async def stream(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
-        await self._ensure_mcp(request.tools.approval_mode)
+        if request.metadata.get("model_role") != "fast":
+            await self._ensure_mcp(request.tools.approval_mode)
         ctx = self._make_context(request)
         agent = self._build_agent(request, ctx)
-        app_name = f"claudio-{request.session_id}"
+        adk_session_id = request.metadata.get("adk_session_id") or request.session_id
+        app_name = f"claudio-{adk_session_id}"
         app = self._app(app_name, agent)
         session_service = SqliteSessionService(db_path=str(adk_state_path(request)))
         # The ADK session is keyed by the Claudio session_id, not the run_id, so
@@ -923,13 +952,13 @@ class AdkEngine:
         # prior turns. ``get_session`` returns None when absent, so this is a
         # plain get-or-create rather than a create that would clash on turn two.
         existing = await session_service.get_session(
-            app_name=app_name, user_id=request.session_id, session_id=request.session_id
+            app_name=app_name, user_id=adk_session_id, session_id=adk_session_id
         )
         if existing is None:
             await session_service.create_session(
                 app_name=app_name,
-                user_id=request.session_id,
-                session_id=request.session_id,
+                user_id=adk_session_id,
+                session_id=adk_session_id,
             )
         runner = Runner(app=app, session_service=session_service)
         new_message = types.Content(
@@ -942,10 +971,12 @@ class AdkEngine:
         self, request: RunRequest, state: Any
     ) -> AsyncIterator[dict[str, Any]]:
         pause = normalise_state(state)
-        await self._ensure_mcp(request.tools.approval_mode)
+        if request.metadata.get("model_role") != "fast":
+            await self._ensure_mcp(request.tools.approval_mode)
         ctx = self._make_context(request)
         agent = self._build_agent(request, ctx)
-        app_name = f"claudio-{request.session_id}"
+        adk_session_id = request.metadata.get("adk_session_id") or request.session_id
+        app_name = f"claudio-{adk_session_id}"
         app = self._app(app_name, agent)
         session_service = SqliteSessionService(db_path=str(adk_state_path(request)))
         runner = Runner(app=app, session_service=session_service)
@@ -1085,9 +1116,10 @@ class AdkEngine:
         turns = 0
         final_text = ""
 
+        adk_session_id = request.metadata.get("adk_session_id") or request.session_id
         agen = runner.run_async(
-            user_id=request.session_id,
-            session_id=request.session_id,
+            user_id=adk_session_id,
+            session_id=adk_session_id,
             new_message=new_message,
         )
         try:

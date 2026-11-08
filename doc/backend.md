@@ -132,6 +132,10 @@ Ported and running. The `RunManager` owns everything that is not about the
 model: run lifecycle, the SSE fan-out and reconnection machinery, budget
 enforcement, the recovery loop, and finalisation.
 
+For profile resolution, role assignments, automatic routing, delegation, and
+the intended workload for each model, see
+[Model profiles, roles, and routing](./model-routing.md).
+
 - **`RunRecord`** — per-run state: a ring buffer of `(seq, sse)` pairs, the
   subscriber queue set, a cancel event, the task handle, token/cost
   accumulators, `files_written`, `commands_run`, `turns_used`,

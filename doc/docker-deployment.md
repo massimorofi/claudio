@@ -40,6 +40,25 @@ cp .env.example .env      # then edit: token, LLM URL, model, workspace path
 ./docker/smoke_test.sh    # 12 checks
 ```
 
+`claudio-ctl start` also starts a host-side command runner on a protected Unix
+socket in `.runtime/`. The agent container connects to it to execute shell
+commands as the host user, using the session workspace as the working
+directory. `/workspace` is mapped back to `CLAUDIO_WORKSPACE_DIR`, and other
+working directories must be under the configured host projects root. Set
+`CLAUDIO_HOST_EXECUTION_ENABLED=false` in `.env` to keep commands in the
+container instead. Use `claudio-ctl` rather than `docker compose up` when host
+execution is enabled; Compose alone does not start the host-side runner.
+
+The runner uses the existing Claudio approval mode (`off`, `on_request`, or
+`always`). This grants shell commands the full filesystem and process
+permissions of the host user; setting the working directory to the workspace
+does **not** sandbox commands or prevent them from accessing other host files.
+The runner starts with a minimal environment so variables loaded from `.env`
+are not inherited by host commands.
+The runner has no network listener, and the container receives a read-only
+mount of its mode-0600 Unix socket. `CLAUDIO_UID` must match the host user's
+UID so the backend can connect.
+
 Per-service control:
 
 ```bash
@@ -209,9 +228,10 @@ them to share state — they use separate `data/` trees.
   the `claudio-config` volume.
 - `.dockerignore` excludes `config.yaml`, `.env`, `*.db`, `*.log` so runtime
   state and secrets cannot leak into layers.
-- The agent container is **trusted-but-bounded**: it runs shell commands, so
-  the security boundary is which directories it is mounted into, not the
-  container itself. Keep `workspace_allowed_roots` set.
+- With host execution enabled, the runner executes commands as the host user.
+  The selected workspace is only the working directory, not a sandbox or
+  filesystem boundary. Use `CLAUDIO_HOST_EXECUTION_ENABLED=false` to keep shell
+  commands inside the container.
 
 ---
 

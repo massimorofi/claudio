@@ -23,8 +23,8 @@ server:
 
 llm:
   provider: openai
-  model: CHANGE_ME_MODEL_ID
-  api_key: CHANGE_ME_API_KEY
+  model: halogen-qwen3.8-flash-next
+  api_key: local
   base_url: http://192.168.1.172:8731/v1
   temperature: 0.2
   max_tokens: 16384
@@ -34,30 +34,47 @@ llm:
   price_input_per_mtok: 0.0
   price_output_per_mtok: 0.0
 
-# --- Multi-LLM profiles and roles (optional) -------------------------------
+# --- Multi-LLM profiles and roles ----------------------------------------
 # The `llm` section above IS the implicit primary profile. Additional named
 # profiles go here; `roles` assigns each role to a profile. Any role left
 # unset (or pointing at nothing) falls back to the `llm` section, so a config
 # with no model_profiles/roles behaves exactly as a single-model setup.
 #
-# model_profiles:
-#   qwen-fast:
-#     label: "Qwen 3.5 30B (fast)"
-#     provider: openai
-#     model: qwen3-30b
-#     base_url: http://127.0.0.1:1235/v1
-#     api_key: local
-#     temperature: 0.3
-#     max_tokens: 8192
-#     context_window: 131072
-#     price_input_per_mtok: 0.2
-#     price_output_per_mtok: 0.6
-#     timeout_seconds: 120
-#
-# roles:
-#   primary: qwen-fast     # main agent (omit to use the `llm` section)
-#   worker: qwen-fast      # delegated subtasks via delegate_task
-#   fast: qwen-fast        # one-shot jobs (fixer, consolidation, learning)
+# This example mirrors the current deployment: the worker and fast roles both
+# point at the halogen model. Because the fast profile is the same model and
+# endpoint as the primary, automatic routing short-circuits to primary (see
+# doc/model-routing.md). To route simple requests to a genuinely different
+# fast model, give `fast` a distinct profile and keep auto_routing_enabled true.
+model_profiles:
+  worker-halogen:
+    label: "Worker (halogen)"
+    provider: openai
+    model: halogen-qwen3.8-flash-next
+    base_url: http://192.168.1.172:8731/v1
+    api_key: local
+    temperature: 0.2
+    max_tokens: 16384
+    context_window: 262144
+    price_input_per_mtok: 0.0
+    price_output_per_mtok: 0.0
+    timeout_seconds: 300
+  fast-halogen:
+    label: "Fast (halogen)"
+    provider: openai
+    model: halogen-qwen3.8-flash-next
+    base_url: http://192.168.1.172:8731/v1
+    api_key: local
+    temperature: 0.2
+    max_tokens: 16384
+    context_window: 262144
+    price_input_per_mtok: 0.0
+    price_output_per_mtok: 0.0
+    timeout_seconds: 300
+
+roles:
+  # primary omitted -> uses the `llm` section.
+  worker: worker-halogen   # delegated subtasks via delegate_task
+  fast: fast-halogen       # one-shot jobs (compaction, fixer, learning)
 
 agent:
   name: claudio
@@ -67,6 +84,12 @@ agent:
   max_auto_continues: 10
   max_budget_usd: 100.0
   approval_mode: on_request
+  host_execution_enabled: false
+  host_execution_socket: null
+  # When true, a fast-model classifier routes clearly simple, tool-free requests
+  # to the `fast` role. No effect while `fast` == primary (as in this example).
+  auto_routing_enabled: true
+  subagent_approval_mode: one_gate # one_gate | passthrough
   # Inside the container the agent edits the bind-mounted /workspace.
   default_workspace_dir: /workspace
   workspace_allowed_roots:

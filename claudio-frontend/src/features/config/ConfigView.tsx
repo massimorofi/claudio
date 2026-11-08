@@ -2,7 +2,13 @@ import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, RotateCcw, Play, AlertTriangle, History } from 'lucide-react'
 import { api } from '../../api/client'
-import type { AppConfig, ConfigHistoryEntry, LlmTestResult, ModelProfile } from '../../api/types'
+import type {
+  AppConfig,
+  ConfigHistoryEntry,
+  LlmTestResult,
+  ModelProfile,
+  ModelProfileHealth,
+} from '../../api/types'
 import ConnectionSection from './ConnectionSection'
 
 type SetField = <K extends keyof AppConfig>(k: K, v: AppConfig[K]) => void
@@ -41,6 +47,11 @@ export default function ConfigView() {
         ...cfg,
         model_profiles: cfg.model_profiles ?? {},
         roles: cfg.roles ?? { primary: null, worker: null, fast: null },
+        agent: {
+          ...cfg.agent,
+          auto_routing_enabled: cfg.agent.auto_routing_enabled ?? false,
+          subagent_approval_mode: cfg.agent.subagent_approval_mode ?? 'one_gate',
+        },
         mcp: {
           ...cfg.mcp,
           servers: (cfg.mcp.servers ?? []).map((s) => ({
@@ -91,6 +102,7 @@ export default function ConfigView() {
   const testMut = useMutation({
     mutationFn: (llm: AppConfig['llm']) =>
       api.post<LlmTestResult>('/config/llm/test', { llm }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['model-health'] }),
     onError: (e: Error) => setMessage({ kind: 'err', text: e.message }),
   })
 
@@ -351,10 +363,17 @@ function ModelsSection({
   draft: AppConfig
   setDraft: SetField
 }) {
+  const queryClient = useQueryClient()
   const profiles = draft.model_profiles ?? {}
   const roles = draft.roles ?? { primary: null, worker: null, fast: null }
   const [testResults, setTestResults] = useState<Record<string, LlmTestResult>>({})
   const [testing, setTesting] = useState<string | null>(null)
+  const healthQ = useQuery({
+    queryKey: ['model-health'],
+    queryFn: () =>
+      api.get<{ profiles: Record<string, ModelProfileHealth> }>('/config/models/health'),
+  })
+  const primaryHealth = healthQ.data?.profiles.llm
 
   const profileNames = Object.keys(profiles)
 
@@ -405,14 +424,17 @@ function ModelsSection({
     setTesting(name)
     try {
       const res = await api.post<LlmTestResult>('/config/llm/test', {
+        profile: name,
         llm: { base_url: p.base_url, model: p.model, api_key: p.api_key },
       })
       setTestResults((prev) => ({ ...prev, [name]: res }))
+      queryClient.invalidateQueries({ queryKey: ['model-health'] })
     } catch (e) {
       setTestResults((prev) => ({
         ...prev,
         [name]: { ok: false, error: (e as Error).message },
       }))
+      queryClient.invalidateQueries({ queryKey: ['model-health'] })
     } finally {
       setTesting(null)
     }
@@ -439,6 +461,13 @@ function ModelsSection({
 
   return (
     <div className="max-w-3xl">
+      {primaryHealth && (
+        <div className="mb-3 rounded-lg border border-black/10 px-3 py-2 text-sm">
+          Primary model health: <strong>{primaryHealth.status}</strong>
+          {primaryHealth.latency_ms != null ? ` · ${primaryHealth.latency_ms} ms` : ''}
+          {primaryHealth.error_code ? ` · ${primaryHealth.error_code}` : ''}
+        </div>
+      )}
       <div className="mb-4 rounded-lg border border-black/10 bg-black/[0.02] p-3">
         <div className="mb-2 text-sm font-semibold text-black/70">Roles</div>
         <p className="mb-3 text-xs text-black/50">
@@ -614,6 +643,17 @@ function ModelsSection({
                   : `Failed: ${res.error}`}
               </div>
             )}
+            {healthQ.data?.profiles[name] && (
+              <div className="mt-1 text-xs text-black/50">
+                Runtime health: {healthQ.data.profiles[name].status}
+                {healthQ.data.profiles[name].latency_ms != null
+                  ? ` · ${healthQ.data.profiles[name].latency_ms} ms`
+                  : ''}
+                {healthQ.data.profiles[name].error_code
+                  ? ` · ${healthQ.data.profiles[name].error_code}`
+                  : ''}
+              </div>
+            )}
           </div>
         )
       })}
@@ -680,6 +720,37 @@ function AgentSection({
             <option value="off">Off</option>
           </select>
         </Field>
+        <Field
+          label="Delegated worker approvals"
+          hint="Passthrough pauses the worker on each approval-requiring action. One gate asks once before delegation."
+        >
+          <select
+            className={inputCls}
+            value={agent.subagent_approval_mode}
+            onChange={(e) =>
+              upd({
+                subagent_approval_mode:
+                  e.target.value as AppConfig['agent']['subagent_approval_mode'],
+              })
+            }
+          >
+            <option value="one_gate">One gate per delegation</option>
+            <option value="passthrough">Passthrough each worker approval</option>
+          </select>
+        </Field>
+        <label className="flex items-center gap-2 text-sm sm:col-span-2">
+          <input
+            type="checkbox"
+            checked={agent.auto_routing_enabled}
+            onChange={(e) => upd({ auto_routing_enabled: e.target.checked })}
+          />
+          <span>
+            Route simple, no-tool requests with the fast model
+            <span className="ml-1 text-xs text-black/45">
+              (requires a fast role; uncertain requests stay on primary)
+            </span>
+          </span>
+        </label>
         <Field label="Max turns">
           <input
             className={inputCls}

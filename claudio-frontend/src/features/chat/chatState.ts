@@ -14,8 +14,8 @@ import type {
 
 export type Item =
   | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; text: string }
-  | { kind: 'reasoning'; id: string; text: string }
+  | { kind: 'assistant'; id: string; text: string; model?: string; modelRole?: string }
+  | { kind: 'reasoning'; id: string; text: string; model?: string; modelRole?: string }
   | {
       kind: 'tool'
       id: string
@@ -25,6 +25,10 @@ export type Item =
       ok?: boolean
       output?: string
       pending: boolean
+      model?: string
+      modelRole?: string
+      workerModel?: string
+      warning?: string
     }
   | {
       kind: 'approval'
@@ -34,6 +38,8 @@ export type Item =
       args: string
       reason: string
       resolved?: 'approved' | 'denied'
+      model?: string
+      modelRole?: string
     }
   | {
       kind: 'turn_status'
@@ -188,22 +194,42 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
       return { ...state, runId: data?.run_id ?? state.runId, streaming: true, error: null }
     }
     case 'token': {
-      const text = (ev.data as TokenEvent)?.text ?? ''
+      const d = ev.data as TokenEvent
+      const text = d?.text ?? ''
       const last = state.items[state.items.length - 1]
-      if (last && last.kind === 'assistant') {
+      if (last && last.kind === 'assistant' && last.model === d.model && last.modelRole === d.model_role) {
         const updated = { ...last, text: last.text + text }
         return { ...state, items: [...state.items.slice(0, -1), updated] }
       }
-      return { ...state, items: [...state.items, { kind: 'assistant', id: uid('a'), text }] }
+      return {
+        ...state,
+        items: [...state.items, {
+          kind: 'assistant',
+          id: uid('a'),
+          text,
+          model: d.model,
+          modelRole: d.model_role,
+        }],
+      }
     }
     case 'reasoning': {
-      const text = (ev.data as ReasoningEvent)?.text ?? ''
+      const d = ev.data as ReasoningEvent
+      const text = d?.text ?? ''
       const last = state.items[state.items.length - 1]
-      if (last && last.kind === 'reasoning') {
+      if (last && last.kind === 'reasoning' && last.model === d.model && last.modelRole === d.model_role) {
         const updated = { ...last, text: last.text + text }
         return { ...state, items: [...state.items.slice(0, -1), updated] }
       }
-      return { ...state, items: [...state.items, { kind: 'reasoning', id: uid('r'), text }] }
+      return {
+        ...state,
+        items: [...state.items, {
+          kind: 'reasoning',
+          id: uid('r'),
+          text,
+          model: d.model,
+          modelRole: d.model_role,
+        }],
+      }
     }
     case 'tool_call': {
       const d = ev.data as ToolCallEvent
@@ -218,6 +244,8 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
             name: d.name,
             args: d.arguments,
             pending: true,
+            model: d.model,
+            modelRole: d.model_role,
           },
         ],
       }
@@ -232,11 +260,27 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
     }
     case 'tool_result': {
       const d = ev.data as ToolResultEvent
+      let warning: string | undefined
+      try {
+        const output = JSON.parse(d.output) as {
+          usage?: { fallback_reason?: string }
+        }
+        warning = output.usage?.fallback_reason
+      } catch {
+        warning = undefined
+      }
       const next: ChatState = {
         ...state,
         items: state.items.map((it) =>
           it.kind === 'tool' && it.callId === d.call_id
-            ? { ...it, ok: !d.is_error, output: d.output, pending: false }
+            ? {
+                ...it,
+                ok: !d.is_error,
+                output: d.output,
+                pending: false,
+                workerModel: d.worker_model,
+                warning,
+              }
             : it,
         ),
       }
@@ -265,6 +309,8 @@ function applyEvent(state: ChatState, ev: StreamEvent): ChatState {
             toolName: d.tool,
             args: d.arguments,
             reason: d.reason,
+            model: d.model,
+            modelRole: d.model_role,
           },
         ],
       }

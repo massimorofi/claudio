@@ -35,6 +35,7 @@ import json
 import logging
 import random
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -51,6 +52,7 @@ from claudio_core.settings import AppConfig, LLMConfig, resolve_profile
 from claudio_core.tools.registry import select_tool_names
 
 from ..errors import ApiError
+from ..model_health import profile_name_for_role
 from ..paths import resolve_workspace_dir
 
 logger = logging.getLogger(__name__)
@@ -165,11 +167,19 @@ class RunRecord:
     # recovery loop reads it to decide whether a failure is something to
     # replan around (off) or a reason to stop.
     approval_mode: str = "on_request"
+    model_role: str = "primary"
+    last_model: str | None = None
+    parent_run_id: str | None = None
+    worker_instructions: str | None = None
+    worker_max_turns: int | None = None
+    worker_tools: tuple[str, ...] | None = None
+    adk_session_id: str | None = None
     events: deque = field(default_factory=lambda: deque(maxlen=RING_BUFFER_SIZE))
     seq: int = 0
     subscribers: set = field(default_factory=set)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
+    state_changed: asyncio.Event = field(default_factory=asyncio.Event)
     turns_used: int = 0
     cost_usd: float = 0.0
     input_tokens: int = 0
@@ -184,6 +194,7 @@ class RunRecord:
     started_at: float = 0.0
     files_written: list[str] = field(default_factory=list)
     commands_run: int = 0
+    tool_calls_seen: int = 0
     # ToolContext accumulator mirror. The engine owns its own live context, so
     # the RunManager tracks these from the event stream and persists them to the
     # session row on completion; the next run reads them back into its prompt.
@@ -212,6 +223,7 @@ class RunManager:
         self.metrics = metrics
         self.compactor = compactor
         self.engine = engine
+        self.profile_health = getattr(engine, "profile_health", None)
         self._runs: dict[str, RunRecord] = {}
         self._lock = asyncio.Lock()
         # Fire-and-forget post-run capture tasks. Held here so the event loop's
@@ -230,6 +242,12 @@ class RunManager:
         *,
         workspace: Path | None = None,
         workspace_id: str = "",
+        model_role: str = "primary",
+        parent_run_id: str | None = None,
+        worker_instructions: str | None = None,
+        worker_max_turns: int | None = None,
+        worker_tools: tuple[str, ...] | None = None,
+        adk_session_id: str | None = None,
     ) -> RunRecord:
         async with self._lock:
             record = RunRecord(
@@ -239,6 +257,12 @@ class RunManager:
                 else resolve_workspace_dir(self.config),
                 workspace_id=workspace_id,
                 approval_mode=approval_mode or self.config.agent.approval_mode,
+                model_role=model_role,
+                parent_run_id=parent_run_id,
+                worker_instructions=worker_instructions,
+                worker_max_turns=worker_max_turns,
+                worker_tools=worker_tools,
+                adk_session_id=adk_session_id,
             )
             record.started_at = time.time()
             self._runs[run_id] = record
@@ -275,6 +299,7 @@ class RunManager:
                 self._runs[run_id] = record
             record.state = "running"
             record.resume_state_json = state_json
+            record.state_changed.set()
         record.task = asyncio.create_task(
             self._drive_resumed_run(
                 record, state_json, approval_id, decision, rejection_message
@@ -288,6 +313,12 @@ class RunManager:
             if record is None:
                 return False
             record.cancel_event.set()
+            child_run_ids = [
+                child.run_id
+                for child in self._runs.values()
+                if child.parent_run_id == run_id
+                and child.state in ("running", "awaiting_approval")
+            ]
         # Ask the engine to stop too; it checks the run id between events.
         try:
             await self.engine.cancel(run_id)
@@ -295,6 +326,8 @@ class RunManager:
             logger.warning("engine.cancel(%s) failed: %s", run_id, exc)
         if record.task and not record.task.done():
             record.task.cancel()
+        for child_run_id in child_run_ids:
+            await self.cancel_run(child_run_id)
         return True
 
     def get_record(self, run_id: str) -> RunRecord | None:
@@ -304,7 +337,11 @@ class RunManager:
         """The most recent still-active run for a session, if any."""
         record: RunRecord | None = None
         for r in self._runs.values():
-            if r.session_id == session_id and r.state in ("running", "awaiting_approval"):
+            if (
+                r.session_id == session_id
+                and r.parent_run_id is None
+                and r.state in ("running", "awaiting_approval")
+            ):
                 record = r
         return record
 
@@ -574,6 +611,28 @@ class RunManager:
             except asyncio.QueueFull:
                 pass
 
+    def _attribute_event(
+        self, record: RunRecord, request: RunRequest, event: dict[str, Any]
+    ) -> dict[str, Any]:
+        record.last_model = request.model.model
+        attributed = dict(event)
+        data = dict(attributed.get("data") or {})
+        data.setdefault("model", request.model.model)
+        data.setdefault("model_role", record.model_role)
+        attributed["data"] = data
+        return attributed
+
+    def _mark_profile_outcome(
+        self, record: RunRecord, *, error_code: str | None = None
+    ) -> None:
+        if not self.profile_health:
+            return
+        profile = profile_name_for_role(self.config, record.model_role)
+        if error_code in ("llm_unavailable", "llm_auth_error"):
+            self.profile_health.mark(profile, healthy=False, error_code=error_code)
+        elif error_code is None:
+            self.profile_health.mark(profile, healthy=True)
+
     # ---- request construction ------------------------------------------
 
     def _free_tokens(self, used: int) -> int:
@@ -581,8 +640,10 @@ class RunManager:
             return 0
         return max(0, int(self.compactor.context_window) - int(self.compactor.reserve) - used)
 
-    def _model_spec(self, model_override: str | None = None) -> ModelSpec:
-        profile = resolve_profile(self.config, "primary")
+    def _model_spec(
+        self, model_override: str | None = None, *, role: str = "primary"
+    ) -> ModelSpec:
+        profile = resolve_profile(self.config, role)
         # ``max_tokens: 0`` in the config means "use the default", not "send
         # zero". A literal 0 reaches the model as max_completion_tokens=0 and
         # every request fails with "integer below minimum value". The ModelSpec
@@ -603,6 +664,161 @@ class RunManager:
             price_input_per_mtok=profile.price_input_per_mtok,
             price_output_per_mtok=profile.price_output_per_mtok,
         )
+
+    def _model_spec_for_role(
+        self, role: str, model_override: str | None = None
+    ) -> ModelSpec:
+        return self._model_spec(model_override, role=role)
+
+    async def _auto_route_role(self, message: str) -> str:
+        """Use the fast profile to route only clearly simple requests."""
+        if not self.config.agent.auto_routing_enabled:
+            return "primary"
+        fast = resolve_profile(self.config, "fast")
+        primary = resolve_profile(self.config, "primary")
+        if (fast.model, fast.base_url) == (primary.model, primary.base_url):
+            return "primary"
+        profile_name = profile_name_for_role(self.config, "fast")
+        if self.profile_health and self.profile_health.is_unavailable(profile_name):
+            logger.warning(
+                "auto-routing skipped: fast profile %s is unavailable",
+                profile_name,
+            )
+            return "primary"
+        text = message if len(message) <= 8000 else message[:4000] + "\n[...]\n" + message[-4000:]
+        try:
+            result = await openai_chat_completion(
+                base_url=fast.base_url,
+                model=fast.model,
+                api_key=fast.api_key or "local",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Classify the request as FAST or PRIMARY. Reply with "
+                            "one word only. FAST is only for a simple, low-risk "
+                            "answer or one-step transformation that needs no tools. "
+                            "Choose PRIMARY for coding, commands, tool use, "
+                            "multi-step work, ambiguity, or anything needing "
+                            "planning or judgment."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.0,
+                max_tokens=512,
+                timeout=min(float(fast.timeout_seconds), 15.0),
+            )
+        except Exception as exc:
+            if self.profile_health:
+                self.profile_health.mark(
+                    profile_name, healthy=False, error_code="llm_unavailable"
+                )
+            logger.warning(
+                "auto-routing failed for fast profile %s (%s); using primary",
+                profile_name,
+                type(exc).__name__,
+            )
+            return "primary"
+        if self.profile_health:
+            self.profile_health.mark(profile_name, healthy=True)
+        decision = result.strip().upper().split()
+        return "fast" if decision and decision[0] == "FAST" else "primary"
+
+    async def _run_child_subagent(
+        self, parent: RunRecord, *, agent: str, task: str, instructions: str
+    ) -> dict[str, Any]:
+        """Drive a worker as a normal run so its approvals can reach the user."""
+        sub = self.config.agent.subagents.get(agent)
+        if sub is None:
+            return {"ok": False, "error": f"unknown subagent '{agent}'"}
+        worker_profile = profile_name_for_role(self.config, "worker")
+        fallback_reason: str | None = None
+        role = (
+            "primary"
+            if self.profile_health
+            and self.profile_health.is_unavailable(worker_profile)
+            else "worker"
+        )
+        if role == "primary":
+            fallback_reason = (
+                f"Worker profile '{worker_profile}' is unavailable; using the primary model."
+            )
+            logger.warning(fallback_reason)
+
+        async def launch(worker_role: str) -> RunRecord:
+            child_id = str(uuid.uuid4())
+            return await self.start_run(
+                run_id=child_id,
+                session_id=parent.session_id,
+                message=task,
+                approval_mode=parent.approval_mode,
+                workspace=parent.workspace,
+                workspace_id=parent.workspace_id,
+                model_role=worker_role,
+                parent_run_id=parent.run_id,
+                worker_instructions=instructions,
+                worker_max_turns=sub.max_turns,
+                worker_tools=tuple(sub.tools),
+                adk_session_id=f"worker-{child_id}",
+            )
+
+        child = await launch(role)
+        while True:
+            if child.state == "completed":
+                return {
+                    "ok": True,
+                    "output": child.final_output,
+                    "usage": {
+                        "input_tokens": child.input_tokens,
+                        "output_tokens": child.output_tokens,
+                        "cost_usd": child.cost_usd,
+                        "turns": child.turns_used,
+                        "model": self._model_spec_for_role(role).model,
+                        **(
+                            {"fallback_reason": fallback_reason}
+                            if fallback_reason
+                            else {}
+                        ),
+                    },
+                }
+            if child.state in ("failed", "cancelled"):
+                if (
+                    role == "worker"
+                    and child.state == "failed"
+                    and child.error_code in ("llm_unavailable", "llm_auth_error")
+                    and child.tool_calls_seen == 0
+                ):
+                    logger.warning(
+                        "worker profile %s failed before tool execution; "
+                        "retrying delegated task on primary",
+                        worker_profile,
+                    )
+                    role = "primary"
+                    fallback_reason = (
+                        f"Worker profile '{worker_profile}' failed before execution; "
+                        "the task was retried on the primary model."
+                    )
+                    child = await launch(role)
+                    continue
+                return {
+                    "ok": False,
+                    "error": child.error_message or "delegated worker run failed",
+                    "usage": {
+                        "input_tokens": child.input_tokens,
+                        "output_tokens": child.output_tokens,
+                        "cost_usd": child.cost_usd,
+                        "turns": child.turns_used,
+                        "model": self._model_spec_for_role(role).model,
+                        **(
+                            {"fallback_reason": fallback_reason}
+                            if fallback_reason
+                            else {}
+                        ),
+                    },
+                }
+            child.state_changed.clear()
+            await child.state_changed.wait()
 
     def _tool_policy(self, approval_mode: str | None) -> ToolPolicy:
         enabled = list(self.config.agent.tools.enabled)
@@ -639,6 +855,21 @@ class RunManager:
             deliverable_written=record.deliverable_written,
             workspace=workspace,
         )
+        if record.worker_tools is not None:
+            tool_policy = ToolPolicy(
+                enabled=record.worker_tools,
+                disabled=(),
+                approval_mode=approval_mode or record.approval_mode,
+            )
+        elif record.model_role == "fast":
+            tool_policy = ToolPolicy(
+                enabled=(),
+                disabled=(),
+                approval_mode=approval_mode or record.approval_mode,
+                strict_mode=bool(self.config.agent.strict_tools),
+            )
+        else:
+            tool_policy = self._tool_policy(approval_mode)
         return RunRequest(
             run_id=record.run_id,
             session_id=record.session_id,
@@ -646,9 +877,20 @@ class RunManager:
             workspace_id=record.workspace_id,
             instructions=instructions,
             user_input=user_input,
-            model=self._model_spec(model_override),
-            tools=self._tool_policy(approval_mode),
-            max_turns=int(self.config.agent.max_turns),
+            model=self._model_spec_for_role(record.model_role, model_override),
+            tools=tool_policy,
+            max_turns=record.worker_max_turns or int(self.config.agent.max_turns),
+            metadata={
+                "model_role": record.model_role,
+                "profile_name": profile_name_for_role(
+                    self.config, record.model_role
+                ),
+                "worker_instructions": record.worker_instructions,
+                "adk_session_id": record.adk_session_id,
+                "subagent_run_factory": (
+                    lambda **kw: self._run_child_subagent(record, **kw)
+                ),
+            },
         )
 
     # ---- drive loops ----------------------------------------------------
@@ -662,6 +904,9 @@ class RunManager:
             base_cost = float((row or {}).get("total_cost_usd") or 0.0)
             if budget > 0 and base_cost >= budget:
                 raise BudgetExceededError(base_cost, budget)
+            if record.parent_run_id is None:
+                record.model_role = await self._auto_route_role(message)
+            request = self._build_request(record, message, approval_mode)
             self.metrics.inc_run_started()
             self._publish(
                 record,
@@ -670,10 +915,11 @@ class RunManager:
                     "data": {
                         "run_id": record.run_id,
                         "session_id": record.session_id,
+                        "model": request.model.model,
+                        "model_role": record.model_role,
                     },
                 },
             )
-            request = self._build_request(record, message, approval_mode)
             await self._run_with_recovery(record, request, base_cost)
         except asyncio.CancelledError:
             await self._finalize_cancelled(record)
@@ -694,6 +940,7 @@ class RunManager:
             base_cost = float((row or {}).get("total_cost_usd") or 0.0)
             if budget > 0 and base_cost >= budget:
                 raise BudgetExceededError(base_cost, budget)
+            request = self._build_request(record, "", None)
             self.metrics.inc_run_started()
             self._publish(
                 record,
@@ -702,10 +949,11 @@ class RunManager:
                     "data": {
                         "run_id": record.run_id,
                         "session_id": record.session_id,
+                        "model": request.model.model,
+                        "model_role": record.model_role,
                     },
                 },
             )
-            request = self._build_request(record, "", None)
             await self._run_resumed_with_recovery(
                 record, request, state_json, decision, rejection_message, base_cost
             )
@@ -1166,11 +1414,19 @@ class RunManager:
             name = evt.get("event")
             data = evt.get("data") or {}
             if name == EventName.RUN_COMPLETED.value:
+                self._mark_profile_outcome(record)
                 return ("completed", data)
             if name == EventName.RUN_FAILED.value:
+                error = data.get("error") or {}
+                self._mark_profile_outcome(
+                    record, error_code=error.get("code")
+                )
                 return ("failed", data)
             if name == EventName.APPROVAL_REQUIRED.value:
-                return ("approval", data)
+                evt = self._attribute_event(record, request, evt)
+                return ("approval", evt.get("data") or {})
+            evt = self._attribute_event(record, request, evt)
+            data = evt.get("data") or {}
             self._track(record, name, data)
             self._publish(record, evt)
         return (
@@ -1192,11 +1448,19 @@ class RunManager:
             name = evt.get("event")
             data = evt.get("data") or {}
             if name == EventName.RUN_COMPLETED.value:
+                self._mark_profile_outcome(record)
                 return ("completed", data)
             if name == EventName.RUN_FAILED.value:
+                error = data.get("error") or {}
+                self._mark_profile_outcome(
+                    record, error_code=error.get("code")
+                )
                 return ("failed", data)
             if name == EventName.APPROVAL_REQUIRED.value:
-                return ("approval", data)
+                evt = self._attribute_event(record, request, evt)
+                return ("approval", evt.get("data") or {})
+            evt = self._attribute_event(record, request, evt)
+            data = evt.get("data") or {}
             self._track(record, name, data)
             self._publish(record, evt)
         return (
@@ -1213,6 +1477,7 @@ class RunManager:
     def _track(self, record: RunRecord, name: str, data: dict[str, Any]) -> None:
         """Fold one forwarded event into the record's accumulators."""
         if name == EventName.TOOL_CALL.value:
+            record.tool_calls_seen += 1
             _track_produced(record, data)
             # Persist the call itself, not just its result. The client rebuilds
             # tool cards and the workflow panel from tool_call entries (a later
@@ -1296,6 +1561,7 @@ class RunManager:
         raw_args = data.get("arguments") or "{}"
         reason = data.get("reason") or f"Approval required to run {tool}"
         record.state = "awaiting_approval"
+        record.state_changed.set()
         record.resume_state_json = json.dumps(
             {
                 "kind": "adk_confirmation",
@@ -1320,18 +1586,23 @@ class RunManager:
         )
         # The engine already emitted approval_required as the terminal event of
         # this stream; forward it so the client sees it.
-        self._publish(
-            record,
-            {
-                "event": EventName.APPROVAL_REQUIRED.value,
-                "data": {
-                    "approval_id": approval_id,
-                    "tool": tool,
-                    "arguments": raw_args if isinstance(raw_args, str) else json.dumps(raw_args),
-                    "reason": reason,
-                },
+        approval_event = {
+            "event": EventName.APPROVAL_REQUIRED.value,
+            "data": {
+                "approval_id": approval_id,
+                "run_id": record.run_id,
+                "tool": tool,
+                "arguments": raw_args if isinstance(raw_args, str) else json.dumps(raw_args),
+                "reason": reason,
+                "model": record.last_model or self._model_spec_for_role(record.model_role).model,
+                "model_role": record.model_role,
             },
-        )
+        }
+        self._publish(record, approval_event)
+        if record.parent_run_id:
+            parent = self._runs.get(record.parent_run_id)
+            if parent:
+                self._publish(parent, approval_event)
 
     # ---- wrap-up --------------------------------------------------------
 
@@ -1412,8 +1683,10 @@ class RunManager:
             record.cost_usd,
         ) = _combined_usage(usage, record, self.config, record.final_output)
         record.state = "completed"
+        record.state_changed.set()
         self.metrics.inc_run_completed()
-        self.metrics.add_usage(record.input_tokens, record.output_tokens, record.cost_usd)
+        if record.parent_run_id is None:
+            self.metrics.add_usage(record.input_tokens, record.output_tokens, record.cost_usd)
         await self.db.update_run(
             record.run_id,
             state="completed",
@@ -1441,31 +1714,35 @@ class RunManager:
             deliverable_ok, deliverable_bytes, deliverable_details = True, 0, []
         todos_done = (len(outstanding) == 0) if todos else deliverable_written
         task_complete = todos_done and deliverable_ok
-        self.session_store.append(
-            record.session_id,
-            {
-                "type": "assistant",
-                "content": record.final_output,
-                "run_id": record.run_id,
-            },
-        )
-        self._append_turn_status(
-            record,
-            "completed",
-            files_written=list(record.files_written),
-            commands_run=record.commands_run,
-            duration_seconds=round(duration, 1),
-            cost_usd=record.cost_usd,
-            input_tokens=record.input_tokens,
-            output_tokens=record.output_tokens,
-            outstanding_todos=outstanding,
-            deliverable_written=deliverable_written,
-            deliverable_ok=deliverable_ok,
-            deliverable_bytes=deliverable_bytes,
-            deliverable=deliverable_details,
-            task_complete=task_complete,
-        )
-        await self._update_session_totals(record)
+        if record.parent_run_id is None:
+            self.session_store.append(
+                record.session_id,
+                {
+                    "type": "assistant",
+                    "content": record.final_output,
+                    "run_id": record.run_id,
+                    "model": record.last_model or self._model_spec_for_role(record.model_role).model,
+                    "model_role": record.model_role,
+                },
+            )
+        if record.parent_run_id is None:
+            self._append_turn_status(
+                record,
+                "completed",
+                files_written=list(record.files_written),
+                commands_run=record.commands_run,
+                duration_seconds=round(duration, 1),
+                cost_usd=record.cost_usd,
+                input_tokens=record.input_tokens,
+                output_tokens=record.output_tokens,
+                outstanding_todos=outstanding,
+                deliverable_written=deliverable_written,
+                deliverable_ok=deliverable_ok,
+                deliverable_bytes=deliverable_bytes,
+                deliverable=deliverable_details,
+                task_complete=task_complete,
+            )
+            await self._update_session_totals(record)
         self._publish(
             record,
             {
@@ -1494,7 +1771,8 @@ class RunManager:
                 },
             },
         )
-        await self._schedule_capture(record)
+        if record.parent_run_id is None:
+            await self._schedule_capture(record)
         self._close_subscribers(record)
 
     async def _schedule_capture(self, record: RunRecord) -> None:
@@ -1559,6 +1837,7 @@ class RunManager:
             code, _retryable = _classify_error(code)
             message = _sanitize_error_message(code)
         record.state = "failed"
+        record.state_changed.set()
         record.error_code = code
         record.error_message = message or ""
         self.metrics.inc_run_failed()
@@ -1570,13 +1849,14 @@ class RunManager:
             error_message=record.error_message,
             turns_used=record.turns_used,
         )
-        self._append_turn_status(
-            record,
-            "failed",
-            error_code=code,
-            error_message=record.error_message,
-            duration_seconds=round(duration, 1),
-        )
+        if record.parent_run_id is None:
+            self._append_turn_status(
+                record,
+                "failed",
+                error_code=code,
+                error_message=record.error_message,
+                duration_seconds=round(duration, 1),
+            )
         self._publish(
             record,
             {
@@ -1598,6 +1878,7 @@ class RunManager:
             return
         duration = max(0.0, time.time() - (record.started_at or time.time()))
         record.state = "cancelled"
+        record.state_changed.set()
         await self.db.update_run(
             record.run_id,
             state="cancelled",
@@ -1605,11 +1886,12 @@ class RunManager:
             error_code="cancelled",
             error_message="Run cancelled",
         )
-        self._append_turn_status(
-            record,
-            "interrupted",
-            duration_seconds=round(duration, 1),
-        )
+        if record.parent_run_id is None:
+            self._append_turn_status(
+                record,
+                "interrupted",
+                duration_seconds=round(duration, 1),
+            )
         self._publish(
             record,
             {

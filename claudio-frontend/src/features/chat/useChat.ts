@@ -117,6 +117,8 @@ export function useChat(
           name: (r.name as string) ?? 'tool',
           args: (r.arguments as string) ?? '',
           pending: true,
+          model: r.model as string | undefined,
+          modelRole: r.model_role as string | undefined,
         })
         return
       }
@@ -131,6 +133,7 @@ export function useChat(
               ok: !(r.is_error as boolean),
               output: (r.output as string) ?? '',
               pending: false,
+              workerModel: r.worker_model as string | undefined,
             }
           }
         }
@@ -144,10 +147,12 @@ export function useChat(
         const text = (r.content as string) ?? ''
         if (!text) return
         const last = items[items.length - 1]
-        if (last && last.kind === 'reasoning') {
+        const model = r.model as string | undefined
+        const modelRole = r.model_role as string | undefined
+        if (last && last.kind === 'reasoning' && last.model === model && last.modelRole === modelRole) {
           items[items.length - 1] = { ...last, text: last.text + text }
         } else {
-          items.push({ kind: 'reasoning', id: `r-${i}`, text })
+          items.push({ kind: 'reasoning', id: `r-${i}`, text, model, modelRole })
         }
         return
       }
@@ -156,6 +161,12 @@ export function useChat(
         kind: isUser ? ('user' as const) : ('assistant' as const),
         id: `h-${i}`,
         text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        ...(!isUser
+          ? {
+              model: r.model as string | undefined,
+              modelRole: r.model_role as string | undefined,
+            }
+          : {}),
       })
     })
     // Seed the plan from the session row's stored todos (Phase 2).

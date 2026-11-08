@@ -34,6 +34,26 @@ AGENT_PORT="${CLAUDIO__SERVER__PORT:-8100}"
 WEB_PORT="${CLAUDIO_HTTP_PORT:-8080}"
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
 TOKEN="${CLAUDIO__SERVER__AUTH_TOKEN:-dev-token-change-me}"
+HOST_EXEC_ENABLED="${CLAUDIO_HOST_EXECUTION_ENABLED:-true}"
+HOST_EXEC_DIR="${CLAUDIO_HOST_EXEC_DIR:-$REPO_DIR/.runtime}"
+HOST_WORKSPACE_DIR="${CLAUDIO_WORKSPACE_DIR:-./workspace}"
+HOST_PROJECTS_DIR="${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}"
+
+case "$HOST_EXEC_DIR" in
+  /*) ;;
+  *) HOST_EXEC_DIR="$REPO_DIR/$HOST_EXEC_DIR" ;;
+esac
+case "$HOST_WORKSPACE_DIR" in
+  /*) ;;
+  *) HOST_WORKSPACE_DIR="$REPO_DIR/$HOST_WORKSPACE_DIR" ;;
+esac
+case "$HOST_PROJECTS_DIR" in
+  /*) ;;
+  *) HOST_PROJECTS_DIR="$REPO_DIR/$HOST_PROJECTS_DIR" ;;
+esac
+HOST_EXEC_DIR="$(realpath -m "$HOST_EXEC_DIR")"
+HOST_WORKSPACE_DIR="$(realpath -m "$HOST_WORKSPACE_DIR")"
+HOST_PROJECTS_DIR="$(realpath -m "$HOST_PROJECTS_DIR")"
 
 if [ -t 1 ]; then
   c_ok=$'\033[32m'; c_bad=$'\033[31m'; c_warn=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
@@ -81,6 +101,107 @@ resolve_services() {
 
 require_docker() {
   docker info >/dev/null 2>&1 || die "docker daemon is not running / not accessible"
+}
+
+host_exec_enabled() {
+  case "$HOST_EXEC_ENABLED" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+start_host_executor() {
+  host_exec_enabled || return 0
+
+  local socket="$HOST_EXEC_DIR/host-exec.sock"
+  local pid_file="$HOST_EXEC_DIR/host-exec.pid"
+  local log_file="$HOST_EXEC_DIR/host-exec.log"
+  local pid="" projects_args=() waited
+
+  if [ "$(id -u)" = "0" ]; then
+    die "Refusing to run the host command runner as root."
+  fi
+  if [ "${CLAUDIO_UID:-1000}" != "$(id -u)" ]; then
+    die "Host runner socket requires matching UIDs. Set CLAUDIO_UID=$(id -u) in .env."
+  fi
+  mkdir -p "$HOST_WORKSPACE_DIR" "$HOST_EXEC_DIR"
+  chmod 700 "$HOST_EXEC_DIR"
+
+  if [ -f "$pid_file" ]; then
+    pid=$(cat "$pid_file")
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      if [ -S "$socket" ] \
+        && curl -fsS --unix-socket "$socket" http://localhost/healthz \
+          | grep -q '"ok": true'; then
+        return 0
+      fi
+      die "Host command runner process is alive but its socket is unavailable."
+    fi
+    rm -f "$pid_file"
+    [ -S "$socket" ] && rm -f "$socket"
+  fi
+
+  if [ -d "$HOST_PROJECTS_DIR" ]; then
+    projects_args+=(--allowed-root "$HOST_PROJECTS_DIR")
+  fi
+
+  nohup env -i \
+    "PATH=$PATH" \
+    "HOME=${HOME:-/}" \
+    "USER=$(id -un)" \
+    "LOGNAME=$(id -un)" \
+    "SHELL=${SHELL:-/bin/bash}" \
+    "LANG=${LANG:-C.UTF-8}" \
+    "TERM=${TERM:-}" \
+    python3 "$REPO_DIR/claudio-backend/src/claudio_backend/host_executor.py" \
+    --socket "$socket" \
+    --workspace-root "$HOST_WORKSPACE_DIR" \
+    "${projects_args[@]}" \
+    >>"$log_file" 2>&1 </dev/null &
+  pid=$!
+  printf '%s\n' "$pid" > "$pid_file"
+
+  for waited in $(seq 1 40); do
+    if [ -S "$socket" ] && kill -0 "$pid" 2>/dev/null \
+      && curl -fsS --unix-socket "$socket" http://localhost/healthz \
+        | grep -q '"ok": true'; then
+      printf '  host-exec %s\n' "${c_ok}running${c_off}"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      printf 'Host command runner failed to start. Log:\n' >&2
+      tail -n 30 "$log_file" >&2 || true
+      rm -f "$pid_file"
+      exit 1
+    fi
+    sleep 0.1
+  done
+  printf 'Host command runner did not create its socket. Log:\n' >&2
+  tail -n 30 "$log_file" >&2 || true
+  exit 1
+}
+
+stop_host_executor() {
+  local pid_file="$HOST_EXEC_DIR/host-exec.pid"
+  local socket="$HOST_EXEC_DIR/host-exec.sock"
+  local pid waited
+  [ -f "$pid_file" ] || return 0
+  pid=$(cat "$pid_file")
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    for waited in $(seq 1 40); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'Host command runner did not stop (pid %s).\n' "$pid" >&2
+      return 1
+    fi
+  fi
+  rm -f "$pid_file"
+  [ -S "$socket" ] && rm -f "$socket"
 }
 
 # --- status ------------------------------------------------------------------
@@ -182,9 +303,15 @@ cmd_start() {
   require_docker
   local services
   services="$(resolve_services "$@")"
+  if printf '%s\n' "$services" | grep -Fxq agent; then
+    start_host_executor
+  fi
   printf 'Starting: %s\n' "$(echo "$services" | tr '\n' ' ')"
   # compose honours depends_on: service_healthy, so "start web" waits on the agent.
-  $COMPOSE up -d $services || die "compose up failed"
+  $COMPOSE up -d $services || {
+    stop_host_executor
+    die "compose up failed"
+  }
   wait_healthy 90
 }
 
@@ -202,6 +329,9 @@ cmd_stop() {
   [ "${#ordered[@]}" -eq 0 ] && die "nothing to stop"
   printf 'Stopping: %s\n' "${ordered[*]}"
   $COMPOSE stop "${ordered[@]}" || die "compose stop failed"
+  if printf '%s\n' "$services" | grep -Fxq agent; then
+    stop_host_executor || return 1
+  fi
   printf 'Stopped.\n'
 }
 
@@ -237,7 +367,8 @@ cmd_build() {
 
 cmd_down() {
   require_docker
-  $COMPOSE down "$@"
+  $COMPOSE down "$@" || die "compose down failed"
+  stop_host_executor
 }
 
 # --- dispatch ----------------------------------------------------------------

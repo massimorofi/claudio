@@ -190,6 +190,8 @@ class AgentConfig(BaseModel):
     max_auto_continues: int = 10
     max_budget_usd: float = 5.0
     approval_mode: str = "on_request"  # off | on_request | always
+    host_execution_enabled: bool = False
+    host_execution_socket: str | None = None
     # The default workspace for NEW sessions. The workspace is a property of a
     # session, fixed at creation; this is only the fallback used when a session
     # is created without an explicit workspace. (Formerly the single global
@@ -215,6 +217,8 @@ class AgentConfig(BaseModel):
     strict_tools: bool = False
     skills_enabled: bool = True
     skills_dir: str = "./skills"
+    auto_routing_enabled: bool = False
+    subagent_approval_mode: str = "one_gate"
     tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)
     subagents: dict[str, SubagentConfig] = Field(default_factory=dict)
 
@@ -223,6 +227,15 @@ class AgentConfig(BaseModel):
     def _check_approval_mode(cls, v: str) -> str:
         if v not in ("off", "on_request", "always"):
             raise ValueError("approval_mode must be one of: off, on_request, always")
+        return v
+
+    @field_validator("subagent_approval_mode")
+    @classmethod
+    def _check_subagent_approval_mode(cls, v: str) -> str:
+        if v not in ("one_gate", "passthrough"):
+            raise ValueError(
+                "subagent_approval_mode must be one of: one_gate, passthrough"
+            )
         return v
 
     @model_validator(mode="before")

@@ -102,12 +102,30 @@ function StepRow({
         {statusIcon}
         <span className="font-mono text-brand">{tool.name}</span>
         {detail && <span className="truncate text-black/40">({detail})</span>}
+        {(tool.workerModel || tool.model) && (
+          <span
+            className="ml-auto max-w-36 truncate rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-black/45"
+            title={tool.workerModel || tool.model}
+          >
+            {tool.workerModel
+              ? `worker · ${tool.workerModel}`
+              : `${tool.modelRole ? `${tool.modelRole} · ` : ''}${tool.model}`}
+          </span>
+        )}
+        {tool.warning && (
+          <span className="max-w-40 truncate text-[10px] text-amber-700" title={tool.warning}>
+            fallback
+          </span>
+        )}
         <span className="ml-auto shrink-0 text-black/25">
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
       </button>
       {expanded && (
         <div className="mt-1 space-y-2 rounded bg-black/[0.03] px-2 py-2">
+          {tool.warning && (
+            <div className="text-amber-700">{tool.warning}</div>
+          )}
           <div>
             <div className="text-black/40 mb-0.5">Arguments</div>
             <pre className="scroll-thin overflow-x-auto rounded bg-black/[0.04] p-2 font-mono text-[11px] whitespace-pre-wrap break-all">
@@ -169,6 +187,11 @@ function ApprovalStep({
         <span className="w-5 shrink-0 text-black/40 tabular-nums">{index}.</span>
         {statusIcon}
         <span className="font-mono text-brand">{step.toolName}</span>
+        {step.model && (
+          <span className="max-w-36 truncate rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-black/45" title={step.model}>
+            {step.modelRole ? `${step.modelRole} · ` : ''}{step.model}
+          </span>
+        )}
         <span className="text-black/40">
           {step.resolved === 'approved'
             ? '(approved)'

@@ -66,6 +66,8 @@ export interface AgentCfg {
   max_turns: number
   max_budget_usd: number
   approval_mode: 'off' | 'always' | 'on_request'
+  auto_routing_enabled: boolean
+  subagent_approval_mode: 'one_gate' | 'passthrough'
   default_workspace_dir: string
   workspace_allowed_roots: string[]
   context_window: number
@@ -221,6 +223,15 @@ export interface LlmTestResult {
   error?: string
 }
 
+export interface ModelProfileHealth {
+  model: string
+  label: string
+  status: 'unknown' | 'healthy' | 'unavailable'
+  last_checked: string | null
+  latency_ms: number | null
+  error_code: string | null
+}
+
 // ---- Chat / runs ----
 
 export interface SessionSummary {
@@ -311,20 +322,29 @@ export interface StreamEvent {
 
 export interface TokenEvent {
   text: string
+  model?: string
+  model_role?: string
 }
 export interface ReasoningEvent {
   text: string
+  model?: string
+  model_role?: string
 }
 export interface ToolCallEvent {
   call_id: string
   name: string
   arguments: string
+  model?: string
+  model_role?: string
 }
 export interface ToolResultEvent {
   call_id: string
   name: string
   output: string
   is_error: boolean
+  model?: string
+  model_role?: string
+  worker_model?: string
 }
 export interface ApprovalRequiredEvent {
   approval_id: string
@@ -332,6 +352,8 @@ export interface ApprovalRequiredEvent {
   tool: string
   arguments: string
   reason: string
+  model?: string
+  model_role?: string
 }
 export interface UsageEvent extends UsageInfo {}
 export interface RunCompletedEvent {

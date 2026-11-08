@@ -240,6 +240,13 @@ cp .env.example .env      # then edit: auth token, LLM URL, model, workspace
 ./docker/smoke_test.sh    # post-build verification gate
 ```
 
+Docker mode starts a host-side command runner through `claudio-ctl`; commands
+run as your host user with the selected workspace as their working directory.
+Keep `CLAUDIO_UID` aligned with your host UID. Host commands follow the
+configured Claudio approval mode. This is not a sandbox: shell commands can
+access anything your host user can access. Set `CLAUDIO_HOST_EXECUTION_ENABLED=false`
+to keep command execution inside the backend container.
+
 `./claudio-ctl` takes `status`, `start`, `stop`, `restart`, `logs`, `build`,
 `health` and `down`, each accepting `agent`, `web` or `all` (default `all`).
 Only nginx publishes a host port (8080); the agent publishes nothing and is

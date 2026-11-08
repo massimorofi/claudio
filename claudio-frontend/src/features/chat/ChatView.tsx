@@ -617,14 +617,24 @@ export default function ChatView() {
                   if (item.kind === 'assistant') {
                     return (
                       <div key={item.id} className="mb-3 flex justify-start">
-                        <div className="md-body max-w-[90%] rounded-2xl rounded-bl-sm bg-white border border-black/10 px-3.5 py-2 text-sm">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+                        <div className="max-w-[90%]">
+                          <ModelBadge model={item.model} role={item.modelRole} />
+                          <div className="md-body rounded-2xl rounded-bl-sm bg-white border border-black/10 px-3.5 py-2 text-sm">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+                          </div>
                         </div>
                       </div>
                     )
                   }
                   if (item.kind === 'reasoning') {
-                    return <ReasoningBlock key={item.id} text={item.text} />
+                    return (
+                      <ReasoningBlock
+                        key={item.id}
+                        text={item.text}
+                        model={item.model}
+                        modelRole={item.modelRole}
+                      />
+                    )
                   }
                   return null
                 })}
@@ -769,7 +779,27 @@ export default function ChatView() {
   )
 }
 
-function ReasoningBlock({ text }: { text: string }) {
+function ModelBadge({ model, role }: { model?: string; role?: string }) {
+  if (!model) return null
+  return (
+    <span
+      title={model}
+      className="mb-1 inline-flex max-w-full truncate rounded-full bg-black/[0.05] px-2 py-0.5 text-[10px] text-black/50"
+    >
+      {role ? `${role} · ` : ''}{model}
+    </span>
+  )
+}
+
+function ReasoningBlock({
+  text,
+  model,
+  modelRole,
+}: {
+  text: string
+  model?: string
+  modelRole?: string
+}) {
   const [open, setOpen] = useState(false)
   return (
     <div className="my-1.5 rounded-lg border border-black/10 bg-black/[0.02] overflow-hidden">
@@ -778,6 +808,9 @@ function ReasoningBlock({ text }: { text: string }) {
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-black/50 hover:bg-black/[0.03]"
       >
         <span className="font-medium italic">Reasoning</span>
+        {model && <span className="truncate text-[10px] text-black/40" title={model}>
+          {modelRole ? `${modelRole} · ` : ''}{model}
+        </span>}
         <span className="ml-auto text-black/30">
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>

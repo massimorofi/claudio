@@ -45,6 +45,8 @@ services:
       # the folder opened in the editor: the extension sends the host path, and the
       # agent resolves it identically because the mount preserves the path.
       CLAUDIO__AGENT__DEFAULT_WORKSPACE_DIR: /workspace
+      CLAUDIO__AGENT__HOST_EXECUTION_ENABLED: ${CLAUDIO_HOST_EXECUTION_ENABLED:-true}
+      CLAUDIO__AGENT__HOST_EXECUTION_SOCKET: /run/claudio-host/host-exec.sock
       CLAUDIO__AGENT__WORKSPACE_ALLOWED_ROOTS: '["/workspace", "${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}"]'
 
       TZ: ${TZ:-UTC}
@@ -61,6 +63,9 @@ services:
       # The host projects root, mounted at its SAME host path so a VS Code
       # session binding to the open folder resolves inside the container.
       - ${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}:${CLAUDIO_HOST_PROJECTS_DIR:-/home/briggen/Dev/code/ai}
+      # The host-side runner creates this protected Unix socket before the
+      # backend starts. Read-only mount permits connecting without managing it.
+      - ${CLAUDIO_HOST_EXEC_DIR:-./.runtime}:/run/claudio-host:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
       interval: 15s

@@ -21,6 +21,7 @@ from claudio_core.session_store import SessionStore
 from claudio_core.settings import AppConfig, load_config, resolve_profile
 
 from .engine import create_engine
+from .model_health import ModelHealthRegistry
 from .runs.manager import RunManager
 from .autonomous.notifier import Notifier
 from .autonomous.service import HealthService
@@ -51,6 +52,7 @@ class Supervisor:
         self.task_runner: TaskRunner | None = None
         self.task_scheduler: TaskScheduler | None = None
         self._config_generation = 0
+        self.model_health = ModelHealthRegistry()
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -77,6 +79,7 @@ class Supervisor:
             # The engine is the single ADK-aware component; the run manager
             # drives it through the framework-free RunEngine protocol.
             self.engine = create_engine(self.config, self.db)
+            self.engine.profile_health = self.model_health
             self.run_manager = RunManager(
                 config=self.config,
                 db=self.db,
