@@ -142,23 +142,16 @@ Representative methods:
 
 ### 4. Configuration — `settings.py`
 
-Pydantic models over YAML, with environment overrides. Sections: `server`,
-`llm`, `agent`, `mcp`, `monitoring`, `autonomous`. Top-level model is
-`AppConfig`.
-
-Any value can be overridden by environment variable using the `CLAUDIO__`
-prefix and `__` as the path separator:
-
-```bash
-CLAUDIO__LLM__MODEL="gpt-5"
-CLAUDIO__SERVER__AUTH_TOKEN="..."
-```
+Pydantic models over YAML, with environment overrides. The top-level model is
+`AppConfig`; sections are `server`, `llm`, `model_profiles`, `roles`, `agent`,
+`search`, `mcp`, `monitoring`, `autonomous`, `self_improvement`.
 
 Key functions:
 
 | Function | Purpose |
 |---|---|
 | `load_config(path)` / `load_config_dict(path)` | load + validate |
+| `resolve_profile(config, role)` | map a role (`primary`/`worker`/`fast`) to a `ModelProfile` |
 | `validate_candidate(candidate)` | validate a proposed config without saving |
 | `redact_secrets(cfg)` / `restore_redacted_secrets(candidate, current)` | secrets never round-trip through the UI |
 | `changed_keys(old, new)` | diff two configs |
@@ -166,27 +159,10 @@ Key functions:
 | `write_config_atomic(path, cfg)` | temp-file + rename |
 | `config_schema_json()` | JSON schema for the settings UI |
 
-Restart semantics: `server.host` and `server.port` require a backend restart;
-`mcp` requires an agent restart. Everything else is hot-reloadable.
-
-Notable config fields:
-
-- `LLMConfig` — `provider`, `model`, `api_key`, `base_url`, `temperature`,
-  `max_tokens`, `fallback_model`, `timeout_seconds`, `retry_attempts`,
-  `price_input_per_mtok`, `price_output_per_mtok`
-- `AgentConfig` — `max_turns`, `max_budget_usd`, `approval_mode`,
-  `workspace_dir`, `context_window`, `compaction_reserve`,
-  `compaction_timeout_seconds`, `max_output_chars`, `strict_tools`,
-  `skills_enabled`, `skills_dir`, `tools`, `subagents`
-- `AutonomousConfig` — `enabled`, `report_only`, `health_check`, `maintenance`,
-  `recovery`, `notification`, `command_allowlist`
-- `SelfImprovementConfig` — `enabled` (master switch, off by default),
-  `capture_enabled`, `consolidation_schedule` (cron, default weekly Mon 04:00),
-  `promotion_threshold` (recurrence ≥ N promotes, default 3), `auto_promote`
-  (apply skill changes without approval — trusted hosts only), `max_learnings`
-  (episodic store cap, default 5000), `retention_days` (prune raw after 180),
-  `max_auto_skills` (bloat guard, default 20). The `consolidation_schedule` is
-  validated with `croniter` on load.
+> **The complete field reference, merge order, secrets handling, auth-token
+> rotation and restart semantics all live in
+> [configuration.md](./configuration.md)** — the single source of truth for
+> configuration. This section only notes the module's role in core.
 
 ### 5. Tools — `tools/`
 

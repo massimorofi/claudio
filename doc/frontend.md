@@ -107,6 +107,9 @@ LLM / agent / MCP settings, test connection, config history and restore. Uses
 `react-hook-form` + `zod`. Secrets arrive redacted and are restored server-side
 on save, so a saved config never leaks a key through the browser.
 
+> The full settings reference (every field, merge order, secrets handling,
+> restart semantics) is in [configuration.md](./configuration.md).
+
 ### 8. Workspace — `features/workspace/WorkspaceView.tsx`
 
 Browse and delete workspace files, download. Backed by `/workspace/tree`,
@@ -143,8 +146,9 @@ A header strip shows the headline counts (`total` / `raw` / `processed` /
 draft calls `POST /skill-drafts/{id}/approve`, which validates and writes it
 into the live skills directory; a draft that fails validation returns
 `422` and the reason is surfaced. Backed by the `/learning/*` and
-`/skill-drafts/*` endpoints (see
-[`backend.md`](./backend.md#learning-self-improvement-read-api)).
+`/skill-drafts/*` endpoints. The skill set itself — directory layout, format,
+validation and the refresh workflow — is documented in
+[skills.md](./skills.md).
 
 ### 12. Shared components
 
@@ -219,26 +223,6 @@ collapse state persists in `localStorage` under `claudio.sidebar.collapsed`.
 
 ---
 
-## Endpoints consumed
-
-All under `/api/v1`. Full request/response shapes are in
-[`backend.md`](./backend.md).
-
-| Group | Endpoints |
-|---|---|
-| Chat | `POST /chat/stream`, `POST /chat`, `POST /chat/runs/{id}/cancel`, `GET /chat/runs/{id}`, `GET /chat/runs/{id}/stream` |
-| Approvals | `GET /approvals/pending`, `POST /approvals/{id}` |
-| Sessions | `GET /sessions`, `GET /sessions/{id}`, `POST /sessions/{id}/compact`, `GET /sessions/{id}/messages`, `GET /sessions/{id}/active_run`, `DELETE /sessions/{id}`, `POST /sessions/{id}/clear` |
-| Config | `GET /config`, `GET /config/schema`, `PUT /config`, `POST /config/validate`, `POST /config/llm/test`, `GET /config/history`, `POST /config/restore` |
-| Files | `POST /files/upload` |
-| Workspace | `GET /workspace/files`, `GET /workspace/tree`, `POST /workspace/files/delete`, `GET /workspace/files/download`, `POST /workspace/files/download` |
-| Agent | `POST /agent/start`, `POST /agent/stop`, `POST /agent/restart`, `GET /agent/status`, `GET /agent/tools`, `GET /skills` |
-| Monitoring | `GET /monitoring/health`, `GET /monitoring/metrics`, `GET /monitoring/logs`, `GET /monitoring/runs` |
-| Autonomous | `GET /autonomous/status`, `GET /autonomous/health`, `GET /autonomous/health/history`, `POST /autonomous/health/run`, `POST /autonomous/maintenance/run`, `POST /autonomous/recovery/run`, `GET /autonomous/issues`, `POST /autonomous/issues/{id}/acknowledge`, `POST /autonomous/issues/{id}/resolve`, `POST /autonomous/issues/{id}/propose-fix`, `GET /autonomous/issues/{id}/suggestions`, `POST /autonomous/suggestions/{id}/accept`, `POST /autonomous/suggestions/{id}/dismiss`, `POST /autonomous/notify/test`, `GET /autonomous/audit`, `GET /autonomous/tasks`, `POST /autonomous/tasks`, `PUT /autonomous/tasks/{key}`, `DELETE /autonomous/tasks/{key}`, `POST /autonomous/tasks/{key}/enable`, `POST /autonomous/tasks/{key}/disable`, `POST /autonomous/tasks/{key}/run`, `GET /autonomous/tasks/{key}/runs` |
-| Learning | `GET /learning`, `GET /learning/categories`, `GET /learning/stats`, `GET /learning/consolidations`, `GET /skill-drafts`, `GET /skill-drafts/{id}`, `POST /skill-drafts/{id}/approve`, `POST /skill-drafts/{id}/reject` |
-| System | `GET /healthz` |
-
----
 
 ## Development
 

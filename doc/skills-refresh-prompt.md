@@ -62,7 +62,7 @@ After all areas: write the credits manifest, then commit.
 > You are building and refreshing the curated Agent Skills set for this project.
 >
 > **Target directory:** `claudio-backend/skills/` (the directory Claudio scans
-> for installed skills; see `doc/skills-and-workspace.md`).
+> for installed skills; see `doc/skills.md`).
 >
 > **Source:** the open SkillMD registry at `https://skillmd.com`, a
 > safety-reviewed library of `SKILL.md` files. Use its MCP tools if available

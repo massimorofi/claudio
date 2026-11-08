@@ -140,8 +140,8 @@ auto-routing is disabled, when the classifier chooses primary, or when the
 fast profile is unavailable. Also check the effective configuration for
 unmapped roles: an unset role means `llm`, not "pick a model automatically".
 
-Implementation references: [`resolve_profile`](../claudio-core/src/claudio_core/settings.py),
+Implementation references: [`resolve_profile`](../../claudio-core/src/claudio_core/settings.py),
 the routing and delegation logic in
-[`runs/manager.py`](../claudio-backend/src/claudio_backend/runs/manager.py),
+[`runs/manager.py`](../../claudio-backend/src/claudio_backend/runs/manager.py),
 and fast-run tool restrictions in
-[`adk_engine.py`](../claudio-backend/src/claudio_backend/engine/adk_engine.py).
+[`adk_engine.py`](../../claudio-backend/src/claudio_backend/engine/adk_engine.py).
