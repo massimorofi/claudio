@@ -15,6 +15,7 @@ from .shell import run_command
 from .web import web_fetch, web_search
 from .planning import todo_write
 from .tasks import create_scheduled_task
+from .subagent import delegate_task
 
 
 @dataclass
@@ -40,6 +41,11 @@ TOOL_META: dict[str, ToolMeta] = {
     # Creating a task row is not itself a system mutation: the task is created
     # disabled + report-only and only acts once the operator enables it.
     "create_scheduled_task": ToolMeta("create_scheduled_task"),
+    # A delegation runs a worker that can mutate whatever its tool list allows,
+    # so delegation is treated as destructive: under ``on_request`` the human
+    # approves the work order (the task brief + the tools the worker may use)
+    # once, instead of approving each nested tool call inside the worker.
+    "delegate_task": ToolMeta("delegate_task", is_destructive=True),
 }
 
 ALL_TOOL_NAMES = list(TOOL_META.keys())
@@ -57,6 +63,7 @@ TOOL_FUNCTIONS: dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {
     "web_search": web_search,
     "todo_write": todo_write,
     "create_scheduled_task": create_scheduled_task,
+    "delegate_task": delegate_task,
 }
 
 

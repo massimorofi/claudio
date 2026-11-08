@@ -86,6 +86,43 @@ class LLMConfig(BaseModel):
     price_output_per_mtok: float = 0.0
 
 
+class ModelProfile(BaseModel):
+    """A named, fully-described inference endpoint.
+
+    One profile is one reachable model server. The ``llm`` section remains the
+    implicit *primary* profile for backward compatibility; additional profiles
+    live here and are assigned to roles (primary / worker / fast) via
+    :class:`RolesConfig`. ``resolve_profile`` maps a role to a profile, falling
+    back to the ``llm`` section when nothing is configured.
+    """
+
+    label: str = ""
+    provider: str = "openai"
+    model: str = ""
+    base_url: str | None = None
+    api_key: str = "local"
+    temperature: float = 0.2
+    max_tokens: int = 16384
+    # Per-profile context window: a small worker model may have a much smaller
+    # window than the primary, and the delegation budget must respect it.
+    context_window: int = Field(default=32768, ge=1)
+    price_input_per_mtok: float = 0.0
+    price_output_per_mtok: float = 0.0
+    timeout_seconds: int = 300
+
+
+class RolesConfig(BaseModel):
+    """Which named profile plays each role.
+
+    A role left unset (``None``) falls back to the ``llm`` section, so a config
+    with no ``roles`` block behaves exactly as before: one model everywhere.
+    """
+
+    primary: str | None = None
+    worker: str | None = None
+    fast: str | None = None
+
+
 class SearchConfig(BaseModel):
     """Web search backend configuration.
 
@@ -133,7 +170,7 @@ class SubagentConfig(BaseModel):
     instructions_file: str | None = None
     instructions: str | None = None
     tools: list[str] = Field(default_factory=list)
-    max_turns: int = 30
+    max_turns: int = Field(default=30, ge=1)
 
 
 class AgentToolsConfig(BaseModel):
@@ -174,7 +211,7 @@ class AgentConfig(BaseModel):
     # breaker and disables compaction for the session. Give compaction its own,
     # much larger budget so a slow summarizer does not silently kill it.
     compaction_timeout_seconds: int = 300
-    max_output_chars: int = 8000
+    max_output_chars: int = Field(default=8000, ge=1)
     strict_tools: bool = False
     skills_enabled: bool = True
     skills_dir: str = "./skills"
@@ -398,6 +435,8 @@ class AutonomousConfig(BaseModel):
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    model_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
+    roles: RolesConfig = Field(default_factory=RolesConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
@@ -406,6 +445,62 @@ class AppConfig(BaseModel):
     self_improvement: SelfImprovementConfig = Field(
         default_factory=SelfImprovementConfig
     )
+
+
+def _llm_as_profile(llm: LLMConfig, context_window: int) -> ModelProfile:
+    """Build a profile from the legacy ``llm`` section.
+
+    The ``llm`` section predates profiles and carries no ``context_window`` of
+    its own, so the caller passes the effective window (``agent.context_window``
+    for the primary role).
+    """
+    return ModelProfile(
+        label="primary (llm section)",
+        provider=llm.provider,
+        model=llm.model,
+        base_url=llm.base_url,
+        api_key=llm.api_key,
+        temperature=llm.temperature,
+        max_tokens=llm.max_tokens,
+        context_window=context_window,
+        price_input_per_mtok=llm.price_input_per_mtok,
+        price_output_per_mtok=llm.price_output_per_mtok,
+        timeout_seconds=llm.timeout_seconds,
+    )
+
+
+def resolve_profile(config: "AppConfig", role: str) -> ModelProfile:
+    """Resolve a role name to a concrete :class:`ModelProfile`.
+
+    ``role`` is one of ``primary`` / ``worker`` / ``fast``. The profile named
+    in ``config.roles.<role>`` is returned when it exists in
+    ``config.model_profiles``. Otherwise the ``llm`` section is used as the
+    implicit primary profile, so a config with no ``model_profiles`` /
+    ``roles`` behaves exactly as before (one model everywhere).
+    """
+    role_value = getattr(config.roles, role, None)
+    if role_value and role_value in config.model_profiles:
+        return config.model_profiles[role_value]
+    # Fall back to the llm section. For the primary role the effective context
+    # window is the agent's; for other roles the same window is a safe default
+    # because they only diverge when a profile is actually configured.
+    return _llm_as_profile(config.llm, config.agent.context_window)
+
+
+def validate_role_references(config: "AppConfig") -> list[str]:
+    """Return role names that reference a profile which does not exist.
+
+    Empty list means every configured role points at a real profile. Roles left
+    unset are fine (they fall back to the ``llm`` section). Used by the config
+    API to surface a typo in ``roles`` as a non-fatal warning rather than a
+    silent fallback to the primary model.
+    """
+    problems: list[str] = []
+    for role in ("primary", "worker", "fast"):
+        role_value = getattr(config.roles, role, None)
+        if role_value and role_value not in config.model_profiles:
+            problems.append(role)
+    return problems
 
 
 def _env_overrides() -> dict[str, Any]:
@@ -467,10 +562,32 @@ def validate_candidate(candidate: dict[str, Any]) -> AppConfig:
     return AppConfig.model_validate(merged)
 
 
+def _profile_secret_paths(cfg_dict: dict) -> list[str]:
+    """Dynamic secret paths for ``model_profiles.<name>.api_key``.
+
+    ``SECRET_PATHS`` is a fixed list, but model profiles are an open-ended
+    dict keyed by an operator-chosen name, so their ``api_key`` paths cannot
+    be enumerated statically. Compute them from the dict actually in hand.
+    """
+    paths: list[str] = []
+    if not isinstance(cfg_dict, dict):
+        return paths
+    profiles = cfg_dict.get("model_profiles")
+    if isinstance(profiles, dict):
+        for name in profiles:
+            paths.append(f"model_profiles.{name}.api_key")
+    return paths
+
+
+def _all_secret_paths(cfg_dict: dict) -> list[str]:
+    """Fixed secret paths plus the dynamic per-profile api_key paths."""
+    return SECRET_PATHS + _profile_secret_paths(cfg_dict)
+
+
 def redact_secrets(cfg_dict: dict[str, Any]) -> dict[str, Any]:
     """Return a copy with secret fields replaced by '***'."""
     out = copy.deepcopy(cfg_dict)
-    for path in SECRET_PATHS:
+    for path in _all_secret_paths(out):
         if _get_path(out, path):
             _set_path(out, path, REDACTED)
     return out
@@ -483,9 +600,15 @@ def restore_redacted_secrets(candidate: dict[str, Any], current: dict[str, Any])
     client echoes that redacted config back on save, the ``***`` placeholders must
     not overwrite the stored secrets — a field carrying the placeholder is treated
     as "unchanged".
+
+    The set of paths considered is the union of the fixed ``SECRET_PATHS`` and
+    the per-profile ``api_key`` paths present in either dict, so a profile added
+    in this save (present only in ``candidate``) and one being preserved (present
+    in ``current``) are both handled.
     """
     out = copy.deepcopy(candidate)
-    for path in SECRET_PATHS:
+    paths = list(dict.fromkeys(_all_secret_paths(current) + _all_secret_paths(candidate)))
+    for path in paths:
         if _get_path(out, path) == REDACTED:
             cur = _get_path(current, path)
             if cur:

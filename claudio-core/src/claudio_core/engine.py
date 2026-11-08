@@ -36,6 +36,8 @@ class ModelSpec:
     max_tokens: int = 4096
     timeout_seconds: float = 120.0
     fallback_model: str | None = None
+    price_input_per_mtok: float = 0.0
+    price_output_per_mtok: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,27 @@ class RunEngine(Protocol):
 
     async def cancel(self, run_id: str) -> None:
         """Request cooperative cancellation of an in-flight run."""
+        ...
+
+    async def get_conversation_items(
+        self, session_id: str, workspace_id: str
+    ) -> list[dict[str, Any]]:
+        """Read the model-facing conversation as OpenAI-style items.
+
+        Returns the conversation as a list of ``{"role", "content"}`` dicts
+        (the shape ``claudio_core.compaction`` renders for summarisation).
+        An empty list means there is no stored conversation.
+        """
+        ...
+
+    async def replace_conversation(
+        self, session_id: str, workspace_id: str, summary: str
+    ) -> None:
+        """Replace the model-facing conversation with a single summary turn.
+
+        Used by manual compaction: the long transcript is dropped and the
+        summary becomes the only prior context the next run sees.
+        """
         ...
 
 

@@ -167,9 +167,13 @@ export default function ChatView() {
       // compact at the next turn boundary. The real token delta arrives with
       // the run_compacted event, which fires its own toast.
       showToast('Compaction scheduled — applies at the next step')
-    } else if (res.ok) {
+    } else if (res.ok && res.compacted) {
       const now = res.used_tokens ?? 0
       showToast(`Compacted ${prev.toLocaleString()} → ${now.toLocaleString()} tokens`)
+    } else if (res.ok) {
+      // Nothing was compacted (e.g. the session is too short). Say so rather
+      // than reporting a reduction that did not happen.
+      showToast('Nothing to compact yet')
     } else {
       showToast(res.error ?? 'Compaction failed')
     }

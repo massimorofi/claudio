@@ -19,12 +19,14 @@ not this layer, now owns the model conversation:
 1. The engine emits ``run_completed`` / ``run_failed`` / ``approval_required``
    as events rather than raising or returning a ``RunState``. The recovery loop
    reads those events instead of catching exceptions.
-2. The engine keeps its own conversation state (ADK's session store), so the
-   mid-run "interrupt, replace the conversation, restart" compaction the SDK
-   allowed is not reachable from here. Compaction is therefore proactive (before
-   the run) and the live gauge is driven by the ``context_usage`` the engine
-   reports each turn. ``request_compact`` keeps its external contract but, with
-   no active run, refreshes the gauge rather than rewriting the model context.
+2. The engine keeps its own conversation state (ADK's session store), so
+   compaction goes through the engine's ``get_conversation_items`` /
+   ``replace_conversation`` rather than an SDK handle. Mid-run compaction is
+   real: a ``context_overflow`` failure, a manual request that lands while a
+   run is in flight, or a last-turn size that has crossed the compaction
+   threshold all cause the stored conversation to be summarised and replaced
+   before the run restarts from the continue prompt. The live gauge is driven
+   by the ``context_usage`` the engine reports each turn.
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ from claudio_core.events import EventName
 from claudio_core.instructions import build_instructions
 from claudio_core.learning import capture_run
 from claudio_core.llm import LlmCallError, openai_chat_completion
-from claudio_core.settings import AppConfig, LLMConfig
+from claudio_core.settings import AppConfig, LLMConfig, resolve_profile
 from claudio_core.tools.registry import select_tool_names
 
 from ..errors import ApiError
@@ -172,6 +174,9 @@ class RunRecord:
     cost_usd: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    delegated_input_tokens: int = 0
+    delegated_output_tokens: int = 0
+    delegated_cost_usd: float = 0.0
     final_output: str = ""
     error_code: str | None = None
     error_message: str | None = None
@@ -306,18 +311,114 @@ class RunManager:
     def active_count(self) -> int:
         return sum(1 for r in self._runs.values() if r.state == "running")
 
+    def _build_summariser(self):
+        """Build the injected summariser callable for the Compactor.
+
+        Compaction is a single one-shot generation, not an agent run, so it
+        goes straight through the OpenAI-compatible client rather than the
+        engine. The summary budget and timeout come from the compactor so a
+        slow local model gets the long budget its own config promises.
+        """
+        fast = resolve_profile(self.config, "fast")
+        max_tokens = 2000
+        if self.compactor is not None:
+            max_tokens = int(getattr(self.compactor, "max_compact_tokens", 2000) or 2000)
+        max_tokens = min(max_tokens, fast.context_window)
+        timeout = float(self.config.agent.compaction_timeout_seconds)
+
+        async def summarise(prompt: str) -> str:
+            return await openai_chat_completion(
+                base_url=fast.base_url,
+                model=fast.model,
+                messages=[{"role": "user", "content": prompt}],
+                api_key=fast.api_key or "local",
+                temperature=fast.temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+
+        return summarise
+
+    async def _resolve_workspace_id(self, row: dict[str, Any] | None) -> str:
+        """Resolve the workspace id whose ADK state holds this session."""
+        stored = (row or {}).get("workspace_dir") or ""
+        if not stored:
+            stored = str(resolve_workspace_dir(self.config))
+        rec = await self.db.register_workspace(stored)
+        return rec["id"]
+
+    async def _auto_compact(self, record: RunRecord, reason: str) -> bool:
+        """Compact the session while a run is in flight.
+
+        Reads the conversation the engine holds, summarises it, replaces the
+        stored conversation with the summary and persists the new size, then
+        announces ``run_compacted`` so the client's gauge and toast follow.
+        Returns True when the conversation was actually replaced.
+
+        Failures are logged (and the breaker state persisted when the failure
+        trips it) but never raised: the caller decides what an uncompacted
+        overflow means, and a failed manual request should not kill the run.
+        """
+        if self.compactor is None or self.compactor.is_disabled(record.session_id):
+            return False
+        if record.mid_run_compactions >= MAX_MID_RUN_COMPACTIONS:
+            return False
+        record.mid_run_compactions += 1
+        workspace_id = record.workspace_id
+        if not workspace_id:
+            row = await self.db.get_session(record.session_id)
+            workspace_id = await self._resolve_workspace_id(row)
+        try:
+            items = await self.engine.get_conversation_items(
+                record.session_id, workspace_id
+            )
+            if len(items) < 2:
+                return False
+            summarise = self._build_summariser()
+            summary = await self.compactor.summarize(
+                items, summarise, record.session_id
+            )
+        except Exception as exc:  # noqa: BLE001 - caller decides on failure
+            logger.warning(
+                "Mid-run compaction failed for session %s: %s", record.session_id, exc
+            )
+            if self.compactor.is_disabled(record.session_id):
+                await self.db.update_session(record.session_id, compaction_disabled=1)
+            return False
+        if not summary or not str(summary).strip():
+            return False
+        await self.engine.replace_conversation(
+            record.session_id, workspace_id, summary
+        )
+        new_used = max(1, len(summary) // 4)
+        await self.db.update_session(
+            record.session_id, last_context_tokens=new_used, compaction_disabled=0
+        )
+        record.last_context_tokens = new_used
+        self._publish(
+            record,
+            {
+                "event": EventName.RUN_COMPACTED.value,
+                "data": {
+                    "reason": reason,
+                    "attempt": record.mid_run_compactions,
+                    "used_tokens": new_used,
+                    "free_tokens": self._free_tokens(new_used),
+                },
+            },
+        )
+        return True
+
     async def request_compact(self, session_id: str) -> dict[str, Any]:
         """Compact a session, whether or not a run is active.
 
         With a run paused on an approval the request is refused (409): the
         conversation must be resolved before its context is rewritten. With a
         run in flight the request is recorded and the gauge refreshed. With no
-        active run the persisted size is re-rendered as a fresh gauge.
-
-        Note: the engine owns the live model conversation in its own store, so
-        this does not rewrite what the model sees mid-run -- it keeps the
-        external contract (a fresh ``context_usage`` payload) and the durable
-        breaker state.
+        active run the persisted conversation is actually summarised and
+        replaced: the long transcript is dropped from the engine's store and
+        the summary becomes the only prior context the next run sees, so the
+        gauge drops to the summary's size.
         """
         record = self.get_active_run_for_session(session_id)
         if record is not None and record.state == "awaiting_approval":
@@ -329,16 +430,96 @@ class RunManager:
         if record is not None:
             record.compact_requested.set()
             return {"ok": True, "requested": True}
+
         row = await self.db.get_session(session_id)
-        used = int((row or {}).get("last_context_tokens") or 0)
+        stored_used = int((row or {}).get("last_context_tokens") or 0)
         auto_off = bool(self.compactor and self.compactor.is_disabled(session_id))
+
+        def _gauge(used: int, source: str, disabled: bool) -> dict[str, Any]:
+            return {
+                "used_tokens": used,
+                "free_tokens": self._free_tokens(used),
+                "context_usage": context_usage_payload(
+                    used, self.config, source, auto_disabled=disabled
+                ),
+            }
+
+        # Without a compactor there is nothing to summarise with; report the
+        # stored gauge rather than crashing or falsely claiming a reduction.
+        if self.compactor is None:
+            return {
+                "ok": False,
+                "compacted": False,
+                "error": "Compaction is not available",
+                **_gauge(stored_used, "stored", auto_off),
+            }
+
+        # Read the model-facing conversation the engine actually holds.
+        workspace_id = await self._resolve_workspace_id(row)
+        items = await self.engine.get_conversation_items(session_id, workspace_id)
+
+        # Nothing worth compacting: report the current gauge honestly rather
+        # than claiming a reduction that did not happen.
+        if len(items) < 2:
+            return {
+                "ok": True,
+                "compacted": False,
+                "reason": "nothing_to_compact",
+                **_gauge(stored_used, "stored", auto_off),
+            }
+
+        summarise = self._build_summariser()
+        try:
+            summary = await self.compactor.summarize(items, summarise, session_id)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a failed compact
+            logger.warning(
+                "Manual compaction failed for session %s: %s", session_id, exc
+            )
+            disabled = bool(self.compactor and self.compactor.is_disabled(session_id))
+            if disabled:
+                await self.db.update_session(session_id, compaction_disabled=1)
+            return {
+                "ok": False,
+                "compacted": False,
+                "error": f"Compaction failed: {exc}",
+                **_gauge(stored_used, "stored", disabled),
+            }
+
+        if not summary or not str(summary).strip():
+            # summarize() guards against this, but never wipe a live
+            # conversation on an empty summary.
+            return {
+                "ok": False,
+                "compacted": False,
+                "error": "Compaction produced an empty summary",
+                **_gauge(stored_used, "stored", auto_off),
+            }
+
+        # The summariser took seconds; a run may have started while we were
+        # summarising. Re-check under the lock before rewriting the store --
+        # replacing the conversation out from under a live run would wipe the
+        # context it is actively building. If one appeared, defer instead:
+        # the run's own loop consumes ``compact_requested`` at its next
+        # boundary.
+        async with self._lock:
+            racer = self.get_active_run_for_session(session_id)
+            if racer is not None:
+                racer.compact_requested.set()
+                return {
+                    "ok": True,
+                    "requested": True,
+                    "reason": "run_started_during_compact",
+                    **_gauge(stored_used, "stored", auto_off),
+                }
+            await self.engine.replace_conversation(session_id, workspace_id, summary)
+            new_used = max(1, len(summary) // 4)
+            await self.db.update_session(
+                session_id, last_context_tokens=new_used, compaction_disabled=0
+            )
         return {
             "ok": True,
-            "used_tokens": used,
-            "free_tokens": self._free_tokens(used),
-            "context_usage": context_usage_payload(
-                used, self.config, "stored", auto_disabled=auto_off
-            ),
+            "compacted": True,
+            **_gauge(new_used, "compacted", False),
         }
 
     async def subscribe(self, run_id: str, after_seq: int = 0):
@@ -401,20 +582,26 @@ class RunManager:
         return max(0, int(self.compactor.context_window) - int(self.compactor.reserve) - used)
 
     def _model_spec(self, model_override: str | None = None) -> ModelSpec:
+        profile = resolve_profile(self.config, "primary")
         # ``max_tokens: 0`` in the config means "use the default", not "send
         # zero". A literal 0 reaches the model as max_completion_tokens=0 and
         # every request fails with "integer below minimum value". The ModelSpec
         # default (4096) is too small for reasoning models, so fall back to the
         # LLMConfig default (16384).
+        max_tokens = int(profile.max_tokens) or LLMConfig.model_fields[
+            "max_tokens"
+        ].default
+        max_tokens = min(max_tokens, profile.context_window)
         return ModelSpec(
-            model=model_override or self.config.llm.model,
-            base_url=self.config.llm.base_url,
-            api_key=self.config.llm.api_key or "local",
-            temperature=float(self.config.llm.temperature),
-            max_tokens=int(self.config.llm.max_tokens)
-            or LLMConfig.model_fields["max_tokens"].default,
-            timeout_seconds=float(self.config.llm.timeout_seconds),
+            model=model_override or profile.model,
+            base_url=profile.base_url,
+            api_key=profile.api_key or "local",
+            temperature=float(profile.temperature),
+            max_tokens=max_tokens,
+            timeout_seconds=float(profile.timeout_seconds),
             fallback_model=self.config.llm.fallback_model,
+            price_input_per_mtok=profile.price_input_per_mtok,
+            price_output_per_mtok=profile.price_output_per_mtok,
         )
 
     def _tool_policy(self, approval_mode: str | None) -> ToolPolicy:
@@ -557,6 +744,19 @@ class RunManager:
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
+            # Boundary compaction: honour a manual request that landed while
+            # this run was in flight, and proactively compact when the last
+            # turn's reported size has crossed the threshold. Both keep the
+            # next attempt small instead of waiting for a hard overflow.
+            if record.compact_requested.is_set():
+                record.compact_requested.clear()
+                await self._auto_compact(record, "manual")
+            elif (
+                self.compactor is not None
+                and record.last_context_tokens > 0
+                and self.compactor.should_compact(record.last_context_tokens)
+            ):
+                await self._auto_compact(record, "proactive")
             kind, data = await self._consume(record, request)
             if kind == "completed":
                 usage = data.get("usage") or {}
@@ -586,7 +786,9 @@ class RunManager:
                     or len(outstanding) < prev_outstanding
                     or files_now > prev_files_written
                 )
-                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                over_budget = budget > 0 and (
+                    base_cost + total_cost + record.delegated_cost_usd
+                ) >= budget
                 if auto_continues >= max_continues or not made_progress or over_budget:
                     await self._finalize_completed(record, merged)
                     return
@@ -621,7 +823,9 @@ class RunManager:
                 # replan with a fresh budget and keep going. The only
                 # guardrail is the cost budget -- with budget 0 the run is
                 # effectively unbounded, which is the point.
-                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                over_budget = budget > 0 and (
+                    base_cost + total_cost + record.delegated_cost_usd
+                ) >= budget
                 if record.approval_mode == "off" and not over_budget:
                     replans += 1
                     self._publish(
@@ -665,22 +869,22 @@ class RunManager:
                     )
                 return
             if code == "context_overflow":
-                if record.mid_run_compactions >= MAX_MID_RUN_COMPACTIONS:
+                # Actually compact before restarting: summarise the stored
+                # conversation and replace it, so the next attempt starts
+                # from the summary instead of re-sending the same bloated
+                # history and overflowing again.
+                if not await self._auto_compact(record, "overflow"):
+                    # Nothing was compacted -- the conversation was too
+                    # short, the summariser failed, or the per-run cap was
+                    # reached. Restarting would just overflow the same way,
+                    # so stop with the original overflow message.
                     await self._finalize_failed(
                         record, code, err.get("message", "Context overflow")
                     )
                     return
-                record.mid_run_compactions += 1
-                self._publish(
-                    record,
-                    {
-                        "event": EventName.RUN_COMPACTED.value,
-                        "data": {
-                            "reason": "overflow",
-                            "attempt": record.mid_run_compactions,
-                        },
-                    },
-                )
+                # The overflow is resolved; a pending manual request is
+                # satisfied by the compaction we just performed.
+                record.compact_requested.clear()
                 request = self._build_request(record, CONTINUE_PROMPT, None)
                 continue
             if retryable and attempt < max_retries:
@@ -716,7 +920,13 @@ class RunManager:
             if (
                 record.approval_mode == "off"
                 and code not in _TERMINAL_FAILURE_CODES
-                and not (budget > 0 and (base_cost + total_cost) >= budget)
+                and not (
+                    budget > 0
+                    and (
+                        base_cost + total_cost + record.delegated_cost_usd
+                    )
+                    >= budget
+                )
             ):
                 replans += 1
                 self._publish(
@@ -761,6 +971,18 @@ class RunManager:
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
+            # Same boundary compaction as the fresh-run loop: a manual
+            # request that landed during the run, or a last-turn size over
+            # the threshold, is applied before the next attempt.
+            if record.compact_requested.is_set():
+                record.compact_requested.clear()
+                await self._auto_compact(record, "manual")
+            elif (
+                self.compactor is not None
+                and record.last_context_tokens > 0
+                and self.compactor.should_compact(record.last_context_tokens)
+            ):
+                await self._auto_compact(record, "proactive")
             kind, data = await self._consume_resume(record, request, state)
             if kind == "completed":
                 usage = data.get("usage") or {}
@@ -786,7 +1008,9 @@ class RunManager:
                     or len(outstanding) < prev_outstanding
                     or files_now > prev_files_written
                 )
-                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                over_budget = budget > 0 and (
+                    base_cost + total_cost + record.delegated_cost_usd
+                ) >= budget
                 if auto_continues >= max_continues or not made_progress or over_budget:
                     await self._finalize_completed(record, merged)
                     return
@@ -813,7 +1037,9 @@ class RunManager:
                 await self._finalize_cancelled(record)
                 return
             if code == "max_turns_exceeded":
-                over_budget = budget > 0 and (base_cost + total_cost) >= budget
+                over_budget = budget > 0 and (
+                    base_cost + total_cost + record.delegated_cost_usd
+                ) >= budget
                 if record.approval_mode == "off" and not over_budget:
                     replans += 1
                     self._publish(
@@ -854,6 +1080,19 @@ class RunManager:
                         record, code, err.get("message", "Run failed")
                     )
                 return
+            if code == "context_overflow":
+                # Same real compaction as the fresh-run loop: replace the
+                # bloated conversation before restarting from the continue
+                # prompt, so the retry does not overflow again.
+                if not await self._auto_compact(record, "overflow"):
+                    await self._finalize_failed(
+                        record, code, err.get("message", "Context overflow")
+                    )
+                    return
+                record.compact_requested.clear()
+                request = self._build_request(record, CONTINUE_PROMPT, None)
+                state = None
+                continue
             if retryable and attempt < max_retries:
                 attempt += 1
                 self.metrics.inc_retry()
@@ -887,7 +1126,13 @@ class RunManager:
             if (
                 record.approval_mode == "off"
                 and code not in _TERMINAL_FAILURE_CODES
-                and not (budget > 0 and (base_cost + total_cost) >= budget)
+                and not (
+                    budget > 0
+                    and (
+                        base_cost + total_cost + record.delegated_cost_usd
+                    )
+                    >= budget
+                )
             ):
                 replans += 1
                 self._publish(
@@ -984,6 +1229,25 @@ class RunManager:
                 record.turns_since_todo = 0
         elif name == EventName.TOOL_RESULT.value:
             self._mirror_tool_event(record, {"event": name, "data": data})
+            if data.get("name") == "delegate_task":
+                output = data.get("output")
+                if isinstance(output, str):
+                    try:
+                        output = json.loads(output)
+                    except (ValueError, TypeError):
+                        output = None
+                if isinstance(output, dict):
+                    usage = output.get("usage")
+                    if isinstance(usage, dict):
+                        record.delegated_input_tokens += int(
+                            usage.get("input_tokens") or 0
+                        )
+                        record.delegated_output_tokens += int(
+                            usage.get("output_tokens") or 0
+                        )
+                        record.delegated_cost_usd += float(
+                            usage.get("cost_usd") or 0.0
+                        )
         elif name == EventName.REASONING.value:
             # Persist reasoning to the JSONL transcript so it survives a view
             # remount (tab switch / reload). Without this the live reasoning is
@@ -1010,6 +1274,7 @@ class RunManager:
             if used:
                 record.last_context_tokens = used
             record.turns_since_todo += 1
+
 
     # ---- approval -------------------------------------------------------
 
@@ -1141,12 +1406,11 @@ class RunManager:
         duration = max(0.0, time.time() - (record.started_at or time.time()))
         usage = data.get("usage") or {}
         record.final_output = str(data.get("final_output") or "")
-        record.input_tokens = int(usage.get("input_tokens") or record.last_context_tokens or 0)
-        record.output_tokens = int(usage.get("output_tokens") or max(1, len(record.final_output) // 4))
-        record.cost_usd = float(
-            usage.get("cost_usd")
-            or _compute_cost(record.input_tokens, record.output_tokens, self.config)
-        )
+        (
+            record.input_tokens,
+            record.output_tokens,
+            record.cost_usd,
+        ) = _combined_usage(usage, record, self.config, record.final_output)
         record.state = "completed"
         self.metrics.inc_run_completed()
         self.metrics.add_usage(record.input_tokens, record.output_tokens, record.cost_usd)
@@ -1446,9 +1710,32 @@ def _parse_args(raw: Any) -> dict[str, Any]:
 
 
 def _compute_cost(input_tokens: int, output_tokens: int, config: AppConfig) -> float:
+    profile = resolve_profile(config, "primary")
     return (
-        input_tokens / 1_000_000 * config.llm.price_input_per_mtok
-        + output_tokens / 1_000_000 * config.llm.price_output_per_mtok
+        input_tokens / 1_000_000 * profile.price_input_per_mtok
+        + output_tokens / 1_000_000 * profile.price_output_per_mtok
+    )
+
+
+def _combined_usage(
+    usage: dict[str, Any],
+    record: RunRecord,
+    config: AppConfig,
+    final_output: str,
+) -> tuple[int, int, float]:
+    primary_input_tokens = int(
+        usage.get("input_tokens") or record.last_context_tokens or 0
+    )
+    primary_output_tokens = int(
+        usage.get("output_tokens") or max(1, len(final_output) // 4)
+    )
+    primary_cost = usage.get("cost_usd")
+    if primary_cost is None:
+        primary_cost = _compute_cost(primary_input_tokens, primary_output_tokens, config)
+    return (
+        primary_input_tokens + record.delegated_input_tokens,
+        primary_output_tokens + record.delegated_output_tokens,
+        float(primary_cost) + record.delegated_cost_usd,
     )
 
 

@@ -26,7 +26,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 from claudio_core.llm import openai_chat_completion
-from claudio_core.settings import AppConfig
+from claudio_core.settings import AppConfig, resolve_profile
 
 logger = logging.getLogger(__name__)
 
@@ -161,11 +161,14 @@ async def extract_learnings(
     if not digest.strip():
         return []
     prompt = _EXTRACT_PROMPT.format(digest=digest)
+    # One-shot utility call: route to the `fast` profile (falls back to the
+    # `llm` section when no fast profile is configured).
+    fast = resolve_profile(config, "fast")
     try:
         raw = await openai_chat_completion(
-            base_url=config.llm.base_url,
-            model=config.llm.model,
-            api_key=config.llm.api_key or "local",
+            base_url=fast.base_url,
+            model=fast.model,
+            api_key=fast.api_key or "local",
             messages=[
                 {
                     "role": "system",
@@ -175,7 +178,7 @@ async def extract_learnings(
             ],
             temperature=0.2,
             max_tokens=2048,
-            timeout=float(config.llm.timeout_seconds),
+            timeout=float(fast.timeout_seconds),
         )
     except Exception as exc:  # noqa: BLE001 - capture must never break the run
         logger.warning("learning extraction call failed: %s", exc)

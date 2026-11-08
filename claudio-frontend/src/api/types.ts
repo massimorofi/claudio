@@ -170,9 +170,31 @@ export interface SearchCfg {
   timeout_seconds: number
 }
 
+export interface ModelProfile {
+  label: string
+  provider: string
+  model: string
+  base_url: string | null
+  api_key: string
+  temperature: number
+  max_tokens: number
+  context_window: number
+  price_input_per_mtok: number
+  price_output_per_mtok: number
+  timeout_seconds: number
+}
+
+export interface RolesCfg {
+  primary: string | null
+  worker: string | null
+  fast: string | null
+}
+
 export interface AppConfig {
   server: ServerCfg
   llm: LlmCfg
+  model_profiles: Record<string, ModelProfile>
+  roles: RolesCfg
   agent: AgentCfg
   search: SearchCfg
   mcp: { servers: McpServerEntry[] }

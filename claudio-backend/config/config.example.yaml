@@ -34,6 +34,31 @@ llm:
   price_input_per_mtok: 0.0
   price_output_per_mtok: 0.0
 
+# --- Multi-LLM profiles and roles (optional) -------------------------------
+# The `llm` section above IS the implicit primary profile. Additional named
+# profiles go here; `roles` assigns each role to a profile. Any role left
+# unset (or pointing at nothing) falls back to the `llm` section, so a config
+# with no model_profiles/roles behaves exactly as a single-model setup.
+#
+# model_profiles:
+#   qwen-fast:
+#     label: "Qwen 3.5 30B (fast)"
+#     provider: openai
+#     model: qwen3-30b
+#     base_url: http://127.0.0.1:1235/v1
+#     api_key: local
+#     temperature: 0.3
+#     max_tokens: 8192
+#     context_window: 131072
+#     price_input_per_mtok: 0.2
+#     price_output_per_mtok: 0.6
+#     timeout_seconds: 120
+#
+# roles:
+#   primary: qwen-fast     # main agent (omit to use the `llm` section)
+#   worker: qwen-fast      # delegated subtasks via delegate_task
+#   fast: qwen-fast        # one-shot jobs (fixer, consolidation, learning)
+
 agent:
   name: claudio
   instructions_file: instructions.md
@@ -41,7 +66,7 @@ agent:
   max_turns: 150
   max_auto_continues: 10
   max_budget_usd: 100.0
-  approval_mode: 'off'
+  approval_mode: on_request
   # Inside the container the agent edits the bind-mounted /workspace.
   default_workspace_dir: /workspace
   workspace_allowed_roots:
@@ -58,7 +83,7 @@ agent:
       - read_file
       - list_dir
       - web_search
-      - spawn_subagent
+      - delegate_task
       - write_file
       - run_command
       - edit_file
@@ -66,7 +91,19 @@ agent:
       - rewind_files
       - todo_write
     disabled: []
-  subagents: {}
+  subagents:
+    code_worker:
+      description: "Implements a narrow, well-scoped coding task in the workspace"
+      instructions: >-
+        Complete only the requested task. Inspect relevant files first, make the
+        smallest necessary changes, and report files changed and checks run.
+        Do not delegate, broaden scope, or run unrelated commands.
+      tools:
+        - read_file
+        - write_file
+        - edit_file
+        - run_command
+      max_turns: 8
 
 search:
   provider: auto

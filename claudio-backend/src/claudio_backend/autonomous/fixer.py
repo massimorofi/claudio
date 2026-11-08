@@ -28,7 +28,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 from claudio_core.llm import openai_chat_completion
-from claudio_core.settings import AppConfig
+from claudio_core.settings import AppConfig, resolve_profile
 
 logger = logging.getLogger(__name__)
 
@@ -257,17 +257,20 @@ async def propose_fix(
             detail=issue.get("detail", "") or issue.get("summary", ""),
             tried=_format_tried(history),
         )
+        # One-shot utility call: route to the `fast` profile (falls back to the
+        # `llm` section when no fast profile is configured).
+        fast = resolve_profile(config, "fast")
         raw = await openai_chat_completion(
-            base_url=config.llm.base_url,
-            model=config.llm.model,
-            api_key=config.llm.api_key or "local",
+            base_url=fast.base_url,
+            model=fast.model,
+            api_key=fast.api_key or "local",
             messages=[
                 {"role": "system", "content": "You propose safe, specific Linux remediation commands and nothing else."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
             max_tokens=1024,
-            timeout=float(config.llm.timeout_seconds),
+            timeout=float(fast.timeout_seconds),
         )
         data = _extract_json(raw)
         command = str(data.get("command", "")).strip()

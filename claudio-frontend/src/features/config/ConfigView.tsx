@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, RotateCcw, Play, AlertTriangle, History } from 'lucide-react'
 import { api } from '../../api/client'
-import type { AppConfig, ConfigHistoryEntry, LlmTestResult } from '../../api/types'
+import type { AppConfig, ConfigHistoryEntry, LlmTestResult, ModelProfile } from '../../api/types'
 import ConnectionSection from './ConnectionSection'
 
 type SetField = <K extends keyof AppConfig>(k: K, v: AppConfig[K]) => void
@@ -21,7 +21,7 @@ const commandToString = (cmd: unknown): string =>
 const stringToCommand = (s: string): string[] => s.split(/\s+/).filter(Boolean)
 
 export default function ConfigView() {
-  const [tab, setTab] = useState<'connection' | 'llm' | 'agent' | 'mcp' | 'memory' | 'danger'>(
+  const [tab, setTab] = useState<'connection' | 'llm' | 'models' | 'agent' | 'mcp' | 'memory' | 'danger'>(
     'connection',
   )
   const [draft, setDraft] = useState<AppConfig | null>(null)
@@ -39,6 +39,8 @@ export default function ConfigView() {
       const cfg = configQ.data.config
       setDraft({
         ...cfg,
+        model_profiles: cfg.model_profiles ?? {},
+        roles: cfg.roles ?? { primary: null, worker: null, fast: null },
         mcp: {
           ...cfg.mcp,
           servers: (cfg.mcp.servers ?? []).map((s) => ({
@@ -62,16 +64,24 @@ export default function ConfigView() {
           })),
         },
       }
-      return api.put<{ restart_required: string[]; changed_keys: string[] }>('/config', payload)
+      return api.put<{ restart_required: string[]; changed_keys: string[]; warnings?: string[] }>(
+        '/config',
+        payload,
+      )
     },
     onSuccess: (res) => {
       const needs = (res.restart_required ?? []).length > 0
       setRestartNeeded(needs)
+      const warns = res.warnings ?? []
+      const base = needs
+        ? `Saved. Restart required for: ${(res.restart_required ?? []).join(', ')}`
+        : 'Saved.'
       setMessage({
-        kind: 'ok',
-        text: needs
-          ? `Saved. Restart required for: ${(res.restart_required ?? []).join(', ')}`
-          : 'Saved.',
+        kind: warns.length > 0 ? 'err' : 'ok',
+        text:
+          warns.length > 0
+            ? `${base} Warnings: ${warns.join(' ')}`
+            : base,
       })
       queryClient.invalidateQueries({ queryKey: ['config'] })
     },
@@ -118,7 +128,7 @@ export default function ConfigView() {
     <div className="flex h-full flex-col">
       <div className="border-b border-black/10 bg-white px-4 py-3">
         <div className="flex gap-1 overflow-x-auto">
-          {(['connection', 'llm', 'agent', 'mcp', 'memory', 'danger'] as const).map((t) => (
+          {(['connection', 'llm', 'models', 'agent', 'mcp', 'memory', 'danger'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -169,6 +179,9 @@ export default function ConfigView() {
         )}
         {tab === 'llm' && draft && (
           <LlmSection draft={draft} setDraft={set} testMut={testMut} />
+        )}
+        {tab === 'models' && draft && (
+          <ModelsSection draft={draft} setDraft={set} />
         )}
         {tab === 'agent' && draft && <AgentSection draft={draft} setDraft={set} />}
         {tab === 'mcp' && draft && <McpSection draft={draft} setDraft={set} />}
@@ -331,6 +344,290 @@ function LlmSection({
   )
 }
 
+function ModelsSection({
+  draft,
+  setDraft,
+}: {
+  draft: AppConfig
+  setDraft: SetField
+}) {
+  const profiles = draft.model_profiles ?? {}
+  const roles = draft.roles ?? { primary: null, worker: null, fast: null }
+  const [testResults, setTestResults] = useState<Record<string, LlmTestResult>>({})
+  const [testing, setTesting] = useState<string | null>(null)
+
+  const profileNames = Object.keys(profiles)
+
+  const setProfiles = (p: Record<string, ModelProfile>) => setDraft('model_profiles', p)
+
+  const patchProfile = (name: string, patch: Partial<ModelProfile>) =>
+    setProfiles({ ...profiles, [name]: { ...profiles[name], ...patch } })
+
+  const removeProfile = (name: string) => {
+    const next: Record<string, ModelProfile> = {}
+    for (const k of Object.keys(profiles)) if (k !== name) next[k] = profiles[k]
+    setProfiles(next)
+    // Drop any role that pointed at the removed profile so it falls back to llm.
+    const cleared = { ...roles }
+    ;(['primary', 'worker', 'fast'] as const).forEach((r) => {
+      if (cleared[r] === name) cleared[r] = null
+    })
+    setDraft('roles', cleared)
+  }
+
+  const addProfile = () => {
+    let name = 'profile'
+    let i = 1
+    while (name in profiles) {
+      i += 1
+      name = `profile-${i}`
+    }
+    setProfiles({
+      ...profiles,
+      [name]: {
+        label: name,
+        provider: 'openai',
+        model: '',
+        base_url: '',
+        api_key: 'local',
+        temperature: 0.2,
+        max_tokens: 8192,
+        context_window: 32768,
+        price_input_per_mtok: 0,
+        price_output_per_mtok: 0,
+        timeout_seconds: 120,
+      },
+    })
+  }
+
+  const testProfile = async (name: string) => {
+    const p = profiles[name]
+    setTesting(name)
+    try {
+      const res = await api.post<LlmTestResult>('/config/llm/test', {
+        llm: { base_url: p.base_url, model: p.model, api_key: p.api_key },
+      })
+      setTestResults((prev) => ({ ...prev, [name]: res }))
+    } catch (e) {
+      setTestResults((prev) => ({
+        ...prev,
+        [name]: { ok: false, error: (e as Error).message },
+      }))
+    } finally {
+      setTesting(null)
+    }
+  }
+
+  const setRole = (role: 'primary' | 'worker' | 'fast', value: string) =>
+    setDraft('roles', { ...roles, [role]: value || null })
+
+  const badRoles = (['primary', 'worker', 'fast'] as const).filter(
+    (r) => roles[r] && !(roles[r] as string in profiles),
+  )
+
+  const roleOptions = (current: string | null) => (
+    <>
+      <option value="">(fall back to llm section)</option>
+      {profileNames.map((n) => (
+        <option key={n} value={n}>
+          {profiles[n]?.label || n}
+        </option>
+      ))}
+      {current && !(current in profiles) && <option value={current}>{current} (missing)</option>}
+    </>
+  )
+
+  return (
+    <div className="max-w-3xl">
+      <div className="mb-4 rounded-lg border border-black/10 bg-black/[0.02] p-3">
+        <div className="mb-2 text-sm font-semibold text-black/70">Roles</div>
+        <p className="mb-3 text-xs text-black/50">
+          Assign a configured profile to each role. A role left on the fallback
+          uses the <code>llm</code> section, so a single-model setup needs none
+          of these.
+        </p>
+        <div className="grid grid-cols-1 gap-x-4 sm:grid-cols-3">
+          <Field label="Primary">
+            <select
+              className={inputCls}
+              value={roles.primary ?? ''}
+              onChange={(e) => setRole('primary', e.target.value)}
+            >
+              {roleOptions(roles.primary)}
+            </select>
+          </Field>
+          <Field label="Worker">
+            <select
+              className={inputCls}
+              value={roles.worker ?? ''}
+              onChange={(e) => setRole('worker', e.target.value)}
+            >
+              {roleOptions(roles.worker)}
+            </select>
+          </Field>
+          <Field label="Fast">
+            <select
+              className={inputCls}
+              value={roles.fast ?? ''}
+              onChange={(e) => setRole('fast', e.target.value)}
+            >
+              {roleOptions(roles.fast)}
+            </select>
+          </Field>
+        </div>
+        {badRoles.length > 0 && (
+          <div className="mt-2 flex items-center gap-2 text-xs text-amber-700">
+            <AlertTriangle size={14} />
+            Role(s) point at a profile that is not defined:{' '}
+            {badRoles.map((r) => roles[r]).join(', ')}
+          </div>
+        )}
+      </div>
+
+      {profileNames.length === 0 && (
+        <div className="mb-3 text-sm text-black/40">
+          No extra model profiles configured. The primary model is the{' '}
+          <code>llm</code> section.
+        </div>
+      )}
+
+      {profileNames.map((name) => {
+        const p = profiles[name]
+        const res = testResults[name]
+        return (
+          <div key={name} className="mb-3 rounded-lg border border-black/10 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="font-mono text-sm font-semibold text-black/70">{name}</span>
+              <button
+                onClick={() => removeProfile(name)}
+                className="text-xs text-red-500 hover:underline"
+              >
+                Remove
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-x-4 sm:grid-cols-2">
+              <Field label="Label">
+                <input
+                  className={inputCls}
+                  value={p.label}
+                  onChange={(e) => patchProfile(name, { label: e.target.value })}
+                />
+              </Field>
+              <Field label="Provider">
+                <input
+                  className={inputCls}
+                  value={p.provider}
+                  onChange={(e) => patchProfile(name, { provider: e.target.value })}
+                />
+              </Field>
+              <Field label="Model">
+                <input
+                  className={inputCls}
+                  value={p.model}
+                  onChange={(e) => patchProfile(name, { model: e.target.value })}
+                />
+              </Field>
+              <Field label="Base URL">
+                <input
+                  className={inputCls}
+                  value={p.base_url ?? ''}
+                  onChange={(e) => patchProfile(name, { base_url: e.target.value })}
+                />
+              </Field>
+              <Field label="API key" hint="Stored locally; never returned by the API.">
+                <input
+                  className={inputCls}
+                  type="password"
+                  value={p.api_key}
+                  onChange={(e) => patchProfile(name, { api_key: e.target.value })}
+                />
+              </Field>
+              <Field label="Context window">
+                <input
+                  className={inputCls}
+                  type="number"
+                  value={p.context_window}
+                  onChange={(e) => patchProfile(name, { context_window: Number(e.target.value) })}
+                />
+              </Field>
+              <Field label="Temperature">
+                <input
+                  className={inputCls}
+                  type="number"
+                  step="0.1"
+                  value={p.temperature}
+                  onChange={(e) => patchProfile(name, { temperature: Number(e.target.value) })}
+                />
+              </Field>
+              <Field label="Max tokens">
+                <input
+                  className={inputCls}
+                  type="number"
+                  value={p.max_tokens}
+                  onChange={(e) => patchProfile(name, { max_tokens: Number(e.target.value) })}
+                />
+              </Field>
+              <Field label="Timeout (s)">
+                <input
+                  className={inputCls}
+                  type="number"
+                  value={p.timeout_seconds}
+                  onChange={(e) => patchProfile(name, { timeout_seconds: Number(e.target.value) })}
+                />
+              </Field>
+              <Field label="Price input / Mtok (USD)">
+                <input
+                  className={inputCls}
+                  type="number"
+                  step="0.01"
+                  value={p.price_input_per_mtok}
+                  onChange={(e) =>
+                    patchProfile(name, { price_input_per_mtok: Number(e.target.value) })
+                  }
+                />
+              </Field>
+              <Field label="Price output / Mtok (USD)">
+                <input
+                  className={inputCls}
+                  type="number"
+                  step="0.01"
+                  value={p.price_output_per_mtok}
+                  onChange={(e) =>
+                    patchProfile(name, { price_output_per_mtok: Number(e.target.value) })
+                  }
+                />
+              </Field>
+            </div>
+            <button
+              onClick={() => testProfile(name)}
+              disabled={testing === name}
+              className="mt-2 flex items-center gap-2 rounded-lg border border-brand px-4 py-2 text-sm font-semibold text-brand disabled:opacity-50"
+            >
+              <Play size={16} /> Test this profile
+            </button>
+            {res && (
+              <div
+                className={`mt-2 text-sm ${res.ok ? 'text-green-700' : 'text-red-600'}`}
+              >
+                {res.ok
+                  ? `OK — ${res.latency_ms} ms`
+                  : `Failed: ${res.error}`}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      <button
+        onClick={addProfile}
+        className="rounded-lg border border-brand px-4 py-2 text-sm font-semibold text-brand"
+      >
+        Add model profile
+      </button>
+    </div>
+  )
+}
+
 function AgentSection({
   draft,
   setDraft,
@@ -350,7 +647,7 @@ function AgentSection({
     'web_search',
     'todo_write',
     'rewind_files',
-    'spawn_subagent',
+    'delegate_task',
   ]
 
   const toggleTool = (name: string) => {

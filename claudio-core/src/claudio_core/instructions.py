@@ -121,6 +121,41 @@ def render_mcp_block(mcp_entries: list[dict[str, Any]] | None) -> str:
     )
 
 
+def render_subagent_roster(config: AppConfig) -> str:
+    """Render the delegation roster + guidance for the primary's system prompt.
+
+    Lists each configured worker subagent (name, description, tools) so the
+    primary model knows what it can hand off, plus the rules for doing it
+    well. Returns "" when no subagents are configured, so a single-model
+    setup sees no delegation block at all.
+    """
+    subagents = getattr(config.agent, "subagents", None) or {}
+    if not subagents:
+        return ""
+    lines = []
+    for name, sub in subagents.items():
+        desc = (sub.description or "").strip() or "(no description)"
+        tools = ", ".join(sub.tools) if sub.tools else "(none)"
+        lines.append(f"- **{name}**: {desc} (tools: {tools})")
+    roster = "\n".join(lines)
+    return (
+        "# Delegation (worker subagents)\n\n"
+        "You can hand a well-scoped subtask to a cheaper worker model via the "
+        "`delegate_task` tool. The worker is a fresh, stateless agent: it sees "
+        "ONLY the task brief you write and nothing else.\n\n"
+        "Available workers:\n"
+        f"{roster}\n\n"
+        "Delegate mechanical, well-scoped subtasks: write this one script, "
+        "generate this one module, fetch and summarise this data, draft this "
+        "config file.\n\n"
+        "Keep for yourself: planning, architecture, multi-file changes, "
+        "debugging, and anything requiring real judgment.\n\n"
+        "Write self-contained task briefs — the worker has no other context. "
+        "After a delegation returns, REVIEW the output (read any file it wrote) "
+        "before building on it; cheap models make confident mistakes."
+    )
+
+
 def build_static_instructions(
     config: AppConfig,
     session_id: str,
@@ -166,6 +201,11 @@ def build_static_instructions(
     mcp_block = render_mcp_block(mcp_entries)
     if mcp_block:
         sections.append(mcp_block)
+
+    # Worker subagent roster + delegation guidance (only when subagents exist).
+    roster_block = render_subagent_roster(config)
+    if roster_block:
+        sections.append(roster_block)
 
     # Memory files.
     memory_files = discover_memory_files(workspace, Path(config_dir))

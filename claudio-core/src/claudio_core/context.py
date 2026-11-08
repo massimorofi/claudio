@@ -45,7 +45,7 @@ class ToolContext:
     # without ever creating the deliverable.
     deliverable_written: bool = False
     reads_since_write: int = 0
-    # Set by the run manager so tools (e.g. spawn_subagent) can build agents.
+    # Set by the run manager so tools (e.g. delegate_task) can build agents.
     agent_factory: Any = None
 
     @property

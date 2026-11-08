@@ -18,7 +18,7 @@ from claudio_core.compaction import Compactor
 from claudio_core.db import Database, utcnow
 from claudio_core.metrics import Metrics
 from claudio_core.session_store import SessionStore
-from claudio_core.settings import AppConfig, load_config
+from claudio_core.settings import AppConfig, load_config, resolve_profile
 
 from .engine import create_engine
 from .runs.manager import RunManager
@@ -66,7 +66,7 @@ class Supervisor:
             await self.db.fail_interrupted_runs()
             self.session_store = SessionStore(self.data_dir)
             self.compactor = Compactor(
-                context_window=self.config.agent.context_window,
+                context_window=resolve_profile(self.config, "fast").context_window,
                 reserve=self.config.agent.compaction_reserve,
             )
             # Restore persisted compaction circuit-breaker state so a session
@@ -157,7 +157,9 @@ class Supervisor:
         if self.engine:
             self.engine.config = self.config
         if self.compactor:
-            self.compactor.context_window = self.config.agent.context_window
+            self.compactor.context_window = resolve_profile(
+                self.config, "fast"
+            ).context_window
             self.compactor.reserve = self.config.agent.compaction_reserve
         # The autonomous components read config live; point them at the new one.
         if self.health_service:

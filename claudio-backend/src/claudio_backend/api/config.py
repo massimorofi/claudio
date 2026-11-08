@@ -18,6 +18,7 @@ from claudio_core.settings import (
     restart_required_for,
     restore_redacted_secrets,
     validate_candidate,
+    validate_role_references,
     write_config_atomic,
 )
 
@@ -106,6 +107,16 @@ async def put_config(request: Request, payload: dict) -> dict:
     changed = changed_keys(current, merged)
     required = restart_required_for(changed)
 
+    # Non-fatal: a role pointing at a profile that does not exist silently
+    # falls back to the primary model. Surface it so a typo is visible.
+    bad_roles = validate_role_references(validated)
+    warnings: list[str] = []
+    for role in bad_roles:
+        warnings.append(
+            f"roles.{role} references a profile that is not defined in "
+            f"model_profiles; it will fall back to the primary (llm) model."
+        )
+
     # Persist atomically + history.
     write_config_atomic(supervisor.config_path, merged)
     await supervisor.db.add_config_version(merged, changed)
@@ -116,6 +127,7 @@ async def put_config(request: Request, payload: dict) -> dict:
         "generation": supervisor.config_generation,
         "changed_keys": changed,
         "restart_required": required,
+        "warnings": warnings,
     }
 
 

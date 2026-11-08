@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -42,6 +43,7 @@ from typing import Any, AsyncIterator
 from google.adk.agents import LlmAgent
 from google.adk.apps import App
 from google.adk.apps._configs import ResumabilityConfig
+from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from google.adk.tools.function_tool import FunctionTool
@@ -63,7 +65,13 @@ from claudio_core.instructions import (
     render_mcp_block,
     render_nudges,
 )
-from claudio_core.settings import AppConfig, MCPServerEntry
+from claudio_core.settings import (
+    AppConfig,
+    LLMConfig,
+    MCPServerEntry,
+    SubagentConfig,
+    resolve_profile,
+)
 from claudio_core.skill_loader import build_skill_functions, scan_skills
 from claudio_core.tools.registry import TOOL_FUNCTIONS, TOOL_META, needs_approval_for
 
@@ -350,9 +358,31 @@ def is_model_response(event: Any) -> bool:
     return True
 
 
+def _clip_subagent_output(text: str, max_chars: int) -> str:
+    limit = max(1, int(max_chars))
+    if len(text) <= limit:
+        return text
+    marker = f"[Worker output truncated at {limit} characters.]"
+    if limit <= len(marker):
+        return marker[:limit]
+    return text[: limit - len(marker) - 2] + "\n\n" + marker
+
+
 # --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
+
+
+def adk_db_path(workspace_id: str, session_id: str) -> Path:
+    """Where ADK keeps its own session state for one Claudio session.
+
+    Split out from :func:`adk_state_path` so callers that hold only the
+    ``workspace_id``/``session_id`` pair (manual compaction, for instance)
+    can locate the same SQLite file the engine opened during a run, without
+    constructing a full :class:`RunRequest`.
+    """
+    parent = workspace_state_dir(workspace_id)
+    return parent / f"adk-{session_id}.db"
 
 
 def adk_state_path(request: RunRequest) -> Path:
@@ -364,8 +394,7 @@ def adk_state_path(request: RunRequest) -> Path:
     and opens a SQLite file in it; without it the first ``SqliteSessionService``
     open fails with "unable to open database file".
     """
-    parent = workspace_state_dir(request.workspace_id)
-    return parent / f"adk-{request.session_id}.db"
+    return adk_db_path(request.workspace_id, request.session_id)
 
 
 def _sanitize_mcp_prefix(raw: str) -> str:
@@ -467,6 +496,10 @@ class AdkEngine:
             if name not in TOOL_FUNCTIONS:
                 continue
             needs = needs_approval_for(TOOL_META[name], request.tools.approval_mode)
+            if name == "delegate_task":
+                needs = self._delegation_needs_approval(
+                    request.tools.approval_mode
+                )
             tools.append(make_adk_tool(name, ctx, require_confirmation=needs))
 
         # Skills use a two-tier loading strategy so the always-on prompt stays
@@ -526,6 +559,18 @@ class AdkEngine:
             tools=tools,
         )
 
+    def _delegation_needs_approval(self, approval_mode: str) -> bool:
+        if approval_mode == "always":
+            return True
+        if approval_mode != "on_request":
+            return False
+        return any(
+            TOOL_META[name].is_destructive
+            for subagent in self.config.agent.subagents.values()
+            for name in subagent.tools
+            if name in TOOL_META
+        )
+
     def _app(self, app_name: str, agent: LlmAgent) -> App:
         return App(
             name=app_name,
@@ -533,10 +578,12 @@ class AdkEngine:
             resumability_config=ResumabilityConfig(is_resumable=True),
         )
 
-    def _cost(self, input_tokens: int, output_tokens: int) -> float:
+    def _cost(
+        self, input_tokens: int, output_tokens: int, spec: ModelSpec
+    ) -> float:
         return (
-            input_tokens / 1_000_000 * self.config.llm.price_input_per_mtok
-            + output_tokens / 1_000_000 * self.config.llm.price_output_per_mtok
+            input_tokens / 1_000_000 * spec.price_input_per_mtok
+            + output_tokens / 1_000_000 * spec.price_output_per_mtok
         )
 
     def _make_context(self, request: RunRequest) -> ToolContext:
@@ -549,7 +596,207 @@ class AdkEngine:
             workspace_id=request.workspace_id,
             workspace_state_dir=workspace_state_dir(request.workspace_id),
             run_id=request.run_id,
+            # The delegate_task tool calls this to spin up a stateless worker
+            # sub-agent on the worker profile. Captured per run so the worker
+            # inherits this run's workspace and identity.
+            agent_factory=lambda **kw: self._run_subagent(request=request, **kw),
         )
+
+    # -- sub-agents (delegation) -----------------------------------------
+
+    def _subagent_instruction(self, sub: SubagentConfig) -> str:
+        """Build the worker's system instruction from its SubagentConfig.
+
+        Prefers inline ``instructions``; falls back to reading
+        ``instructions_file`` (resolved against the backend base directory).
+        A short preamble reinforces the stateless contract: the worker sees
+        only the task brief and cannot ask follow-up questions.
+        """
+        base = ""
+        if sub.instructions:
+            base = sub.instructions
+        elif sub.instructions_file:
+            path = Path(sub.instructions_file)
+            if not path.is_absolute():
+                backend_base = Path(__file__).resolve().parents[2]  # claudio-backend
+                path = backend_base / sub.instructions_file
+            try:
+                base = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning(
+                    "subagent instructions_file %s unreadable: %s",
+                    sub.instructions_file,
+                    exc,
+                )
+                base = ""
+        preamble = (
+            "You are a focused worker agent. You receive a single, "
+            "self-contained task brief and must complete it using only the "
+            "tools you have been given. You have no conversation history and "
+            "cannot ask questions: if the brief is ambiguous, make the most "
+            "reasonable interpretation and proceed. Do the work, then return "
+            "the result as your final message. Do not delegate further."
+        )
+        if base:
+            return preamble + "\n\n" + base
+        return preamble
+
+    async def _run_subagent(
+        self, *, request: RunRequest, agent: str, task: str
+    ) -> dict[str, Any]:
+        """Build and drive a stateless worker sub-agent on the worker profile.
+
+        The worker runs in the same workspace as the primary (so it can write
+        files the primary then reviews) but with its own in-memory session,
+        its own turn budget, and approval OFF -- the human approved the work
+        order at delegation time, not each nested call inside it.
+
+        Returns ``{"ok": True, "output": str, "usage": {...}}`` on success,
+        or ``{"ok": False, "error": str}`` on failure.
+        """
+        from google.adk.sessions.in_memory_session_service import InMemorySessionService
+
+        sub = self.config.agent.subagents.get(agent)
+        if sub is None:
+            return {"ok": False, "error": f"unknown subagent '{agent}'"}
+
+        profile = resolve_profile(self.config, "worker")
+        if not profile.model:
+            return {"ok": False, "error": "worker profile has no model configured"}
+
+        worker_ctx = ToolContext(
+            config=self.config,
+            session_id=f"{request.session_id}:sub:{agent}",
+            workspace=request.workspace,
+            approval_mode="off",
+            db=self.db,
+            workspace_id=request.workspace_id,
+            run_id=request.run_id,
+        )
+        tools: list[Any] = []
+        for name in (sub.tools or []):
+            if name not in TOOL_FUNCTIONS:
+                valid_names = ", ".join(sorted(TOOL_FUNCTIONS))
+                return {
+                    "ok": False,
+                    "error": (
+                        f"worker '{agent}' has unknown tool '{name}'. "
+                        f"Valid tools: {valid_names}"
+                    ),
+                }
+            if name == "delegate_task":
+                return {
+                    "ok": False,
+                    "error": f"worker '{agent}' cannot delegate recursively",
+                }
+            tools.append(make_adk_tool(name, worker_ctx, require_confirmation=False))
+
+        max_tokens = int(profile.max_tokens) or LLMConfig.model_fields[
+            "max_tokens"
+        ].default
+        spec = ModelSpec(
+            model=profile.model,
+            base_url=profile.base_url,
+            api_key=profile.api_key or "local",
+            temperature=float(profile.temperature),
+            max_tokens=min(max_tokens, profile.context_window),
+            timeout_seconds=float(profile.timeout_seconds),
+        )
+        worker_agent = LlmAgent(
+            name=f"worker_{agent}",
+            instruction=self._subagent_instruction(sub),
+            model=self._model(spec),
+            tools=tools,
+        )
+        app = App(name=f"claudio-sub-{agent}", root_agent=worker_agent)
+        session_service = InMemorySessionService()
+        sub_session_id = f"sub-{request.run_id}-{agent}"
+        await session_service.create_session(
+            app_name=app.name, user_id=request.session_id, session_id=sub_session_id
+        )
+        runner = Runner(app=app, session_service=session_service)
+        new_message = types.Content(role="user", parts=[types.Part(text=task)])
+
+        max_turns = int(sub.max_turns) or 30
+        timeout = float(profile.timeout_seconds) or 300.0
+
+        async def _collect() -> tuple[str, int, int, int, bool]:
+            final_text = ""
+            input_tokens = 0
+            output_tokens = 0
+            turns = 0
+            turn_limit_reached = False
+            agen = runner.run_async(
+                user_id=request.session_id,
+                session_id=sub_session_id,
+                new_message=new_message,
+            )
+            try:
+                async for event in agen:
+                    tin, tout = usage_from_event(event)
+                    input_tokens += tin
+                    output_tokens += tout
+                    for evt in translate_event(event):
+                        if evt["event"] == EventName.TOKEN.value:
+                            final_text += evt["data"]["text"]
+                    if is_model_response(event):
+                        turns += 1
+                        is_final = getattr(event, "is_final_response", None)
+                        if callable(is_final) and is_final():
+                            break
+                        if turns >= max_turns:
+                            turn_limit_reached = True
+                            await agen.aclose()
+                            break
+            finally:
+                try:
+                    await agen.aclose()
+                except Exception:  # noqa: BLE001 - best-effort close
+                    pass
+            return final_text, input_tokens, output_tokens, turns, turn_limit_reached
+
+        try:
+            final_text, input_tokens, output_tokens, turns, turn_limit_reached = (
+                await asyncio.wait_for(_collect(), timeout)
+            )
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "error": f"worker '{agent}' timed out after {timeout}s",
+            }
+        except Exception as exc:  # noqa: BLE001 - surfaced to the primary model
+            logger.exception("subagent '%s' run failed", agent)
+            return {"ok": False, "error": f"worker '{agent}' run failed: {exc}"}
+
+        cost = (
+            input_tokens / 1_000_000 * profile.price_input_per_mtok
+            + output_tokens / 1_000_000 * profile.price_output_per_mtok
+        )
+        final_text = _clip_subagent_output(
+            final_text, self.config.agent.max_output_chars
+        )
+        if turn_limit_reached:
+            return {
+                "ok": False,
+                "output": final_text,
+                "error": f"worker '{agent}' reached its {max_turns}-turn limit",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cost_usd": cost,
+                    "turns": turns,
+                },
+            }
+        return {
+            "ok": True,
+            "output": final_text,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": cost,
+                "turns": turns,
+            },
+        }
 
     # -- MCP -------------------------------------------------------------
 
@@ -728,6 +975,102 @@ class AdkEngine:
     async def cancel(self, run_id: str) -> None:
         self._cancelled.add(run_id)
 
+    # -- conversation access (for manual compaction) ---------------------
+
+    async def get_conversation_items(
+        self, session_id: str, workspace_id: str
+    ) -> list[dict[str, Any]]:
+        """Read the model-facing conversation as OpenAI-style items.
+
+        Converts the ADK session's events into the ``{role, content}`` shape
+        that :func:`claudio_core.compaction.render_items` expects, so a
+        session can be summarised without the caller touching ADK types.
+        Returns an empty list when there is no ADK session yet.
+        """
+        session_service = SqliteSessionService(
+            db_path=str(adk_db_path(workspace_id, session_id))
+        )
+        try:
+            session = await session_service.get_session(
+                app_name=f"claudio-{session_id}",
+                user_id=session_id,
+                session_id=session_id,
+            )
+        finally:
+            await session_service.close()
+        if session is None:
+            return []
+        items: list[dict[str, Any]] = []
+        for event in session.events:
+            content = getattr(event, "content", None)
+            if content is None:
+                continue
+            parts = getattr(content, "parts", None) or []
+            blocks: list[dict[str, Any]] = []
+            for part in parts:
+                text = getattr(part, "text", None)
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                elif getattr(part, "function_call", None) is not None:
+                    fc = part.function_call
+                    blocks.append(
+                        {"type": "tool_use", "name": getattr(fc, "name", "?")}
+                    )
+                elif getattr(part, "function_response", None) is not None:
+                    blocks.append({"type": "tool_result"})
+            if not blocks:
+                continue
+            author = getattr(event, "author", "user") or "user"
+            role = "user" if author == "user" else "assistant"
+            items.append({"role": role, "content": blocks})
+        return items
+
+    async def replace_conversation(
+        self, session_id: str, workspace_id: str, summary: str
+    ) -> None:
+        """Replace the model-facing conversation with a single summary turn.
+
+        Drops the ADK session's accumulated events and seeds a fresh session
+        with the summary as the only prior turn, so the next run starts from
+        the compacted context. This is the "compact-and-replace" the manual
+        compact button promises: the model no longer sees the long transcript,
+        only what the summariser preserved.
+        """
+        app_name = f"claudio-{session_id}"
+        session_service = SqliteSessionService(
+            db_path=str(adk_db_path(workspace_id, session_id))
+        )
+        try:
+            try:
+                await session_service.delete_session(
+                    app_name=app_name, user_id=session_id, session_id=session_id
+                )
+            except Exception:  # noqa: BLE001 - deleting an absent session is fine
+                pass
+            session = await session_service.create_session(
+                app_name=app_name, user_id=session_id, session_id=session_id
+            )
+            event = Event(
+                invocation_id=f"compact-{uuid.uuid4().hex}",
+                author="user",
+                content=types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            text=(
+                                "[Conversation summary — earlier turns were "
+                                "compacted to save context]\n"
+                                + summary
+                            )
+                        )
+                    ],
+                ),
+            )
+            await session_service.append_event(session=session, event=event)
+            await session_service.flush()
+        finally:
+            await session_service.close()
+
     # -- the shared drive loop -------------------------------------------
 
     async def _drive(
@@ -810,7 +1153,9 @@ class AdkEngine:
                                 "usage": {
                                     "input_tokens": input_tokens,
                                     "output_tokens": output_tokens,
-                                    "cost_usd": self._cost(input_tokens, output_tokens),
+                                    "cost_usd": self._cost(
+                                        input_tokens, output_tokens, request.model
+                                    ),
                                 },
                                 "turns": turns,
                             },
@@ -838,7 +1183,9 @@ class AdkEngine:
                 "usage": {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
-                    "cost_usd": self._cost(input_tokens, output_tokens),
+                    "cost_usd": self._cost(
+                        input_tokens, output_tokens, request.model
+                    ),
                 },
                 "turns": turns,
             },
@@ -908,4 +1255,3 @@ __all__ = [
     "adk_state_path",
     "CONFIRMATION_TOOL",
 ]
-

@@ -22,6 +22,8 @@ export interface UseChatResult {
   compactSession: () => Promise<{
     ok: boolean
     requested?: boolean
+    compacted?: boolean
+    reason?: string
     used_tokens?: number
     free_tokens?: number
     error?: string
@@ -370,6 +372,8 @@ export function useChat(
       const res = await api.post<{
         ok: boolean
         requested?: boolean
+        compacted?: boolean
+        reason?: string
         used_tokens?: number
         free_tokens?: number
         error?: string
@@ -381,6 +385,8 @@ export function useChat(
       return {
         ok: res.ok,
         requested: res.requested,
+        compacted: res.compacted,
+        reason: res.reason,
         used_tokens: res.used_tokens,
         free_tokens: res.free_tokens,
         error: res.error,
