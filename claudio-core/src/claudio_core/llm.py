@@ -61,8 +61,8 @@ async def openai_chat_completion(
             resp = await client.post(url, json=payload, headers=headers)
             # gpt-5/6-class reasoning models reject ``max_tokens`` and require
             # ``max_completion_tokens``. When the endpoint says so explicitly,
-            # rename the field and resend once.
-            if resp.status_code == 400 and "max_completion_tokens" in resp.text:
+            # rename the field and resend exactly once.
+            if resp.status_code == 400 and _rejects_max_tokens(resp):
                 payload["max_completion_tokens"] = payload.pop("max_tokens")
                 resp = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
@@ -88,6 +88,37 @@ def _join(base_url: str) -> str:
     if base.endswith("/v1"):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
+
+
+def _rejects_max_tokens(resp: httpx.Response) -> bool:
+    """Return True only when the endpoint explicitly rejects ``max_tokens``.
+
+    Two signals count as an explicit rejection:
+
+    * a structured OpenAI-style error naming ``max_tokens`` as the rejected
+      parameter -- ``{"error": {"param": "max_tokens", ...}}``; or
+    * a clear message that names ``max_completion_tokens`` as the field the
+      endpoint wants used instead.
+
+    Everything else -- a generic 400, a complaint about some other
+    parameter, an unparseable body -- returns ``False`` so the caller
+    surfaces the original error instead of masking it with a retry. This
+    keeps the retry narrow: it fires on the one incompatibility it fixes
+    and never on an unrelated failure.
+    """
+    text = resp.text or ""
+    if "max_completion_tokens" in text:
+        return True
+    try:
+        data = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    error = data.get("error")
+    if isinstance(error, dict) and error.get("param") == "max_tokens":
+        return True
+    return False
 
 
 def _extract_text(data: dict[str, Any]) -> str:
