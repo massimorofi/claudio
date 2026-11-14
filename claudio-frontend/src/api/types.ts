@@ -53,6 +53,7 @@ export interface LlmCfg {
   base_url: string
   temperature: number
   max_tokens: number
+  context_window: number | null
   fallback_model: string | null
   timeout_seconds: number
   retry_attempts: number

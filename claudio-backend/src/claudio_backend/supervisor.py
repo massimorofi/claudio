@@ -71,11 +71,16 @@ class Supervisor:
                 context_window=resolve_profile(self.config, "fast").context_window,
                 reserve=self.config.agent.compaction_reserve,
             )
-            # Restore persisted compaction circuit-breaker state so a session
-            # that tripped the breaker before a restart stays disabled until the
-            # operator clears it. Seed before any run can start.
-            for sid in await self.db.list_compaction_disabled_session_ids():
-                self.compactor.disable(sid)
+            # The persisted compaction circuit-breaker state is intentionally
+            # NOT restored on startup. The breaker exists to stop a broken
+            # summariser from looping, but a restart is exactly the moment to
+            # give the summariser a fresh chance -- carrying a tripped breaker
+            # across restarts left sessions permanently stuck with auto-
+            # compaction off ("auto off" in the gauge) with no way back short
+            # of a DB edit. Overflow is now prevented independently by the
+            # engine's per-request context guard, so a session that trips the
+            # breaker mid-run degrades to truncation instead of dying, and a
+            # restart clears the breaker outright.
             # The engine is the single ADK-aware component; the run manager
             # drives it through the framework-free RunEngine protocol.
             self.engine = create_engine(self.config, self.db)

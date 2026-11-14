@@ -298,6 +298,17 @@ function LlmSection({
             onChange={(e) => upd({ max_tokens: Number(e.target.value) })}
           />
         </Field>
+        <Field
+          label="Context window"
+          hint="Total tokens the model can hold (input + output). Set to your server's real limit; requests are kept under it automatically."
+        >
+          <input
+            className={inputCls}
+            type="number"
+            value={llm.context_window ?? draft.agent.context_window}
+            onChange={(e) => upd({ context_window: Number(e.target.value) })}
+          />
+        </Field>
         <Field label="Timeout (s)">
           <input
             className={inputCls}

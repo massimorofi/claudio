@@ -73,9 +73,10 @@ services:
       start_period: 30s
       retries: 5
     networks: [claudio-net]
-    # No published ports by default. For direct debugging, uncomment:
-    # ports:
-    #   - "127.0.0.1:8100:8100"
+    # Published to the host so the Clams orchestrator (running on the host)
+    # can reach the agent at 127.0.0.1:8100.
+    ports:
+      - "127.0.0.1:8100:8100"
 
   # ------------------------------------------------------------------ web ----
   web:

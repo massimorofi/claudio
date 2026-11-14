@@ -65,6 +65,7 @@ from claudio_core.instructions import (
     render_mcp_block,
     render_nudges,
 )
+from claudio_core.recovery import is_context_overflow
 from claudio_core.settings import (
     AppConfig,
     LLMConfig,
@@ -86,6 +87,152 @@ CONFIRMATION_TOOL = "adk_request_confirmation"
 # give it a more forgiving budget so a slow first connect does not drop the
 # server from the catalog.
 MCP_CONNECT_TIMEOUT_SECONDS = 30.0
+
+# --------------------------------------------------------------------------
+# Context guard: the always-on "prevent, don't react" truncation
+#
+# The summary compactor is the meaning-preserving compressor, but it runs at
+# the run boundary and can only see the *previous* turn's reported size -- a
+# single large tool result (a big file read, a long command dump) can push the
+# next request past the model's hard context ceiling before any check fires.
+# This guard closes that gap: it runs immediately before EVERY model call and
+# truncates the request contents so the prompt can never exceed the window.
+# It is deliberately independent of the compactor and its circuit breaker --
+# even with compaction disabled, the request still fits.
+# --------------------------------------------------------------------------
+
+# Conservative chars-per-token for the size estimate. The "~4 chars/token" prose
+# heuristic badly undercounts JSON/code/tool output (~2.4 measured); under-
+# counting lets an over-long request through, which is the overflow we are
+# preventing. We cost low so the estimate OVER-counts real tokens: over-
+# truncating is a soft, recoverable loss; overflow is a hard failure.
+_GUARD_CHARS_PER_TOKEN = 2.4
+# Never drop the conversation below this many recent turns, however tight the
+# budget -- a one-line window leaves the model with nothing to act on.
+_GUARD_MIN_KEEP_TURNS = 4
+
+
+def _turn_text(content: Any) -> str:
+    """Flatten one ADK ``Content`` turn to plain text for token costing."""
+    chunks: list[str] = []
+    for part in getattr(content, "parts", None) or []:
+        text = getattr(part, "text", None)
+        if text:
+            chunks.append(text)
+        fcall = getattr(part, "function_call", None)
+        if fcall is not None:
+            try:
+                chunks.append(json.dumps(getattr(fcall, "args", None) or {}, ensure_ascii=False))
+            except (TypeError, ValueError):
+                pass
+        fresp = getattr(part, "function_response", None)
+        if fresp is not None:
+            try:
+                chunks.append(json.dumps(getattr(fresp, "response", None) or {}, ensure_ascii=False))
+            except (TypeError, ValueError):
+                pass
+    return " ".join(chunks)
+
+
+def _turn_cost(content: Any) -> int:
+    """Estimated token cost of one content turn (over-counts, never under)."""
+    return max(1, int(len(_turn_text(content)) // _GUARD_CHARS_PER_TOKEN))
+
+
+def _is_function_response_turn(content: Any) -> bool:
+    """True when this turn carries a tool response (cannot start a window)."""
+    for part in getattr(content, "parts", None) or []:
+        if getattr(part, "function_response", None) is not None:
+            return True
+    return False
+
+
+def _fixed_overhead_tokens(llm_request: Any) -> int:
+    """Estimate the request overhead that is NOT in ``contents``.
+
+    The system instruction and the tool declarations consume the context
+    window too, but the guard only truncates ``contents`` -- so their cost
+    must be subtracted from the budget first, or a large instruction/tool set
+    would overflow even a "fitting" contents slice. The tool *declarations*
+    (the JSON function schemas actually sent to the model) live in
+    ``config.tools``; ``tools_dict`` holds the Python tool objects and is not
+    what the model sees, so we cost the declarations.
+    """
+    chars = 0
+    config = getattr(llm_request, "config", None)
+    if config is None:
+        return 0
+    system_instruction = getattr(config, "system_instruction", None)
+    if system_instruction is not None:
+        chars += len(str(system_instruction))
+    tools = getattr(config, "tools", None)
+    if tools:
+        try:
+            dumped = [
+                t.model_dump(exclude_none=True) if hasattr(t, "model_dump") else t
+                for t in tools
+            ]
+            chars += len(json.dumps(dumped, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            # Unserialisable tool set: assume a generous fixed cost rather
+            # than zero, so an unexpected shape cannot silently overflow.
+            chars += 4000
+    return int(chars // _GUARD_CHARS_PER_TOKEN)
+
+
+def make_context_guard(context_window: int, max_output_tokens: int, reserve: int):
+    """Build a ``before_model_callback`` that keeps the request under the window.
+
+    Keeps the system instruction (untouched, it lives in ``config``) and the
+    most recent turns that fit ``context_window - response_room - fixed``,
+    dropping the oldest. The kept window never begins on an orphaned tool
+    response (its matching call was dropped with the head). Returns ``None``
+    so the (possibly trimmed) request proceeds; on any internal error it
+    passes the request through unchanged -- a broken guard must not break a
+    run that would otherwise have fit.
+    """
+    response_room = max(int(max_output_tokens), int(reserve))
+
+    def _guard(_callback_context: Any, llm_request: Any):
+        try:
+            contents = list(getattr(llm_request, "contents", None) or [])
+            if not contents:
+                return None
+            fixed = _fixed_overhead_tokens(llm_request)
+            budget = context_window - response_room - fixed
+            if budget < _GUARD_MIN_KEEP_TURNS:
+                budget = _GUARD_MIN_KEEP_TURNS
+            total = sum(_turn_cost(c) for c in contents)
+            if total <= budget:
+                return None
+            kept: list[Any] = []
+            spent = 0
+            for content in reversed(contents):
+                cost = _turn_cost(content)
+                if spent + cost > budget and kept:
+                    break
+                kept.insert(0, content)
+                spent += cost
+            # Never begin the kept window with a tool response whose call was
+            # dropped from the head -- that is itself invalid input.
+            while kept and _is_function_response_turn(kept[0]):
+                kept.pop(0)
+            if len(kept) != len(contents):
+                logger.warning(
+                    "context guard trimmed request contents %d -> %d turns "
+                    "(est %d tokens over budget %d)",
+                    len(contents),
+                    len(kept),
+                    total,
+                    budget,
+                )
+            llm_request.contents = kept
+            return None
+        except Exception as exc:  # noqa: BLE001 - a broken guard passes through
+            logger.error("context guard failed, passing request through: %s", exc)
+            return None
+
+    return _guard
 
 
 # --------------------------------------------------------------------------
@@ -569,6 +716,11 @@ class AdkEngine:
             instruction=_instruction_provider,
             model=self._model(request.model),
             tools=tools,
+            before_model_callback=make_context_guard(
+                context_window=int(request.model.context_window),
+                max_output_tokens=int(request.model.max_tokens),
+                reserve=int(self.config.agent.compaction_reserve),
+            ),
         )
 
     def _delegation_needs_approval(self, approval_mode: str) -> bool:
@@ -734,6 +886,11 @@ class AdkEngine:
             instruction=self._subagent_instruction(sub),
             model=self._model(spec),
             tools=tools,
+            before_model_callback=make_context_guard(
+                context_window=int(profile.context_window),
+                max_output_tokens=int(spec.max_tokens),
+                reserve=int(self.config.agent.compaction_reserve),
+            ),
         )
         app = App(name=f"claudio-sub-{agent}", root_agent=worker_agent)
         session_service = InMemorySessionService()
@@ -1234,12 +1391,21 @@ def _failed(run_id: str, code: str, message: str, retryable: bool) -> dict[str, 
 def _classify_engine_error(exc: Exception) -> tuple[str, bool]:
     """Map an engine exception to ``(code, retryable)``.
 
-    Everything is a generic retryable ``engine_error`` except the failures
-    that replanning and retrying cannot fix: a rejected credential. Surfacing
-    an auth failure as non-retryable matters because approval-off mode keeps
-    re-running the agent on any recoverable failure -- looping on a bad API
-    key would spin forever.
+    A context overflow is surfaced as ``context_overflow`` (non-retryable as
+    a blind retry: the same bloated prompt would overflow again) so the run
+    manager's overflow recovery -- summarise, replace, restart -- fires.
+    This must be checked before the generic fallthrough: local servers word
+    the overflow 400 in many different ways, and treating it as a generic
+    ``engine_error`` left the run looping on the same oversized prompt.
+
+    Everything else is a generic retryable ``engine_error`` except the
+    failures that replanning and retrying cannot fix: a rejected credential.
+    Surfacing an auth failure as non-retryable matters because approval-off
+    mode keeps re-running the agent on any recoverable failure -- looping on
+    a bad API key would spin forever.
     """
+    if is_context_overflow(exc):
+        return "context_overflow", False
     msg = str(exc).lower()
     if (
         "401" in msg

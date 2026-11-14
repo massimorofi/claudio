@@ -429,6 +429,46 @@ def make_input_filter(
     return sanitize
 
 
+# Substrings that mark a provider error as a context-window overflow. Kept
+# deliberately broad: an overflow we fail to recognise is a hard run death,
+# while a false positive only triggers one extra (harmless) compaction pass.
+# The list spans the wording of the servers we actually run against -- the
+# OpenAI/vLLM family ("maximum context length", "reduce the length"), the
+# llama.cpp/HF family ("prompt is too long") and the halogen family
+# ("the prompt does not fit ... N tokens over ... raise the context").
+_OVERFLOW_MARKERS = (
+    "context length",
+    "maximum context",
+    "context_window",
+    "context size",
+    "context overflow",
+    "exceeds the context",
+    "exceeds context",
+    "beyond the context",
+    "context limit",
+    "prompt is too long",
+    "input is too long",
+    "too many tokens",
+    "reduce the length",
+    "does not fit",
+    "tokens over",
+    "raise the context",
+    "shorten the prompt",
+)
+
+
+def is_context_overflow(exc_or_text: Any) -> bool:
+    """Whether an exception (or its message) is a context-window overflow.
+
+    Shared by the engine's error classification and the run manager so both
+    agree on what an overflow looks like. Different local servers word the
+    same 400 very differently, so we match on a broad set of phrases rather
+    than a single canonical string.
+    """
+    text = str(exc_or_text).lower()
+    return any(marker in text for marker in _OVERFLOW_MARKERS)
+
+
 def _closest(name: str, candidates: list[str]) -> str | None:
     """Cheapest useful suggestion: substring first, then shared-prefix."""
     low = name.lower()
@@ -478,6 +518,7 @@ def format_tool_error(args: ToolErrorFormatterArgs) -> str | None:
 __all__ = [
     "make_input_filter",
     "format_tool_error",
+    "is_context_overflow",
     "TruncationTally",
     "CallModelData",
     "ModelInputData",

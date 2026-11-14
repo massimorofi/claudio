@@ -663,6 +663,7 @@ class RunManager:
             fallback_model=self.config.llm.fallback_model,
             price_input_per_mtok=profile.price_input_per_mtok,
             price_output_per_mtok=profile.price_output_per_mtok,
+            context_window=int(profile.context_window),
         )
 
     def _model_spec_for_role(

@@ -38,6 +38,12 @@ class ModelSpec:
     fallback_model: str | None = None
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0
+    # The model's real context window. The engine needs it to keep every
+    # request under the hard limit (the context guard truncates the prompt to
+    # fit); without it the only overflow defence is the reactive one, which
+    # cannot help when a single large tool result jumps the prompt past the
+    # ceiling between two proactive checks.
+    context_window: int = 32768
 
 
 @dataclass(frozen=True)

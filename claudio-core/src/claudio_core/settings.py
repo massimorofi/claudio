@@ -79,6 +79,11 @@ class LLMConfig(BaseModel):
     base_url: str | None = "http://127.0.0.1:1234/v1"
     temperature: float = 0.2
     max_tokens: int = 16384
+    # The primary model's real context window. Editable in the LLM section so
+    # it sits beside the other model parameters. ``None`` means "not set here"
+    # and falls back to ``agent.context_window`` (see :func:`resolve_profile`),
+    # so existing configs that only carry the agent-level value are unchanged.
+    context_window: int | None = Field(default=None, ge=1)
     fallback_model: str | None = None
     timeout_seconds: int = 300
     retry_attempts: int = 3
@@ -494,10 +499,12 @@ def resolve_profile(config: "AppConfig", role: str) -> ModelProfile:
     role_value = getattr(config.roles, role, None)
     if role_value and role_value in config.model_profiles:
         return config.model_profiles[role_value]
-    # Fall back to the llm section. For the primary role the effective context
-    # window is the agent's; for other roles the same window is a safe default
-    # because they only diverge when a profile is actually configured.
-    return _llm_as_profile(config.llm, config.agent.context_window)
+    # Fall back to the llm section. The effective context window is the llm
+    # section's own when it carries one, otherwise the agent-level value --
+    # so a window set in the LLM config wins, and a config that only sets
+    # ``agent.context_window`` behaves exactly as before.
+    effective_window = config.llm.context_window or config.agent.context_window
+    return _llm_as_profile(config.llm, effective_window)
 
 
 def validate_role_references(config: "AppConfig") -> list[str]:
