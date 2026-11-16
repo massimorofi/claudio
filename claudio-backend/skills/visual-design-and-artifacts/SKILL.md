@@ -1,11 +1,6 @@
 ---
 name: visual-design-and-artifacts
-description: Summary of all skills for visual and interactive output design — distinctive
-  frontend/aesthetic direction, artifact visual design and components, data visualization,
-  live sketch whiteboards, self-contained HTML playgrounds, pushing a design system
-  to a design tool, and canvas creation. Use when asked to design a UI, choose a visual
-  style, avoid generic/templated looks, build a dataviz, sketch a wireframe, make
-  an interactive playground, or sync a design system.
+description: Summary of all skills for visual and interactive output design — distinctive frontend/aesthetic direction, artifact visual design and components, data visualization, live sketch whiteboards, self-contained HTML playgrounds, pushing a design system to a design tool, and canvas creation. Use when asked to design a UI, choose a visual style, avoid generic/templated looks, build a dataviz, sketch a wireframe, make an interactive playground, or sync a design system.
 license: mixed — see Credits
 metadata:
   last_reviewed: '2026-10-25'
@@ -37,6 +32,18 @@ metadata:
   - owner: GitHub app
     name: create-canvas
     license: unknown
+  - owner: alirezarezvani
+    name: design-system
+    license: unknown
+    url: https://skillmd.com/skills/alirezarezvani/design-system
+  - owner: anthropic
+    name: canvas-design
+    license: Complete terms in LICENSE.txt
+    url: https://skillmd.com/skills/anthropic/canvas-design
+  - owner: google-labs-code
+    name: stitch-extract-design-md
+    license: unknown
+    url: https://skillmd.com/skills/google-labs-code/stitch-extract-design-md
 ---
 
 # Visual Design & Interactive Artifacts
@@ -87,6 +94,19 @@ default output looks like everything else.
 
 "Design a page that doesn't look generic", "make a chart of…", "sketch a
 wireframe", "build an interactive playground for X", "push our design system".
+
+## References (load on demand)
+
+Detailed guidance is kept out of this body to keep the loaded skill small. Load a
+reference only when the task needs it, with
+`read_skill_resource("visual-design-and-artifacts", "references/<file>.md")`:
+
+- **`references/design-system-branding.md`** — interactive brand/design-system
+  onboarding: palette derivation, typography and WCAG-AA contrast rules for HTML
+  conversions (moved here from `software-architecture`).
+- **`references/canvas-design-philosophy.md`** — design-philosophy creation,
+  subtle-reference deduction and canvas / multi-page visual expression (moved here
+  from `software-architecture`).
 
 ## Credits
 

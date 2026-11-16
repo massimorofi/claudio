@@ -151,6 +151,23 @@ mcp:
         - https://api.skillmd.com/mcp
       url: https://api.skillmd.com/mcp
       enabled: true
+    # Gortex code-intelligence MCP (issue #54, Option B). Ships DISABLED so a
+    # fresh deploy that does not run the gortex container is unaffected. When
+    # enabled it points at the gortex daemon's Streamable HTTP MCP endpoint on the
+    # internal bridge (the `gortex` compose service, profile "gortex"). To turn it
+    # on: set CLAUDIO_GORTEX_ENABLED=true in .env (or `docker compose --profile
+    # gortex up -d`), flip `enabled: true`, then restart the agent. The daemon
+    # indexes the same /workspace mount the agent uses so returned paths match.
+    # See doc/docker.md §9.
+    - id: gortex
+      transport: streamable_http
+      command: []
+      url: http://gortex:7411/mcp
+      # Must match the gortex container's GORTEX_DAEMON_HTTP_TOKEN (Gortex
+      # requires a bearer token for its non-localhost /mcp bind). Change it.
+      headers:
+        Authorization: Bearer claudio-gortex-internal-token
+      enabled: false
 
 monitoring:
   log_level: INFO

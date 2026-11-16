@@ -317,3 +317,218 @@ container is recreated — prefer §7.2 for anything durable.
 6. **Resource limits** — `mem_limit`/`cpus` on the agent once steady-state
    numbers are known.
 7. **Backup job** for the `claudio-data` volume.
+
+---
+
+## 9. Gortex code discovery in Docker (issue #54)
+
+Gortex is an optional code-intelligence MCP server. The shipped config carries a
+`gortex` entry that is **disabled by default**; this section is what changes when
+you turn it on in a containerised deployment.
+
+### 9.1 The rule that decides everything
+
+A `transport: stdio` MCP server is spawned as a **child process of the backend
+process** (`StdioServerParameters(command=..., args=...)` in
+`claudio_backend/engine/adk_engine.py`). Therefore:
+
+> **The `gortex` binary must be installed *inside the `claudio/agent` container*,
+> on a directory that is on the *backend process's* `PATH`.** A Gortex installed
+> on the host is invisible to the container — the container has its own
+> filesystem and its own `PATH`.
+
+Two consequences that are easy to get wrong:
+
+1. **`$HOME/.local/bin` is not enough.** Gortex's one-line installer
+   (`curl -fsSL https://get.gortex.dev | sh`) drops the binary in
+   `$HOME/.local/bin` and appends a PATH line to `.bashrc`. The entrypoint
+   `exec`s `uvicorn` directly — it is **not** a login/interactive bash shell, so
+   `.bashrc` is never sourced and that PATH line has no effect on the process
+   that spawns `gortex mcp`. Install to a directory already on the image `PATH`
+   (the `python:3.11-slim` default `PATH` includes `/usr/local/bin`), i.e. set
+   `GORTEX_INSTALL_DIR=/usr/local/bin`, or use the `.deb` package which installs
+   system-wide.
+2. **The binary must be executable by the runtime user.** The backend runs as
+   `claudio` (uid/gid 1000, see `docker/backend/Dockerfile`). A system-wide
+   install (`/usr/local/bin`, world-readable/executable) satisfies this; a
+   root-only install does not.
+
+### 9.2 The path Gortex indexes must be the path the agent sees
+
+Gortex returns **file paths** from the index it built. The agent then opens those
+paths with its own file tools. For the answers to be usable, Gortex must index
+the repository **at the same in-container path the agent uses**. In this stack the
+repo is bind-mounted at `/workspace` (and the host projects root is mounted at
+its *same* host path — see `compose.yaml` → `volumes`). So:
+
+- If Gortex runs **inside the agent container**, it already sees `/workspace`
+  (same mount) — index `/workspace`.
+- If Gortex runs in a **separate container**, bind-mount the *same* host directory
+  at the *same* container path (`${CLAUDIO_WORKSPACE_DIR}:/workspace`), otherwise
+  Gortex returns host paths the agent cannot open (or vice-versa). This is the
+  single most common reason "Gortex found it but the agent can't read it".
+
+### 9.3 Option A — Gortex inside the agent container (stdio)
+
+Add to `docker/backend/Dockerfile`, in the **root** stage (before `USER claudio`),
+alongside the existing `apt-get` layer:
+
+```dockerfile
+# Gortex code-intelligence binary (optional; issue #54). Installed system-wide
+# so it is on the backend process PATH (/usr/local/bin) and executable by the
+# unprivileged `claudio` user. Pin a version for reproducible builds.
+RUN curl -fsSL https://get.gortex.dev \
+      | GORTEX_INSTALL_DIR=/usr/local/bin GORTEX_NO_PATH=1 GORTEX_VERSION=v0.15.0 sh \
+    && gortex version
+```
+
+Then give the index a place to survive restarts. Gortex keeps its daemon state
+and index under a data directory (check `gortex --help` / its onboarding docs for
+the exact location; commonly an XDG data dir under the user's home). Mount a
+named volume there so a container restart does not force a full re-index, e.g.
+add to the `agent` service in `compose.yaml`:
+
+```yaml
+    volumes:
+      # ... existing claudio-config / claudio-data / claudio-skills / /workspace ...
+      - gortex-home:/home/claudio/.local/share/gortex   # path per gortex docs
+```
+```yaml
+volumes:
+  # ... existing ...
+  gortex-home:
+```
+
+Enable it in the config (the entry already exists, disabled):
+
+```yaml
+mcp:
+  servers:
+    - id: gortex
+      transport: stdio
+      command: [gortex, mcp]
+      enabled: true
+```
+
+Index the repo once (the daemon auto-starts on first `gortex mcp`, or start it
+explicitly). Because the agent container's entrypoint `exec`s uvicorn as its only
+process, run indexing as a one-off rather than expecting a supervisor to do it:
+
+```bash
+docker compose exec agent gortex daemon start --detach
+docker compose exec agent gortex init /workspace     # or gortex's register command
+```
+
+Then apply the config change and confirm the tools appear:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8100/agent/restart
+```
+
+**Trade-off:** the daemon lives and dies with the agent container. If it crashes,
+the Gortex tools silently disappear from the catalog (the engine logs a warning
+and skips the server — a run never breaks, but the model stops seeing the tools).
+For anything beyond a small pilot, prefer Option B.
+
+### 9.4 Option B — Gortex as its own service (streamable_http) — IMPLEMENTED
+
+This is the shipped Option B. The Gortex daemon runs in its own container on the
+`claudio-net` bridge and serves the MCP Streamable HTTP transport at
+`http://gortex:7411/mcp`; the agent connects over HTTP by service name (Docker DNS
+resolves `gortex` on the bridge). Files:
+
+| File | Role |
+|---|---|
+| `docker/gortex/Dockerfile` | Debian slim + the signed Gortex binary installed to `/usr/local/bin` (on PATH), unprivileged `gortex` user (uid 1000) |
+| `docker/gortex/entrypoint.sh` | `gortex track /workspace` then `exec gortex daemon start --http-addr 0.0.0.0:7411` (foreground = PID 1's child, so signals + restart policy work) |
+| `compose.yaml` → `gortex` service | profile `gortex`, same `/workspace` bind mount as the agent, `gortex-data` volume for the index, `/mcp` healthcheck, **no published host port** |
+| `claudio-ctl` | `CLAUDIO_GORTEX_ENABLED=true` adds `--profile gortex` and manages the service |
+| `config.yaml` / `config.example.yaml` | `mcp.servers` gortex entry → `transport: streamable_http`, `url: http://gortex:7411/mcp` |
+
+Why a separate container instead of stdio in the agent image: the daemon
+lifecycle, indexing and index persistence are isolated from the agent, and the
+agent just reconnects over HTTP. The daemon serves `/mcp` (MCP) plus `/v1/*`
+(JSON API) when started with `--http-addr` (see Gortex `docs/cli.md`).
+
+**Enable it:**
+
+```bash
+# 1. turn the profile on for claudio-ctl and start the stack
+echo 'CLAUDIO_GORTEX_ENABLED=true' >> .env
+#    (the live config.yaml already has the gortex entry enabled: true)
+./claudio-ctl start
+
+#    ...or without claudio-ctl:
+#    docker compose --profile gortex up -d
+
+# 2. restart the agent so it rebuilds its MCP toolset and picks the tools up
+./claudio-ctl restart agent
+```
+
+The agent's `mcp.servers` gortex entry is **enabled in the live `config.yaml`**
+(this deployment runs Option B) but **disabled in the committed
+`config.example.yaml`**, so a fresh deploy that does not run the container is
+unaffected. If the gortex container is not running while the entry is enabled, the
+agent fails fast to resolve `gortex`, logs a warning and skips it — no breakage;
+set `enabled: false` to silence that.
+
+**Auth (required, not optional).** Gortex *refuses* a non-localhost `--http-addr`
+bind without a bearer token (`--http-addr "0.0.0.0:7411" is non-localhost;
+--http-auth-token ... is required`). Because the agent reaches it across
+containers, the bind must be `0.0.0.0`, so a token is mandatory. The wiring:
+
+- the container gets `GORTEX_DAEMON_HTTP_TOKEN` (from `GORTEX_HTTP_TOKEN` in
+  `.env`) and passes `--http-auth-token`;
+- the agent's `gortex` entry sends the same secret via a new
+  `MCPServerEntry.headers` field → `Authorization: Bearer <token>`, forwarded to
+  `StreamableHTTPConnectionParams(headers=...)`.
+
+The two must match. The default `claudio-gortex-internal-token` is a placeholder —
+**change `GORTEX_HTTP_TOKEN` in `.env` and the `Authorization` header in the
+config together.** The service still publishes **no host port**, so the endpoint
+is reachable only from `claudio-net` even with the token. Verified live: `/mcp`
+returns 401 without the token and a non-401 with it.
+
+If Gortex runs on the **host** instead of a container, reach it via
+`host.docker.internal` (add `extra_hosts: ["host.docker.internal:host-gateway"]`
+to the `agent` service) — a bare `localhost` URL inside the container points at
+the container itself.
+
+### 9.5 Verifying it actually works
+
+1. `docker compose --profile gortex ps` shows `claudio-gortex` **healthy** (the
+   healthcheck curls `http://127.0.0.1:7411/mcp`; a 4xx still counts as "listening").
+   `docker compose --profile gortex exec gortex gortex status` shows the tracked
+   repo and index state.
+2. From the **agent** container, confirm the endpoint is reachable by service name:
+   `docker compose exec agent curl -s -o /dev/null -w '%{http_code}\n' http://gortex:7411/mcp`.
+   A number (not a curl error) means DNS + routing on `claudio-net` work.
+3. After `./claudio-ctl restart agent`, the agent's connected-MCP catalog (the
+   "Connected MCP servers" block in the system prompt) lists `gortex` with its
+   tools. If the backend log shows `MCP server gortex failed to load`, the gortex
+   container is down or the URL/port is wrong.
+4. Ask a structural question and demand a **tool evidence trail** (which Gortex
+   query, which paths/symbols returned). The returned paths must be openable by the
+   agent's `read_file` — if they are not, the index path ≠ the agent path (§9.2).
+5. Confirm the **Codebase lookup policy** is now in the prompt: it is injected
+   automatically only while a connected server's id contains `gortex`
+   (`render_code_discovery_policy`), and disappears again when you disable it.
+6. Check index freshness after edits — Gortex results are navigation, not proof
+   the working tree is current; the policy tells the model to re-read before edits.
+
+### 9.6 What is verified vs. version-dependent
+
+- **Verified from this repo (and a live container run):** the stdio-spawn traps
+  (§9.1), the `/workspace` same-path rule (§9.2), the gated policy injection, the
+  compose service shape (profile, internal-only network, no host port, `/mcp`
+  healthcheck), config URL host/port matching the service, and — built and run
+  against a real repo — that the daemon runs as PID 1 in the foreground, indexes
+  the mount, and that `/mcp` returns **401 without** the bearer token and a
+  non-401 **with** it (so the token requirement and the `headers` wiring are
+  proven, not assumed).
+- **From Gortex's own docs (pin/confirm for your version):** the release install
+  command and version tag, `gortex daemon start --http-addr <addr>` serving `/mcp`
+  (and `/v1/*`), `gortex track <path>`, and the daemon data dir under `$HOME/.gortex`
+  (mounted as the `gortex-data` volume). Gortex publishes signed binaries for
+  linux/amd64 and linux/arm64; the image uses the one-line installer with
+  `GORTEX_INSTALL_DIR=/usr/local/bin` (Debian base, not the Alpine `.apk`).

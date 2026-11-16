@@ -144,6 +144,52 @@ narrative.
 
 Any `mcp.*` change requires an agent restart (`POST /agent/restart`).
 
+#### Gortex code discovery (default server, issue #54)
+
+Gortex is an optional code-intelligence engine that indexes the repo into a graph
+and exposes search, symbols, callers/callees, dependencies and change impact over
+MCP. The shipped config carries a `gortex` server that points at a **separate
+Gortex container** (Option B) serving the MCP Streamable HTTP transport:
+
+```yaml
+mcp:
+  servers:
+    - id: gortex
+      transport: streamable_http
+      command: []
+      url: http://gortex:7411/mcp
+      enabled: false        # enabled in the live config.yaml; disabled in the template
+```
+
+The `gortex` URL host is the compose service name on the internal `claudio-net`
+bridge; the daemon serves `/mcp` (MCP) plus `/v1/*` (JSON API). The full Docker
+setup — the `docker/gortex/` image, the compose service (opt-in profile
+`gortex`), the `CLAUDIO_GORTEX_ENABLED` flag for `claudio-ctl`, index-path
+matching, and verification — is in **`doc/docker.md` §9 "Gortex code discovery in
+Docker"**.
+
+It ships **disabled in the committed template** so a fresh deploy that does not run
+the container is unaffected; the live `config.yaml` enables it. To turn it on:
+
+1. Start the Gortex container: set `CLAUDIO_GORTEX_ENABLED=true` in `.env` and
+   `./claudio-ctl start` (or `docker compose --profile gortex up -d`). The daemon
+   indexes the same `/workspace` mount the agent uses.
+2. Ensure the `gortex` entry is `enabled: true` (config UI or this file).
+3. `POST /agent/restart` (or `./claudio-ctl restart agent`) so the toolset is
+   rebuilt, then confirm the Gortex tools appear in the connected-servers catalog.
+
+When a connected server's id contains `gortex`, the system prompt automatically
+gains a **Codebase lookup policy** that makes the model query the Gortex tools
+first for structural questions while still reading the working tree before any
+edit. The policy is omitted entirely when Gortex is not connected, so a deployment
+without it pays no tokens for it.
+
+**Alternative (stdio, Option A):** a `transport: stdio` entry with
+`command: [gortex, mcp]` spawns the server as a child of the backend process, so
+the `gortex` binary must be installed **inside the agent container** on the
+backend's `PATH` and index the same repo path. This couples the daemon to the
+agent's lifecycle; prefer the HTTP container above. See `doc/docker.md` §9.3.
+
 ### `monitoring`
 
 | Field | Type | Default | Notes |

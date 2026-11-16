@@ -30,6 +30,17 @@ fi
 COMPOSE="docker compose"
 ALL_SERVICES=(agent web)
 
+# Optional Gortex code-intelligence service (compose profile "gortex", issue #54).
+# Off by default so the stack is unchanged. Set CLAUDIO_GORTEX_ENABLED=true in .env
+# to have claudio-ctl start/stop/status/logs the gortex container alongside the
+# agent. The agent's mcp.servers gortex entry must also be enabled: true.
+case "${CLAUDIO_GORTEX_ENABLED:-false}" in
+  1|true|TRUE|yes|YES)
+    COMPOSE="docker compose --profile gortex"
+    ALL_SERVICES=(agent web gortex)
+    ;;
+esac
+
 AGENT_PORT="${CLAUDIO__SERVER__PORT:-8100}"
 WEB_PORT="${CLAUDIO_HTTP_PORT:-8080}"
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
@@ -91,8 +102,8 @@ resolve_services() {
     for a in "$@"; do
       case "$a" in
         all)      out+=("${ALL_SERVICES[@]}") ;;
-        agent|web) out+=("$a") ;;
-        *)      die "unknown service '$a' (expected: agent | web | all)" ;;
+        agent|web|gortex) out+=("$a") ;;
+        *)      die "unknown service '$a' (expected: agent | web | gortex | all)" ;;
       esac
     done
   fi
@@ -321,7 +332,7 @@ cmd_stop() {
   services="$(resolve_services "$@")"
   # Reverse order: web before agent. Killing the agent while clients are still
   # routed to it produces a visible error storm; the reverse is silent.
-  for s in web agent; do
+  for s in web agent gortex; do
     for want in $services; do
       [ "$s" = "$want" ] && ordered+=("$s")
     done

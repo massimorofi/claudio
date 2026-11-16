@@ -272,6 +272,11 @@ class MCPServerEntry(BaseModel):
     command: list[str] = Field(default_factory=list)
     url: str | None = None
     enabled: bool = True
+    # Extra HTTP headers sent on every request for the http/sse transports.
+    # Used to carry a bearer token to an authenticated Streamable HTTP MCP
+    # endpoint (e.g. {"Authorization": "Bearer <token>"} for Gortex, which
+    # refuses a non-localhost bind without one). Ignored by stdio.
+    headers: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("command", mode="before")
     @classmethod

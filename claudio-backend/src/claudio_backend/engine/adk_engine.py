@@ -582,6 +582,7 @@ def _mcp_connection_params(entry: MCPServerEntry) -> Any:
             raise ValueError(f"MCP server {entry.id!r}: sse transport needs a url")
         return SseConnectionParams(
             url=entry.url,
+            headers=dict(entry.headers) or None,
             timeout=MCP_CONNECT_TIMEOUT_SECONDS,
         )
     if transport in ("streamable_http", "streamable-http", "streamablehttp", "http"):
@@ -591,6 +592,7 @@ def _mcp_connection_params(entry: MCPServerEntry) -> Any:
             )
         return StreamableHTTPConnectionParams(
             url=entry.url,
+            headers=dict(entry.headers) or None,
             timeout=MCP_CONNECT_TIMEOUT_SECONDS,
         )
     raise ValueError(f"MCP server {entry.id!r}: unknown transport {entry.transport!r}")

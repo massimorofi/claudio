@@ -45,6 +45,47 @@ After all areas: write the credits manifest, then commit.
 
 ---
 
+## Token discipline (issue #53) — entry point + on-demand references
+
+Claudio puts **only skill names + descriptions** into the always-on system prompt
+(`render_skill_block`); a skill's full body loads only when the agent calls
+`load_skill`, and a `references/*.md` file loads only when the agent calls
+`read_skill_resource`. So the cost that matters is: (a) the catalog, which is
+always paid, and (b) the body of whichever skills actually get loaded.
+
+A refresh must not undo this. Follow these rules when merging/refreshing:
+
+1. **Keep the entry point lean.** `SKILL.md` holds only what every task using the
+   skill needs: applicability/when-to-use, the essential workflow, safety and
+   authorization rules, fallback, and verification. Everything else goes to
+   `references/`.
+2. **Move specialist detail to `references/<topic>.md`.** Long example sets,
+   command encyclopedias, output templates, per-language recipes and merged
+   sub-skill bodies belong in `references/`, each linked from a
+   `## References (load on demand)` index with a one-line "when to read it".
+   Link them with the exact call the agent must make:
+   `read_skill_resource("<skill-name>", "references/<file>.md")`.
+3. **Never delete to compress — relocate.** Compression means moving content out
+   of the always-loaded body, not dropping it. Preserve every instruction and all
+   attribution (frontmatter `metadata.sources` and the Credits section).
+4. **One topic, one owner.** If a section is off-topic for the skill (e.g. brand
+   palette / typography / canvas guidance inside `software-architecture`), move it
+   to the skill that owns the topic (e.g. `visual-design-and-artifacts`) and leave
+   a pointer, rather than duplicating it.
+5. **Descriptions are always-on: edit with care.** Keep routing keywords; a longer
+   description costs a token on every single prompt. Prefer moving detail to the
+   body/reference over fattening the description.
+6. **Respect the loader's limits.** `SKILL.md` and each reference must stay under
+   100 KB (`MAX_SKILL_FILE_BYTES` / `MAX_RESOURCE_BYTES`); frontmatter under 8 KB;
+   description ≤ 1024 chars; only the allowed frontmatter keys.
+7. **Measure, don't guess.** Run `claudio-backend/.venv/bin/python
+   doc/skills_token_audit.py` before and after. It prints per-skill body tokens,
+   the always-on catalog size, and the on-demand reference total. The goal is a
+   smaller loaded body with the catalog flat and no content lost.
+
+
+---
+
 ## Usage
 
 1. Make sure the SkillMD MCP server is configured (transport `streamable_http`,
