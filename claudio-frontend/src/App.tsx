@@ -16,6 +16,8 @@ import MonitoringView from './features/monitoring/MonitoringView'
 import WorkspaceView from './features/workspace/WorkspaceView'
 import AutonomousView from './features/autonomous/AutonomousView'
 import MemoryView from './features/memory/MemoryView'
+import BackendSwitcher from './components/BackendSwitcher'
+import { useActiveBackend } from './store/useBackends'
 
 const navItems = [
   { to: '/chat', label: 'Chat', icon: MessageSquare },
@@ -38,6 +40,10 @@ function readCollapsed(): boolean {
 
 export default function App() {
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed)
+  // Keying the routed content by backend id remounts every view on a switch, so
+  // in-flight streams and local drafts from the previous backend cannot survive
+  // it (#40 isolation).
+  const activeBackend = useActiveBackend()
 
   const toggle = () =>
     setCollapsed((c) => {
@@ -96,10 +102,11 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
+        {!collapsed && <div className="mt-auto"><BackendSwitcher /></div>}
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 min-h-0 overflow-hidden">
+      <main key={activeBackend?.id ?? 'none'} className="flex-1 min-h-0 overflow-hidden">
         <Routes>
           <Route path="/chat" element={<ChatView />} />
           <Route path="/config" element={<ConfigView />} />

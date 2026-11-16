@@ -3,6 +3,13 @@
 // Kept in localStorage (like the auth token) so the address can be changed from
 // the UI at runtime without a rebuild. Every API call reads it fresh, so a change
 // takes effect on the next request.
+//
+// With multi-backend support (#40) the *active backend profile* in
+// `src/store/backendSlice.ts` is the source of truth. The legacy single-address
+// key below is still read as a fallback (and written for compatibility), and it
+// is migrated into the default profile the first time the store loads.
+import { getActiveBackend, normalizeBackendUrl, updateBackend } from '../store/backendSlice'
+
 const BASE_KEY = 'claudio.api_base'
 
 // Empty base = same origin. In the docker topology nginx serves the SPA and
@@ -10,6 +17,8 @@ const BASE_KEY = 'claudio.api_base'
 const DEFAULT_BASE = ''
 
 export function getBaseUrl(): string {
+  const active = getActiveBackend()
+  if (active) return normalizeBackendUrl(active.url)
   try {
     return localStorage.getItem(BASE_KEY) ?? DEFAULT_BASE
   } catch {
@@ -18,10 +27,21 @@ export function getBaseUrl(): string {
 }
 
 export function setBaseUrl(url: string): void {
+  const base = normalizeBase(url)
   try {
-    localStorage.setItem(BASE_KEY, normalizeBase(url))
+    localStorage.setItem(BASE_KEY, base)
   } catch {
     /* storage unavailable; base stays at its default for this session */
+  }
+  // Keep the active profile in sync so the connection panel and the backend
+  // switcher can never disagree about where traffic goes.
+  const active = getActiveBackend()
+  if (active) {
+    try {
+      updateBackend(active.id, { url: base })
+    } catch {
+      /* invalid URL: the profile keeps its previous address */
+    }
   }
 }
 
