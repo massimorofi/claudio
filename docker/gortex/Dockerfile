@@ -46,8 +46,14 @@ ARG GORTEX_GID=1000
 RUN groupadd --gid "${GORTEX_GID}" gortex \
     && useradd --uid "${GORTEX_UID}" --gid "${GORTEX_GID}" --create-home \
          --shell /bin/bash gortex \
-    && mkdir -p /workspace \
-    && chown -R gortex:gortex /workspace
+    && mkdir -p /workspace /home/gortex/.gortex \
+    && chown -R gortex:gortex /workspace /home/gortex/.gortex
+# NOTE: /home/gortex/.gortex MUST exist here with gortex:gortex ownership. The
+# compose service mounts the named volume `gortex-data` at this path. Docker
+# initialises an empty named volume from the image's content+ownership at the
+# mount point ONLY if that directory exists in the image; if it does not, the
+# volume is created root:root 0755 and the unprivileged daemon gets
+# "permission denied" writing its config/store and crash-loops.
 
 COPY docker/gortex/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
