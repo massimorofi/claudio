@@ -14,9 +14,7 @@ from typing import Any
 from .settings import AppConfig
 from .memory import discover_memory_files, render_memory_block
 from .skill_loader import render_skill_block
-from .tools.planning import TURNS_SINCE_WRITE_NAG
-
-# Read/lookup calls made without producing any file before the write-first nudge
+from .tools.planning import TURNS_SINCE_WRITE_NAG# Read/lookup calls made without producing any file before the write-first nudge
 # fires. Sized well below the typical task length so it interrupts the
 # read-forever spiral early (a few reads is normal; a dozen with no output is
 # the failure mode). See §3.6.14.
@@ -168,6 +166,38 @@ def render_code_discovery_policy(mcp_entries: list[dict[str, Any]] | None) -> st
     return CODE_DISCOVERY_POLICY
 
 
+def gortex_connected(mcp_entries: list[dict[str, Any]] | None) -> bool:
+    """True when a connected MCP server's id mentions gortex."""
+    return any(
+        "gortex" in str(e.get("id", "")).lower()
+        for e in (mcp_entries or [])
+        if e.get("id")
+    )
+
+
+def render_code_graph_status(
+    workspace: Path | None,
+    mcp_entries: list[dict[str, Any]] | None,
+    manifest_path: str | Path | None = None,
+) -> str:
+    """Render the code-graph readiness block for this workspace.
+
+    The discovery policy tells the agent to trust the graph; this says whether
+    the graph can actually be trusted *here*, from the manifest the indexer
+    published at start-up. Emitted only when Gortex is connected, and it degrades
+    to an explicit "unknown" rather than silence when no manifest exists --
+    an agent that cannot tell whether the index covers its workspace will
+    eventually mistake an empty result for an absent symbol.
+    """
+    if not gortex_connected(mcp_entries) or workspace is None:
+        return ""
+    from .codegraph import assess, render_readiness_block
+
+    return render_readiness_block(
+        assess(workspace, manifest_path=manifest_path)
+    )
+
+
 def render_subagent_roster(config: AppConfig) -> str:
     """Render the delegation roster + guidance for the primary's system prompt.
 
@@ -254,6 +284,16 @@ def build_static_instructions(
     if policy_block:
         sections.append(policy_block)
 
+    # Code-graph readiness: whether the index actually covers THIS workspace.
+    # Placed right after the policy so the instruction and its caveat are read
+    # together (issue: agent planned "check Gortex", index covered nothing).
+    status_block = render_code_graph_status(
+        workspace, mcp_entries,
+        manifest_path=getattr(config.agent, "gortex_manifest_path", None) or None,
+    )
+    if status_block:
+        sections.append(status_block)
+
     # Worker subagent roster + delegation guidance (only when subagents exist).
     roster_block = render_subagent_roster(config)
     if roster_block:
@@ -272,6 +312,7 @@ def render_nudges(
     turns_since_todo: int = 0,
     reads_since_write: int = 0,
     deliverable_written: bool = False,
+    unfulfilled_tools: tuple[str, ...] | list[str] = (),
 ) -> str:
     """The reminder blocks that change as a run progresses.
 
@@ -280,8 +321,23 @@ def render_nudges(
     from the static text because they must be re-evaluated every turn: a prompt
     assembled once at run start freezes them at their initial (silent) values,
     which is exactly why the todo nag used never fire mid-run.
+
+    ``unfulfilled_tools`` are tool families the narration committed to but no
+    tool call has satisfied (see :mod:`claudio_core.planact`).
     """
     blocks: list[str] = []
+
+    # Plan/act mismatch: named a tool, never called it. Placed first because a
+    # false claim about sources invalidates the deliverable regardless of how
+    # good the rest of the run is.
+    if unfulfilled_tools:
+        from .planact import AuditReport, render_planact_nudge
+
+        report = AuditReport(
+            unfulfilled=set(unfulfilled_tools),
+            planned=set(unfulfilled_tools),
+        )
+        blocks.append(render_planact_nudge(report))
 
     # Write-first nudge (§3.6.14): the agent has spent many read/lookup calls and
     # still has produced no file. This is the read-forever spiral — interrupt it
@@ -328,6 +384,7 @@ def build_instructions(
     deliverable_written: bool = False,
     mcp_entries: list[dict[str, Any]] | None = None,
     workspace: Path | None = None,
+    unfulfilled_tools: tuple[str, ...] | list[str] = (),
 ) -> str:
     """Assemble the full system prompt for a run.
 
@@ -342,4 +399,5 @@ def build_instructions(
         turns_since_todo=turns_since_todo,
         reads_since_write=reads_since_write,
         deliverable_written=deliverable_written,
+        unfulfilled_tools=unfulfilled_tools,
     )

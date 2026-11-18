@@ -222,6 +222,10 @@ class AgentConfig(BaseModel):
     strict_tools: bool = False
     skills_enabled: bool = True
     skills_dir: str = "./skills"
+    # Where the gortex entrypoint publishes which repos it actually indexed.
+    # The prompt uses it to tell the agent whether the code graph covers the
+    # current workspace. Empty = the built-in default (/workspace/.gortex-index.json).
+    gortex_manifest_path: str = ""
     auto_routing_enabled: bool = False
     subagent_approval_mode: str = "one_gate"
     tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)

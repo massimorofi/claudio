@@ -7,7 +7,7 @@ seam; the tool functions themselves never see the wrapper.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,8 +47,30 @@ class ToolContext:
     # without ever creating the deliverable.
     deliverable_written: bool = False
     reads_since_write: int = 0
+    # Plan/act audit (see ``claudio_core.planact``). ``called_tools`` records every
+    # tool actually invoked this run; ``assistant_text`` accumulates the model's own
+    # narration. Together they let the engine detect "said it would use Gortex, never
+    # called it" -- a claim about a source that was not consulted.
+    called_tools: set[str] = field(default_factory=set)
+    assistant_text: list[str] = field(default_factory=list)
     # Set by the run manager so tools (e.g. delegate_task) can build agents.
     agent_factory: Any = None
+
+    def record_tool_call(self, name: str) -> None:
+        """Note that a tool actually ran, for the plan/act audit."""
+        if name:
+            self.called_tools.add(name)
+
+    def record_assistant_text(self, text: str) -> None:
+        """Keep the model's narration so intent can be audited against actions."""
+        if text and text.strip():
+            self.assistant_text.append(text)
+
+    def planact_report(self):
+        """Audit what the narration promised against what actually ran."""
+        from .planact import audit_run
+
+        return audit_run("\n".join(self.assistant_text), self.called_tools)
 
     @property
     def max_output_chars(self) -> int:

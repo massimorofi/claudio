@@ -707,10 +707,14 @@ class AdkEngine:
         )
 
         def _instruction_provider(_callback_context: Any) -> str:
+            # Re-audited every turn from the live transcript: narration that named
+            # a tool family against the set of tools that actually ran. A frozen
+            # string computed at run start could not catch a promise made on turn 3.
             return static_instruction + render_nudges(
                 turns_since_todo=ctx.turns_since_todo,
                 reads_since_write=ctx.reads_since_write,
                 deliverable_written=ctx.deliverable_written,
+                unfulfilled_tools=sorted(ctx.planact_report().unfulfilled),
             )
 
         return LlmAgent(
@@ -1323,6 +1327,11 @@ class AdkEngine:
                 for evt in translate_event(event):
                     if evt["event"] == EventName.TOKEN.value:
                         final_text += evt["data"]["text"]
+                        ctx.record_assistant_text(evt["data"]["text"])
+                    elif evt["event"] == EventName.TOOL_CALL.value:
+                        # Record the call itself, not the result: an attempted
+                        # call is what discharges a stated intention.
+                        ctx.record_tool_call(evt["data"].get("name", ""))
                     yield evt
 
                 if is_model_response(event):
