@@ -725,6 +725,49 @@ class RunManager:
     ) -> ModelSpec:
         return self._model_spec(model_override, role=role)
 
+    def _run_ceiling(self, record: RunRecord) -> str | None:
+        """Return a ceiling code if a hard per-run limit is exceeded, else None.
+
+        Issue #58, Increment 5: bounded termination on physical resources so an
+        unpriced local model cannot run unbounded. 0 disables each ceiling.
+        """
+        agent = self.config.agent
+        max_seconds = int(getattr(agent, "max_run_seconds", 0) or 0)
+        if max_seconds > 0 and record.started_at:
+            if (time.time() - record.started_at) >= max_seconds:
+                return "run_time_exceeded"
+        max_calls = int(getattr(agent, "max_model_calls", 0) or 0)
+        if max_calls > 0:
+            totals = self._acct().usage_totals(record.run_id)
+            if int(totals.get("calls", 0)) >= max_calls:
+                return "model_call_ceiling"
+        max_tokens = int(getattr(agent, "max_run_tokens", 0) or 0)
+        if max_tokens > 0:
+            totals = self._acct().usage_totals(record.run_id)
+            used = int(totals.get("input_tokens", 0)) + int(totals.get("output_tokens", 0))
+            if used >= max_tokens:
+                return "token_ceiling"
+        return None
+
+    def _phase_reasoning_effort(self, record: RunRecord) -> str:
+        """Pick a reasoning-effort level for this attempt (issue #58, Inc 5).
+
+        High effort for the first turn and immediately after a failure/replan
+        (the moments that genuinely need the model's best reasoning); low
+        effort for routine continuations. Returns "" when scaling is disabled.
+        """
+        high = str(getattr(self.config.agent, "reasoning_effort_high", "") or "")
+        low = str(getattr(self.config.agent, "reasoning_effort_low", "") or "")
+        if not high and not low:
+            return ""
+        # First clean attempt, or a restart right after a failure/replan, gets
+        # the high-effort level; steady continuations drop to low.
+        if record.attempt <= 1 and record.retries == 0 and record.replans == 0:
+            return high or ""
+        if record.retries > 0 or record.replans > 0:
+            return high or ""
+        return low or ""
+
     async def _auto_route_role(self, message: str, record: "RunRecord | None" = None) -> str:
         """Use the fast profile to route only clearly simple requests.
 
@@ -947,6 +990,12 @@ class RunManager:
             )
         else:
             tool_policy = self._tool_policy(approval_mode)
+        model_spec = self._model_spec_for_role(record.model_role, model_override)
+        # Phase-aware reasoning effort (issue #58, Increment 5): the level is
+        # chosen per attempt and recorded in the call ledger.
+        phase_effort = self._phase_reasoning_effort(record)
+        if phase_effort:
+            model_spec = replace(model_spec, reasoning_effort=phase_effort)
         return RunRequest(
             run_id=record.run_id,
             session_id=record.session_id,
@@ -954,7 +1003,7 @@ class RunManager:
             workspace_id=record.workspace_id,
             instructions=instructions,
             user_input=user_input,
-            model=self._model_spec_for_role(record.model_role, model_override),
+            model=model_spec,
             tools=tool_policy,
             max_turns=record.worker_max_turns or int(self.config.agent.max_turns),
             metadata={
@@ -1074,6 +1123,13 @@ class RunManager:
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
+            # Hard resource ceilings (issue #58, Increment 5): stop a runaway
+            # run on physical resources, not just USD (local models are
+            # unpriced). Checked at each attempt boundary.
+            ceiling = self._run_ceiling(record)
+            if ceiling is not None:
+                await self._finalize_failed(record, ceiling, f"Run stopped: {ceiling}")
+                return
             # Boundary compaction: honour a manual request that landed while
             # this run was in flight, and proactively compact when the last
             # turn's reported size has crossed the threshold. Both keep the

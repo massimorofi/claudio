@@ -9,12 +9,58 @@ tools are gated by approval instead).
 """
 from __future__ import annotations
 
+import difflib
 import json
 import shutil
 from pathlib import Path
 
 from ..context import ToolContext
 from .verify import check_syntax
+
+# Directories skipped when building the fuzzy-path candidate index.
+_HINT_SKIP = frozenset(
+    {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
+     ".mypy_cache", ".pytest_cache", ".ruff_cache", "target", ".next"}
+)
+_HINT_MAX_FILES = 5000
+
+
+def _suggest_path(ctx: ToolContext, path: str, limit: int = 3) -> list[str]:
+    """Fuzzy/basename matches for a missing path (issue #58, Increment 5).
+
+    A minor typo costs a whole recovery turn; returning the closest existing
+    workspace paths lets the model correct it immediately. Matches by full
+    relative path similarity and by basename, bounded and sorted by score.
+    """
+    try:
+        ws = ctx.workspace.resolve()
+    except OSError:
+        return []
+    wanted = str(path).strip().lstrip("./")
+    wanted_base = Path(wanted).name.lower()
+    candidates: list[tuple[float, str]] = []
+    scanned = 0
+    for p in ws.rglob("*"):
+        if scanned >= _HINT_MAX_FILES:
+            break
+        if any(part in _HINT_SKIP for part in p.parts):
+            continue
+        if not p.is_file():
+            continue
+        scanned += 1
+        try:
+            rel = str(p.relative_to(ws))
+        except ValueError:
+            continue
+        score = difflib.SequenceMatcher(None, rel.lower(), wanted.lower()).ratio()
+        if p.name.lower() == wanted_base:
+            score = max(score, 0.9)
+        elif wanted_base and wanted_base in p.name.lower():
+            score = max(score, 0.6)
+        if score >= 0.5:
+            candidates.append((score, rel))
+    candidates.sort(key=lambda c: (-c[0], c[1]))
+    return [rel for _score, rel in candidates[:limit]]
 
 
 def _clip(text: str, max_chars: int) -> str:
@@ -87,7 +133,11 @@ async def read_file(
     if ctx.approval_mode == "on_request" and not ctx.is_within_workspace(target):
         return {"ok": False, "error": f"Path outside workspace: {path}"}
     if not target.exists():
-        return {"ok": False, "error": f"No such file: {path}"}
+        error = f"No such file: {path}"
+        suggestions = _suggest_path(ctx, path)
+        if suggestions:
+            error += ". Did you mean: " + ", ".join(suggestions) + "?"
+        return {"ok": False, "error": error}
     if not target.is_file():
         return {"ok": False, "error": f"Not a file: {path}"}
     try:
@@ -175,7 +225,11 @@ async def edit_file(
     """
     target = ctx.resolve_path(path)
     if not target.exists() or not target.is_file():
-        return {"ok": False, "error": f"No such file: {path}"}
+        error = f"No such file: {path}"
+        suggestions = _suggest_path(ctx, path)
+        if suggestions:
+            error += ". Did you mean: " + ", ".join(suggestions) + "?"
+        return {"ok": False, "error": error}
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
@@ -267,7 +321,11 @@ async def list_dir(ctx: ToolContext, path: str = ".") -> dict:
     if ctx.approval_mode == "on_request" and not ctx.is_within_workspace(target):
         return {"ok": False, "error": f"Path outside workspace: {path}"}
     if not target.exists() or not target.is_dir():
-        return {"ok": False, "error": f"No such directory: {path}"}
+        error = f"No such directory: {path}"
+        suggestions = _suggest_path(ctx, path)
+        if suggestions:
+            error += ". Did you mean: " + ", ".join(suggestions) + "?"
+        return {"ok": False, "error": error}
     entries = []
     for child in sorted(target.iterdir()):
         entries.append(

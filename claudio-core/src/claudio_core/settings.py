@@ -199,6 +199,18 @@ class AgentConfig(BaseModel):
     # that keeps "finishing" without making progress. 0 disables it.
     max_auto_continues: int = 10
     max_budget_usd: float = 5.0
+    # Hard per-run ceilings (issue #58, Increment 5). 0 = unlimited. These stop
+    # a runaway run on physical resources (model calls, wall-clock seconds,
+    # total tokens) rather than only on USD -- local models are unpriced, so a
+    # cost budget alone never bounds them.
+    max_model_calls: int = 0
+    max_run_seconds: int = 0
+    max_run_tokens: int = 0
+    # Phase-aware reasoning effort (issue #58, Increment 5): the effort level
+    # for "routine" turns (plain continuation/reads) vs "high-stakes" turns
+    # (first turn, or right after a failure/replan). "" disables scaling.
+    reasoning_effort_high: str = ""
+    reasoning_effort_low: str = ""
     approval_mode: str = "on_request"  # off | on_request | always
     host_execution_enabled: bool = False
     host_execution_socket: str | None = None
