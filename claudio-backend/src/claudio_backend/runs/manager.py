@@ -1776,6 +1776,11 @@ class RunManager:
         record.tier2_compactions = max(
             record.tier2_compactions, record.mid_run_compactions
         )
+        # Tier-1 (deterministic) compactions are counted by the engine guard
+        # through the ledger (issue #58, Increment 3).
+        record.tier1_compactions = max(
+            record.tier1_compactions, int(life.get("tier1_compactions", 0))
+        )
         return totals
 
     def _accounting_fields(self, record: RunRecord) -> dict[str, Any]:

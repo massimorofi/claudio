@@ -181,8 +181,102 @@ def _fixed_overhead_tokens(llm_request: Any) -> int:
     return int(chars // _GUARD_CHARS_PER_TOKEN)
 
 
-def make_context_guard(context_window: int, max_output_tokens: int, reserve: int):
+def _tier1_pass(contents: list[Any]) -> tuple[Any, int]:
+    """Apply the deterministic Tier-1 reduction to request contents in place.
+
+    Shrinks the payload text of stale/failed/duplicate tool responses inside
+    their existing ``function_response`` parts -- never dropping or reordering
+    a turn, so call/response pairing is preserved by construction. Returns the
+    :class:`Tier1Stats` and the number of responses actually shrunk.
+    """
+    from claudio_core.tier1 import plan_tier1
+
+    # Map each function_call id to (name, args) so a response can be attributed
+    # to the call that produced it (for the dedupe key and the tool name).
+    calls: dict[str, tuple[str, dict]] = {}
+    for content in contents:
+        for part in getattr(content, "parts", None) or []:
+            fcall = getattr(part, "function_call", None)
+            if fcall is not None:
+                calls[getattr(fcall, "id", "") or ""] = (
+                    getattr(fcall, "name", "") or "",
+                    getattr(fcall, "args", None) or {},
+                )
+
+    turns: list[dict[str, Any]] = []
+    resp_parts: list[tuple[int, Any]] = []
+    for idx, content in enumerate(contents):
+        parts = getattr(content, "parts", None) or []
+        fresp_part = next(
+            (p for p in parts if getattr(p, "function_response", None) is not None),
+            None,
+        )
+        if fresp_part is not None:
+            fresp = fresp_part.function_response
+            name = getattr(fresp, "name", "") or ""
+            call_name, call_args = calls.get(getattr(fresp, "id", "") or "", (name, {}))
+            tool = call_name or name
+            try:
+                text = json.dumps(
+                    getattr(fresp, "response", None) or {}, ensure_ascii=False, default=str
+                )
+            except (TypeError, ValueError):
+                text = str(getattr(fresp, "response", None))
+            dedupe = None
+            if tool in ("read_file", "list_dir"):
+                dedupe = str(call_args.get("path") or call_args.get("file_path") or "") or None
+            turns.append(
+                {
+                    "text": text,
+                    "is_tool_result": True,
+                    "is_error": _is_error_response(fresp),
+                    "tool": tool,
+                    "dedupe_key": dedupe,
+                }
+            )
+            resp_parts.append((idx, fresp_part))
+        else:
+            turns.append(
+                {
+                    "text": _turn_text(content),
+                    "is_tool_result": False,
+                    "is_error": False,
+                    "tool": "",
+                    "dedupe_key": None,
+                }
+            )
+
+    replacements, stats = plan_tier1(turns)
+    applied = 0
+    for idx, part in resp_parts:
+        repl = replacements[idx]
+        if repl is None:
+            continue
+        try:
+            part.function_response.response = {"_tier1_pruned": True, "preview": repl}
+            applied += 1
+        except Exception:  # noqa: BLE001 - a part we cannot shrink stays whole
+            continue
+    return stats, applied
+
+
+def make_context_guard(
+    context_window: int,
+    max_output_tokens: int,
+    reserve: int,
+    on_tier1_prune: Any = None,
+):
     """Build a ``before_model_callback`` that keeps the request under the window.
+
+    Two deterministic passes run before every model call (issue #58,
+    Increment 3):
+
+    * **Tier-1 reduction** -- stale, failed and superseded tool outputs are
+      shrunk in place (zero LLM calls), cutting the dominant input-token cost
+      on read/edit-heavy runs. ``on_tier1_prune(stats)`` fires the first time
+      a pass actually shrinks something so the run can count it.
+    * **Keep-window trim** -- if the request is still over budget, the oldest
+      whole turns are dropped.
 
     Keeps the system instruction (untouched, it lives in ``config``) and the
     most recent turns that fit ``context_window - response_room - fixed``,
@@ -193,12 +287,24 @@ def make_context_guard(context_window: int, max_output_tokens: int, reserve: int
     run that would otherwise have fit.
     """
     response_room = max(int(max_output_tokens), int(reserve))
+    pruned_flag = {"fired": False}
 
     def _guard(_callback_context: Any, llm_request: Any):
         try:
             contents = list(getattr(llm_request, "contents", None) or [])
             if not contents:
                 return None
+            # Tier-1: deterministic zero-LLM shrink of stale tool payloads.
+            try:
+                _stats, applied = _tier1_pass(contents)
+                if applied and on_tier1_prune is not None and not pruned_flag["fired"]:
+                    pruned_flag["fired"] = True
+                    try:
+                        on_tier1_prune(_stats)
+                    except Exception:  # noqa: BLE001 - counter must not break the call
+                        pass
+            except Exception as exc:  # noqa: BLE001 - Tier-1 is best-effort
+                logger.debug("tier-1 pass skipped: %s", exc)
             fixed = _fixed_overhead_tokens(llm_request)
             budget = context_window - response_room - fixed
             if budget < _GUARD_MIN_KEEP_TURNS:
@@ -832,8 +938,19 @@ class AdkEngine:
                 context_window=int(request.model.context_window),
                 max_output_tokens=int(request.model.max_tokens),
                 reserve=int(self.config.agent.compaction_reserve),
+                on_tier1_prune=self._tier1_counter(request.run_id),
             ),
         )
+
+    def _tier1_counter(self, run_id: str):
+        """Callback bumping the run's tier-1 compaction counter (Inc 0 ledger)."""
+        if self.accountant is None:
+            return None
+
+        def _bump(_stats: Any) -> None:
+            self.accountant.bump_lifecycle(run_id, "tier1_compactions")
+
+        return _bump
 
     def _delegation_needs_approval(self, approval_mode: str) -> bool:
         if self.config.agent.subagent_approval_mode == "passthrough":
@@ -1007,6 +1124,7 @@ class AdkEngine:
                 context_window=int(profile.context_window),
                 max_output_tokens=int(spec.max_tokens),
                 reserve=int(self.config.agent.compaction_reserve),
+                on_tier1_prune=self._tier1_counter(request.run_id),
             ),
         )
         app = App(name=f"claudio-sub-{agent}", root_agent=worker_agent)
