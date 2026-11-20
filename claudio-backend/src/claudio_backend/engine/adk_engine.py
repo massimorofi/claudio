@@ -1558,12 +1558,29 @@ class AdkEngine:
         reasoning_tok = 0
         turns = 0
         final_text = ""
+        saw_partial_text = False  # streaming: did this turn stream text deltas?
 
         adk_session_id = request.metadata.get("adk_session_id") or request.session_id
+        streaming = bool(getattr(self.config.agent, "streaming_enabled", False))
+        run_kwargs: dict[str, Any] = {}
+        if streaming:
+            # Issue #58 Inc 4: true incremental streaming. ADK's SSE streaming
+            # mode drives the OpenAI client's stream path, so partial text and
+            # reasoning deltas arrive as separate events and reach the client
+            # as fine-grained token events (the frontend already appends them).
+            try:
+                from google.adk.agents.run_config import RunConfig, StreamingMode
+
+                run_kwargs["run_config"] = RunConfig(
+                    streaming_mode=StreamingMode.SSE
+                )
+            except Exception:  # noqa: BLE001 - fall back to non-streaming
+                streaming = False
         agen = runner.run_async(
             user_id=adk_session_id,
             session_id=adk_session_id,
             new_message=new_message,
+            **run_kwargs,
         )
         try:
             async for event in agen:
@@ -1617,17 +1634,52 @@ class AdkEngine:
                     }
                     return
 
+                is_partial = bool(getattr(event, "partial", False))
                 for evt in translate_event(event):
-                    if evt["event"] == EventName.TOKEN.value:
-                        final_text += evt["data"]["text"]
-                        ctx.record_assistant_text(evt["data"]["text"])
-                    elif evt["event"] == EventName.TOOL_CALL.value:
+                    kind = evt["event"]
+                    if kind == EventName.TOKEN.value:
+                        text = evt["data"]["text"]
+                        if streaming and is_partial:
+                            # Incremental delta: stream to the client and
+                            # accumulate; the final aggregated event is skipped
+                            # so nothing is duplicated.
+                            saw_partial_text = True
+                            final_text += text
+                            ctx.record_assistant_text(text)
+                            yield evt
+                        elif streaming and not is_partial:
+                            # Aggregated final text. Normally already streamed
+                            # via partials (so skip it entirely -- re-adding
+                            # would double final_output); if no partials
+                            # arrived this turn (some servers emit only the
+                            # final), emit and accumulate it now so the client
+                            # is never left without the text.
+                            if not saw_partial_text:
+                                final_text += text
+                                ctx.record_assistant_text(text)
+                                yield evt
+                        else:
+                            final_text += text
+                            ctx.record_assistant_text(text)
+                            yield evt
+                    elif kind == EventName.REASONING.value:
+                        if streaming and not is_partial:
+                            continue
+                        yield evt
+                    elif kind == EventName.TOOL_CALL.value:
+                        # In streaming, function-call deltas carry partial args;
+                        # emit the completed call once, on the non-partial event.
+                        if streaming and is_partial:
+                            continue
                         # Record the call itself, not the result: an attempted
                         # call is what discharges a stated intention.
                         ctx.record_tool_call(evt["data"].get("name", ""))
-                    yield evt
+                        yield evt
+                    else:
+                        yield evt
 
                 if is_model_response(event):
+                    saw_partial_text = False
                     turns += 1
                     if request.max_turns and turns >= request.max_turns:
                         await agen.aclose()
