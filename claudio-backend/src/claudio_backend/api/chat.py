@@ -138,6 +138,12 @@ async def chat_stream(request: Request) -> StreamingResponse:
     # workspace this turn operates on.
     model_message, file_names = _resolve_files(message, files, str(workspace))
 
+    # Issue #58 Inc 2: pre-read files the prompt names explicitly so turn 1
+    # starts with their content already in context (saves a read round-trip).
+    from claudio_core.hydrate import prehydrate
+
+    model_message, _hydrated = prehydrate(model_message, workspace)
+
     if is_new:
         session_id = session_id or str(uuid.uuid4())
         await supervisor.db.create_session(

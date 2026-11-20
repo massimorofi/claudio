@@ -14,6 +14,7 @@ import shutil
 from pathlib import Path
 
 from ..context import ToolContext
+from .verify import check_syntax
 
 
 def _clip(text: str, max_chars: int) -> str:
@@ -146,6 +147,14 @@ async def write_file(
     result: dict = {"ok": True, "written": str(target), "bytes": size}
     if backup:
         result["backup"] = backup
+    # Deterministic post-write verification (issue #58 Inc 2): a syntax error
+    # comes back on the same call instead of costing a follow-up check turn.
+    # For an append we check the whole file, since the fragment alone may not
+    # parse in isolation.
+    verify_text = target.read_text(encoding="utf-8", errors="replace") if append else content
+    verification = check_syntax(target, verify_text)
+    if verification is not None:
+        result["verification"] = verification
     return result
 
 
@@ -193,7 +202,59 @@ async def edit_file(
     result: dict = {"ok": True, "edited": str(target), "replacements": count if replace_all else 1}
     if backup:
         result["backup"] = backup
+    # Deterministic post-edit verification (issue #58 Inc 2).
+    verification = check_syntax(target, new_text)
+    if verification is not None:
+        result["verification"] = verification
     return result
+
+
+async def batch_read(
+    ctx: ToolContext,
+    paths: list[str],
+    max_total_chars: int | None = None,
+) -> dict:
+    """Read several files in one call, sharing a single output budget.
+
+    Collapses the multi-file read that would otherwise take one turn per file
+    into a single deterministic fan-out. Each file is read with the same
+    clipping as ``read_file``; the shared budget stops a batch from flooding
+    the prompt. A missing file is reported per-entry, not fatal to the batch.
+
+    Args:
+        paths: File paths (relative to the workspace, or absolute).
+        max_total_chars: Total character budget across all files (defaults to
+            twice the single-file limit).
+    """
+    if not paths:
+        return {"ok": False, "error": "paths must be a non-empty list"}
+    if isinstance(paths, str):
+        paths = [paths]
+    budget = max_total_chars or (ctx.max_output_chars * 2)
+    budget = max(1, int(budget))
+    results: list[dict] = []
+    spent = 0
+    for raw in paths[:50]:
+        target = ctx.resolve_path(raw)
+        if ctx.approval_mode == "on_request" and not ctx.is_within_workspace(target):
+            results.append({"path": raw, "ok": False, "error": "outside workspace"})
+            continue
+        if not target.exists() or not target.is_file():
+            results.append({"path": raw, "ok": False, "error": "no such file"})
+            continue
+        remaining = budget - spent
+        if remaining <= 0:
+            results.append({"path": raw, "ok": False, "error": "budget exhausted"})
+            continue
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            results.append({"path": raw, "ok": False, "error": str(e)})
+            continue
+        clipped = _clip(text, remaining)
+        spent += len(clipped)
+        results.append({"path": raw, "ok": True, "content": clipped})
+    return {"ok": True, "files": results, "budget_chars": budget, "used_chars": spent}
 
 
 async def list_dir(ctx: ToolContext, path: str = ".") -> dict:

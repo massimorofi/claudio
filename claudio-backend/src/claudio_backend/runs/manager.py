@@ -70,7 +70,10 @@ MIN_DELIVERABLE_BYTES = 200
 # Tools that produce a file the user should see on the completion card.
 _WRITE_TOOL_NAMES = {"write_file", "edit_file", "create_file"}
 # Read/lookup tools -- each call is "gathering" for the write-first tracker.
-_READ_TOOL_NAMES = {"read_file", "list_dir", "web_fetch", "web_search"}
+_READ_TOOL_NAMES = {
+    "read_file", "list_dir", "web_fetch", "web_search",
+    "batch_read", "search_with_context", "locate_symbol",
+}
 
 # Fed as the input when the run is restarted after a retry or a compaction. The
 # engine's own conversation already holds the progress, so this just tells the
@@ -723,9 +726,20 @@ class RunManager:
         return self._model_spec(model_override, role=role)
 
     async def _auto_route_role(self, message: str, record: "RunRecord | None" = None) -> str:
-        """Use the fast profile to route only clearly simple requests."""
+        """Use the fast profile to route only clearly simple requests.
+
+        Issue #58 Inc 2: a deterministic pre-check decides "primary" for
+        requests that unambiguously need tools, eliminating the router LLM call
+        for the common coding case. Only genuinely ambiguous requests reach the
+        fast-profile classifier.
+        """
         if not self.config.agent.auto_routing_enabled:
             return "primary"
+        if getattr(self.config.agent, "router_deterministic_first", True):
+            from claudio_core.routing import deterministic_route
+
+            if deterministic_route(message) == "primary":
+                return "primary"
         fast = resolve_profile(self.config, "fast")
         primary = resolve_profile(self.config, "primary")
         if (fast.model, fast.base_url) == (primary.model, primary.base_url):

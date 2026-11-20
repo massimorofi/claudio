@@ -118,6 +118,11 @@ agent:
       - web_fetch
       - rewind_files
       - todo_write
+      # Compound read-only tools (issue #58 Inc 2): collapse multi-step
+      # read/search sequences into single deterministic calls.
+      - batch_read
+      - search_with_context
+      - locate_symbol
     disabled: []
   subagents:
     code_worker:

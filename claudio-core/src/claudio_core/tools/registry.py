@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine
 
-from .files import read_file, write_file, edit_file, list_dir, rewind_files
+from .files import read_file, write_file, edit_file, list_dir, rewind_files, batch_read
+from .search import search_with_context, locate_symbol
 from .shell import run_command
 from .web import web_fetch, web_search
 from .planning import todo_write
@@ -33,6 +34,11 @@ TOOL_META: dict[str, ToolMeta] = {
     "write_file": ToolMeta("write_file", is_destructive=True, path_arg="path"),
     "edit_file": ToolMeta("edit_file", is_destructive=True, path_arg="path"),
     "list_dir": ToolMeta("list_dir", is_read_only=True, path_arg="path"),
+    # Compound read-only tools (issue #58 Inc 2): one call replaces a
+    # grep-then-read or multi-read sequence, so no extra LLM turn is spent.
+    "batch_read": ToolMeta("batch_read", is_read_only=True),
+    "search_with_context": ToolMeta("search_with_context", is_read_only=True),
+    "locate_symbol": ToolMeta("locate_symbol", is_read_only=True),
     "rewind_files": ToolMeta("rewind_files", is_destructive=True),
     "run_command": ToolMeta("run_command", is_destructive=True),
     "web_fetch": ToolMeta("web_fetch", is_read_only=True),
@@ -57,6 +63,9 @@ TOOL_FUNCTIONS: dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {
     "write_file": write_file,
     "edit_file": edit_file,
     "list_dir": list_dir,
+    "batch_read": batch_read,
+    "search_with_context": search_with_context,
+    "locate_symbol": locate_symbol,
     "rewind_files": rewind_files,
     "run_command": run_command,
     "web_fetch": web_fetch,

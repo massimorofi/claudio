@@ -232,6 +232,9 @@ class AgentConfig(BaseModel):
     # current workspace. Empty = the built-in default (/workspace/.gortex-index.json).
     gortex_manifest_path: str = ""
     auto_routing_enabled: bool = False
+    # Issue #58 Inc 2: short-circuit the auto-router's LLM call when the
+    # request unambiguously needs tools (deterministic "primary" first).
+    router_deterministic_first: bool = True
     subagent_approval_mode: str = "one_gate"
     tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)
     subagents: dict[str, SubagentConfig] = Field(default_factory=dict)
