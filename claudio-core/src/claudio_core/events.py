@@ -147,6 +147,10 @@ class ContextUsageEventData(TypedDict):
     compact_threshold: int
     source: str  # "model" | "estimate" | "stored"
     auto_disabled: bool
+    # Issue #58 Increment 0: provider-reported prompt-cache signal for the
+    # turn. Both are 0 when the endpoint reports no cache details.
+    cached_input_tokens: int
+    cache_hit_ratio: float
 
 
 #: Events whose payload must be a non-empty string in ``arguments``.

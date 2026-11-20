@@ -57,7 +57,7 @@ def make_daemon_adk_tool(fn: Callable, ctx: DaemonContext) -> FunctionTool:
     return FunctionTool(wrapper)
 
 
-def _make_model(config: AppConfig) -> Any:
+def _make_model(config: AppConfig, session_id: str = "") -> Any:
     from google.adk.integrations.openai import OpenAILlm
 
     from ..engine.reasoning_llm import make_openai_client
@@ -66,11 +66,19 @@ def _make_model(config: AppConfig) -> Any:
     # header-stripping gateways (e.g. Merck's GPTeal) require and the
     # max_tokens -> max_completion_tokens retry for reasoning models. When
     # ``client`` is set, ADK ignores base_url/api_key.
+    #
+    # The call context tags every daemon HTTP call ``purpose="daemon"`` in
+    # the unified ledger (issue #58, Increment 0); the recorder itself falls
+    # back to the process-wide default installed by the supervisor.
     return OpenAILlm(
         model=config.llm.model,
         base_url=config.llm.base_url,
         api_key=config.llm.api_key or "local",
-        client=make_openai_client(config.llm.base_url, config.llm.api_key),
+        client=make_openai_client(
+            config.llm.base_url,
+            config.llm.api_key,
+            {"purpose": "daemon", "model": config.llm.model, "session_id": session_id},
+        ),
     )
 
 
@@ -95,7 +103,7 @@ async def run_daemon_agent(
     agent = LlmAgent(
         name="claudio_daemon",
         instruction=prompt,
-        model=_make_model(config),
+        model=_make_model(config, session_id),
         tools=adk_tools,
     )
     app = App(name=DAEMON_APP_NAME, root_agent=agent)

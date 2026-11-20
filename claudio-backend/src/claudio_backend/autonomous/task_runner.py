@@ -62,10 +62,14 @@ SCRIPT_TASK_TIMEOUT_SECONDS = 300.0
 
 
 class TaskRunner:
-    def __init__(self, config: AppConfig, db: Database, notifier) -> None:
+    def __init__(self, config: AppConfig, db: Database, notifier, accountant=None) -> None:
         self.config = config
         self.db = db
         self.notifier = notifier
+        # Unified call ledger (issue #58, Increment 0); daemon calls are
+        # flushed here after each task so they survive independently of the
+        # chat-run finalisation path.
+        self.accountant = accountant
         self._running: set[str] = set()
 
     # ---- user-defined agent tasks --------------------------------------
@@ -134,6 +138,13 @@ class TaskRunner:
             session_db_path=str(session_db),
             max_turns=self.config.agent.max_turns,
         )
+        if self.accountant is not None:
+            # Daemon calls carry no chat run_id; they buffer under "" and are
+            # persisted here (issue #58, Increment 0).
+            try:
+                await self.accountant.flush(self.db, "")
+            except Exception:  # noqa: BLE001 - telemetry must not fail a task
+                logger.debug("daemon ledger flush failed", exc_info=True)
         return self._coerce_report(text)
 
     @staticmethod

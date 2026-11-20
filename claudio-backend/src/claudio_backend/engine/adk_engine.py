@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -310,6 +311,43 @@ def normalise_state(state: Any) -> AdkPauseState:
 # --------------------------------------------------------------------------
 
 
+def _tool_result_is_error(result: Any) -> bool:
+    """Whether a tool result dict represents a handled failure."""
+    if isinstance(result, dict):
+        return bool(result.get("error") or result.get("ok") is False)
+    return False
+
+
+def _record_tool_call(
+    ctx: ToolContext,
+    name: str,
+    started: float,
+    result: Any,
+    is_error: bool,
+) -> None:
+    """Feed one tool execution into the unified ledger (issue #58 Inc 0)."""
+    accountant = getattr(ctx, "accountant", None)
+    if accountant is None:
+        return
+    from claudio_core.accounting import ToolCallRecord, estimate_tokens
+
+    finished = time.time()
+    text = _stringify(result)
+    accountant.record_tool_call(
+        ToolCallRecord(
+            run_id=ctx.run_id,
+            session_id=ctx.session_id,
+            name=name,
+            started_at=started,
+            finished_at=finished,
+            duration_ms=(finished - started) * 1000.0,
+            is_error=is_error,
+            result_chars=len(text),
+            est_result_tokens=estimate_tokens(text),
+        )
+    )
+
+
 def make_adk_tool(
     name: str,
     ctx: ToolContext,
@@ -321,6 +359,10 @@ def make_adk_tool(
     The wrapper accepts ``**kwargs`` and is then given a synthetic
     ``__signature__`` listing only the model-facing parameters, so ADK
     builds the real schema while ``ctx`` stays invisible to the model.
+
+    It is also the tool-telemetry seam (issue #58, Increment 0): every
+    execution's duration, outcome and payload size are recorded when the
+    context carries an accountant.
     """
     fn = TOOL_FUNCTIONS[name]
 
@@ -328,11 +370,17 @@ def make_adk_tool(
     model_params = [p for p in real.parameters.values() if p.name != "ctx"]
 
     async def wrapper(**kwargs: Any) -> dict[str, Any]:
+        started = time.time()
         try:
-            return await fn(ctx, **kwargs)
+            result = await fn(ctx, **kwargs)
         except Exception as exc:  # noqa: BLE001 - tool errors are data, not crashes
             logger.warning("tool %s raised: %s", name, exc)
+            _record_tool_call(ctx, name, started, {"error": str(exc)}, True)
             return {"error": str(exc)}
+        _record_tool_call(
+            ctx, name, started, result, _tool_result_is_error(result)
+        )
+        return result
 
     wrapper.__name__ = name
     wrapper.__doc__ = fn.__doc__ or f"{name}."
@@ -479,6 +527,31 @@ def usage_from_event(event: Any) -> tuple[int, int]:
     return int(tin or 0), int(tout or 0)
 
 
+def usage_detail_from_event(event: Any) -> dict[str, int]:
+    """Full provider usage from an ADK event (issue #58, Increment 0).
+
+    ADK already maps ``prompt_tokens_details.cached_tokens`` onto
+    ``cached_content_token_count`` and ``completion_tokens_details.reasoning_tokens``
+    onto ``thoughts_token_count`` -- ``usage_from_event`` used to drop both.
+    ``reasoning_tokens`` is a subset of the output tokens and is kept separate
+    so run totals never double-count it.
+    """
+    usage = getattr(event, "usage_metadata", None)
+    detail = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
+    if not usage:
+        return detail
+    tin, tout = usage_from_event(event)
+    detail["input_tokens"] = tin
+    detail["output_tokens"] = tout
+    detail["cached_input_tokens"] = int(
+        getattr(usage, "cached_content_token_count", 0) or 0
+    )
+    detail["reasoning_tokens"] = int(
+        getattr(usage, "thoughts_token_count", 0) or 0
+    )
+    return detail
+
+
 def is_model_response(event: Any) -> bool:
     """True when this event is one completed model response.
 
@@ -601,9 +674,12 @@ def _mcp_connection_params(entry: MCPServerEntry) -> Any:
 class AdkEngine:
     """A :class:`claudio_core.engine.RunEngine` backed by Google ADK."""
 
-    def __init__(self, config: AppConfig, db: Database) -> None:
+    def __init__(self, config: AppConfig, db: Database, accountant: Any = None) -> None:
         self.config = config
         self.db = db
+        # Unified LLM-call ledger (issue #58, Increment 0). Optional so tests
+        # and legacy callers can build an engine without accounting.
+        self.accountant = accountant
         self._cancelled: set[str] = set()
         # MCP toolsets are built once per (mcp-config, approval-mode) pair and
         # reused across runs so connections pool rather than being re-opened per
@@ -616,7 +692,7 @@ class AdkEngine:
 
     # -- construction helpers -------------------------------------------
 
-    def _model(self, spec: ModelSpec) -> Any:
+    def _model(self, spec: ModelSpec, call_context: dict[str, Any] | None = None) -> Any:
         # ReasoningOpenAILlm is a thin subclass of the ADK's OpenAILlm that
         # forwards the model's ``reasoning_content`` deltas as thought parts.
         # The stock OpenAILlm drops them, so the model's thinking never reached
@@ -640,8 +716,35 @@ class AdkEngine:
             base_url=spec.base_url,
             api_key=spec.api_key or "local",
             max_tokens=spec.max_tokens,
-            client=make_openai_client(spec.base_url, spec.api_key),
+            client=make_openai_client(spec.base_url, spec.api_key, call_context),
         )
+
+    def _call_context(
+        self, request: RunRequest, purpose: str, *, model: str = ""
+    ) -> dict[str, Any]:
+        """Per-client accounting context for the engine-path HTTP boundary.
+
+        Every HTTP call the resulting client makes is recorded against this
+        run with the given purpose (``primary`` for the agent's own turns,
+        ``delegate`` for worker sub-agents). The recorder is the accountant's;
+        with no accountant attached the client records nothing.
+        """
+        if self.accountant is None:
+            return {}
+        # A manager-level retry restarts the whole stream; the ledger records
+        # those calls as "retry" so primary vs retry cost is separable.
+        if purpose == "primary" and int(request.metadata.get("attempt") or 1) > 1:
+            purpose = "retry"
+        return {
+            "recorder": self.accountant.make_engine_recorder(),
+            "run_id": request.run_id,
+            "session_id": request.session_id,
+            "purpose": purpose,
+            "model_role": str(request.metadata.get("model_role") or ""),
+            "profile_name": str(request.metadata.get("profile_name") or ""),
+            "model": model or request.model.model,
+            "reasoning_effort": str(getattr(request.model, "reasoning_effort", "") or ""),
+        }
 
     def _build_agent(self, request: RunRequest, ctx: ToolContext) -> LlmAgent:
         tools: list[Any] = []
@@ -720,7 +823,10 @@ class AdkEngine:
         return LlmAgent(
             name=request.metadata.get("agent_name", "claudio"),
             instruction=_instruction_provider,
-            model=self._model(request.model),
+            model=self._model(
+                request.model,
+                self._call_context(request, "primary"),
+            ),
             tools=tools,
             before_model_callback=make_context_guard(
                 context_window=int(request.model.context_window),
@@ -768,6 +874,7 @@ class AdkEngine:
             workspace_id=request.workspace_id,
             workspace_state_dir=workspace_state_dir(request.workspace_id),
             run_id=request.run_id,
+            accountant=self.accountant,
             # The delegate_task tool calls this to spin up a stateless worker
             # sub-agent on the worker profile. Captured per run so the worker
             # inherits this run's workspace and identity.
@@ -857,6 +964,7 @@ class AdkEngine:
             db=self.db,
             workspace_id=request.workspace_id,
             run_id=request.run_id,
+            accountant=self.accountant,
         )
         tools: list[Any] = []
         for name in (sub.tools or []):
@@ -890,7 +998,10 @@ class AdkEngine:
         worker_agent = LlmAgent(
             name=f"worker_{agent}",
             instruction=self._subagent_instruction(sub),
-            model=self._model(spec),
+            model=self._model(
+                spec,
+                self._call_context(request, "delegate", model=spec.model),
+            ),
             tools=tools,
             before_model_callback=make_context_guard(
                 context_window=int(profile.context_window),
@@ -1276,6 +1387,8 @@ class AdkEngine:
     ) -> AsyncIterator[dict[str, Any]]:
         input_tokens = 0
         output_tokens = 0
+        cached_tokens = 0
+        reasoning_tok = 0
         turns = 0
         final_text = ""
 
@@ -1293,6 +1406,9 @@ class AdkEngine:
                     return
 
                 tin, tout = usage_from_event(event)
+                detail = usage_detail_from_event(event)
+                cached_tokens += detail["cached_input_tokens"]
+                reasoning_tok += detail["reasoning_tokens"]
                 input_tokens += tin
                 output_tokens += tout
                 if tin:
@@ -1303,10 +1419,20 @@ class AdkEngine:
                     ctx.turns_since_todo += 1
                     # The engine is the only layer that knows how large the
                     # prompt actually was, so it publishes the gauge; the
-                    # RunManager persists it.
+                    # RunManager persists it. The cache fields (issue #58
+                    # Increment 0) carry the provider-reported prompt-cache
+                    # signal for this turn.
                     yield {
                         "event": EventName.CONTEXT_USAGE.value,
-                        "data": context_usage_payload(tin, self.config, "model"),
+                        "data": context_usage_payload(
+                            tin,
+                            self.config,
+                            "model",
+                            cached_input_tokens=detail["cached_input_tokens"],
+                            cache_hit_ratio=(
+                                detail["cached_input_tokens"] / tin if tin else 0.0
+                            ),
+                        ),
                     }
 
                 pause = find_confirmation(event)
@@ -1434,6 +1560,7 @@ def create_engine(
     config: AppConfig,
     db: Database,
     kind: str | None = None,
+    accountant: Any = None,
 ) -> AdkEngine:
     """Build the engine for this deployment.
 
@@ -1441,10 +1568,13 @@ def create_engine(
     environment variable, then to ``"adk"``. The parameter exists so the
     flag-switch described in the refactor plan (run the same flow through two
     engines and compare) is a constructor argument rather than a code change.
+
+    ``accountant`` is the optional unified LLM-call ledger (issue #58,
+    Increment 0) shared with the run manager.
     """
     selected = (kind or os.environ.get("CLAUDIO_ENGINE") or "adk").strip().lower()
     if selected in ("adk", "google_adk", "google-adk"):
-        return AdkEngine(config=config, db=db)
+        return AdkEngine(config=config, db=db, accountant=accountant)
     raise EngineError(
         "unknown_engine",
         f"Unknown engine {selected!r}; this build provides 'adk'.",

@@ -41,6 +41,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from claudio_core.accounting import CallAccountant
 from claudio_core.context import context_usage_payload
 from claudio_core.db import Database, utcnow
 from claudio_core.engine import ModelSpec, RunRequest, ToolPolicy
@@ -205,6 +206,21 @@ class RunRecord:
     # Mid-run compaction bookkeeping.
     compact_requested: asyncio.Event = field(default_factory=asyncio.Event)
     mid_run_compactions: int = 0
+    # Issue #58 Increment 0: durable lifecycle + accounting aggregates.
+    # ``retries``/``replans``/``auto_continues`` used to be loop-locals that
+    # vanished at finalisation; they now live on the record and are persisted.
+    retries: int = 0
+    replans: int = 0
+    auto_continues: int = 0
+    tier1_compactions: int = 0
+    tier2_compactions: int = 0
+    attempt: int = 1
+    # Filled from the call ledger at finalisation (measured provider usage).
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    model_calls: int = 0
+    tool_calls: int = 0
+    cache_hit_ratio: float = 0.0
 
 
 class RunManager:
@@ -216,6 +232,7 @@ class RunManager:
         metrics,
         compactor,
         engine,
+        accountant: CallAccountant | None = None,
     ) -> None:
         self.config = config
         self.db = db
@@ -223,6 +240,11 @@ class RunManager:
         self.metrics = metrics
         self.compactor = compactor
         self.engine = engine
+        # Unified LLM-call ledger (issue #58, Increment 0). Shared with the
+        # engine by the supervisor; standalone tests get their own instance.
+        self.accountant = accountant if accountant is not None else CallAccountant(
+            metrics=metrics
+        )
         self.profile_health = getattr(engine, "profile_health", None)
         self._runs: dict[str, RunRecord] = {}
         self._lock = asyncio.Lock()
@@ -230,6 +252,15 @@ class RunManager:
         # weak reference doesn't let them be GC'd mid-flight; each discards
         # itself on completion.
         self._capture_tasks: set = set()
+
+    def _acct(self) -> CallAccountant:
+        """The unified ledger, lazily created for partial-manager test doubles
+        that bypass ``__init__`` (issue #58, Increment 0)."""
+        acc = getattr(self, "accountant", None)
+        if acc is None:
+            acc = CallAccountant(metrics=getattr(self, "metrics", None))
+            self.accountant = acc
+        return acc
 
     # ---- public API -----------------------------------------------------
 
@@ -348,13 +379,17 @@ class RunManager:
     def active_count(self) -> int:
         return sum(1 for r in self._runs.values() if r.state == "running")
 
-    def _build_summariser(self):
+    def _build_summariser(self, record: "RunRecord | None" = None):
         """Build the injected summariser callable for the Compactor.
 
         Compaction is a single one-shot generation, not an agent run, so it
         goes straight through the OpenAI-compatible client rather than the
         engine. The summary budget and timeout come from the compactor so a
         slow local model gets the long budget its own config promises.
+
+        The call is tagged ``purpose="compaction"`` in the unified ledger
+        (issue #58, Increment 0) so Tier-2 summarisation tokens are visible
+        separately from the agent's own turns.
         """
         fast = resolve_profile(self.config, "fast")
         max_tokens = 2000
@@ -362,6 +397,15 @@ class RunManager:
             max_tokens = int(getattr(self.compactor, "max_compact_tokens", 2000) or 2000)
         max_tokens = min(max_tokens, fast.context_window)
         timeout = float(self.config.agent.compaction_timeout_seconds)
+        sink = self._acct().make_llm_sink(
+            run_id=record.run_id if record else "",
+            session_id=record.session_id if record else "",
+            purpose="compaction",
+            model=fast.model,
+            model_role="fast",
+            profile_name=profile_name_for_role(self.config, "fast"),
+            reasoning_effort=fast.reasoning_effort,
+        )
 
         async def summarise(prompt: str) -> str:
             return await openai_chat_completion(
@@ -372,6 +416,8 @@ class RunManager:
                 temperature=fast.temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
+                purpose="compaction",
+                usage_sink=sink,
             )
 
         return summarise
@@ -411,7 +457,7 @@ class RunManager:
             )
             if len(items) < 2:
                 return False
-            summarise = self._build_summariser()
+            summarise = self._build_summariser(record)
             summary = await self.compactor.summarize(
                 items, summarise, record.session_id
             )
@@ -424,6 +470,10 @@ class RunManager:
             return False
         if not summary or not str(summary).strip():
             return False
+        # Tier-2 (LLM) compaction actually ran (issue #58 Increment 0). Tier-1
+        # deterministic compaction, when it lands, will bump its own counter
+        # without an LLM call.
+        record.tier2_compactions += 1
         await self.engine.replace_conversation(
             record.session_id, workspace_id, summary
         )
@@ -664,6 +714,7 @@ class RunManager:
             price_input_per_mtok=profile.price_input_per_mtok,
             price_output_per_mtok=profile.price_output_per_mtok,
             context_window=int(profile.context_window),
+            reasoning_effort=profile.reasoning_effort,
         )
 
     def _model_spec_for_role(
@@ -671,7 +722,7 @@ class RunManager:
     ) -> ModelSpec:
         return self._model_spec(model_override, role=role)
 
-    async def _auto_route_role(self, message: str) -> str:
+    async def _auto_route_role(self, message: str, record: "RunRecord | None" = None) -> str:
         """Use the fast profile to route only clearly simple requests."""
         if not self.config.agent.auto_routing_enabled:
             return "primary"
@@ -687,6 +738,15 @@ class RunManager:
             )
             return "primary"
         text = message if len(message) <= 8000 else message[:4000] + "\n[...]\n" + message[-4000:]
+        router_sink = self._acct().make_llm_sink(
+            run_id=record.run_id if record else "",
+            session_id=record.session_id if record else "",
+            purpose="router",
+            model=fast.model,
+            model_role="fast",
+            profile_name=profile_name,
+            reasoning_effort=fast.reasoning_effort,
+        )
         try:
             result = await openai_chat_completion(
                 base_url=fast.base_url,
@@ -709,6 +769,8 @@ class RunManager:
                 temperature=0.0,
                 max_tokens=512,
                 timeout=min(float(fast.timeout_seconds), 15.0),
+                purpose="router",
+                usage_sink=router_sink,
             )
         except Exception as exc:
             if self.profile_health:
@@ -888,6 +950,10 @@ class RunManager:
                 ),
                 "worker_instructions": record.worker_instructions,
                 "adk_session_id": record.adk_session_id,
+                # Attempt number for the call ledger (issue #58 Inc 0): the
+                # engine tags its HTTP calls "retry" instead of "primary"
+                # once the recovery loop has restarted this run.
+                "attempt": record.attempt,
                 "subagent_run_factory": (
                     lambda **kw: self._run_child_subagent(record, **kw)
                 ),
@@ -906,7 +972,7 @@ class RunManager:
             if budget > 0 and base_cost >= budget:
                 raise BudgetExceededError(base_cost, budget)
             if record.parent_run_id is None:
-                record.model_role = await self._auto_route_role(message)
+                record.model_role = await self._auto_route_role(message, record)
             request = self._build_request(record, message, approval_mode)
             self.metrics.inc_run_started()
             self._publish(
@@ -988,8 +1054,9 @@ class RunManager:
         total_input = 0
         total_output = 0
         total_cost = 0.0
-        auto_continues = 0
-        replans = 0
+        # Counters live on the record (issue #58 Inc 0) so they survive to
+        # finalisation and land in the runs table instead of vanishing with
+        # the loop frame.
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
@@ -1038,10 +1105,10 @@ class RunManager:
                 over_budget = budget > 0 and (
                     base_cost + total_cost + record.delegated_cost_usd
                 ) >= budget
-                if auto_continues >= max_continues or not made_progress or over_budget:
+                if record.auto_continues >= max_continues or not made_progress or over_budget:
                     await self._finalize_completed(record, merged)
                     return
-                auto_continues += 1
+                record.auto_continues += 1
                 prev_outstanding = len(outstanding)
                 prev_files_written = files_now
                 request = self._build_request(
@@ -1076,14 +1143,14 @@ class RunManager:
                     base_cost + total_cost + record.delegated_cost_usd
                 ) >= budget
                 if record.approval_mode == "off" and not over_budget:
-                    replans += 1
+                    record.replans += 1
                     self._publish(
                         record,
                         {
                             "event": EventName.RUN_RESTARTING.value,
                             "data": {
                                 "reason": "max_turns_replan",
-                                "attempt": replans,
+                                "attempt": record.replans,
                             },
                         },
                     )
@@ -1138,6 +1205,10 @@ class RunManager:
                 continue
             if retryable and attempt < max_retries:
                 attempt += 1
+                record.retries += 1
+                # The next request is attempt+1 (the first request was #1);
+                # the engine tags its ledger rows "retry" from #2 onward.
+                record.attempt = attempt + 1
                 self.metrics.inc_retry()
                 self._publish(
                     record,
@@ -1177,15 +1248,15 @@ class RunManager:
                     >= budget
                 )
             ):
-                replans += 1
+                record.replans += 1
                 self._publish(
                     record,
                     {
                         "event": EventName.RUN_RESTARTING.value,
-                        "data": {"reason": "replan", "attempt": replans},
+                        "data": {"reason": "replan", "attempt": record.replans},
                     },
                 )
-                await asyncio.sleep(_backoff_seconds(min(replans, 6)))
+                await asyncio.sleep(_backoff_seconds(min(record.replans, 6)))
                 request = self._build_request(
                     record, REPLAN_PROMPT, record.approval_mode
                 )
@@ -1215,8 +1286,9 @@ class RunManager:
         total_input = 0
         total_output = 0
         total_cost = 0.0
-        auto_continues = 0
-        replans = 0
+        # Counters live on the record (issue #58 Inc 0) so they survive to
+        # finalisation and land in the runs table instead of vanishing with
+        # the loop frame.
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
@@ -1260,10 +1332,10 @@ class RunManager:
                 over_budget = budget > 0 and (
                     base_cost + total_cost + record.delegated_cost_usd
                 ) >= budget
-                if auto_continues >= max_continues or not made_progress or over_budget:
+                if record.auto_continues >= max_continues or not made_progress or over_budget:
                     await self._finalize_completed(record, merged)
                     return
-                auto_continues += 1
+                record.auto_continues += 1
                 prev_outstanding = len(outstanding)
                 prev_files_written = files_now
                 request = self._build_request(
@@ -1290,14 +1362,14 @@ class RunManager:
                     base_cost + total_cost + record.delegated_cost_usd
                 ) >= budget
                 if record.approval_mode == "off" and not over_budget:
-                    replans += 1
+                    record.replans += 1
                     self._publish(
                         record,
                         {
                             "event": EventName.RUN_RESTARTING.value,
                             "data": {
                                 "reason": "max_turns_replan",
-                                "attempt": replans,
+                                "attempt": record.replans,
                             },
                         },
                     )
@@ -1344,6 +1416,10 @@ class RunManager:
                 continue
             if retryable and attempt < max_retries:
                 attempt += 1
+                record.retries += 1
+                # The next request is attempt+1 (the first request was #1);
+                # the engine tags its ledger rows "retry" from #2 onward.
+                record.attempt = attempt + 1
                 self.metrics.inc_retry()
                 self._publish(
                     record,
@@ -1383,15 +1459,15 @@ class RunManager:
                     >= budget
                 )
             ):
-                replans += 1
+                record.replans += 1
                 self._publish(
                     record,
                     {
                         "event": EventName.RUN_RESTARTING.value,
-                        "data": {"reason": "replan", "attempt": replans},
+                        "data": {"reason": "replan", "attempt": record.replans},
                     },
                 )
-                await asyncio.sleep(_backoff_seconds(min(replans, 6)))
+                await asyncio.sleep(_backoff_seconds(min(record.replans, 6)))
                 request = self._build_request(
                     record, REPLAN_PROMPT, record.approval_mode
                 )
@@ -1674,6 +1750,49 @@ class RunManager:
 
     # ---- finalisation ---------------------------------------------------
 
+    def _fold_accounting(self, record: RunRecord) -> dict[str, Any]:
+        """Pull the call ledger's per-run aggregates onto the record.
+
+        Issue #58 Increment 0: cached/reasoning tokens and the physical call
+        count come from the unified ledger (measured provider usage only);
+        the lifecycle counters merge the record's own loop counters with the
+        accountant's. Returns the ledger totals for the caller's use.
+        """
+        totals = self._acct().usage_totals(record.run_id)
+        life = self._acct().lifecycle(record.run_id)
+        record.cached_input_tokens = int(totals["cached_input_tokens"])
+        record.reasoning_tokens = int(totals["reasoning_tokens"])
+        record.model_calls = int(totals["calls"])
+        record.tool_calls = int(life.get("tool_calls", 0))
+        record.cache_hit_ratio = float(totals["cache_hit_ratio"])
+        # The accountant's lifecycle mirrors the record's loop counters for
+        # retries/replans/continuations; take the max so a value bumped on
+        # either side is never lost.
+        record.retries = max(record.retries, int(life.get("retries", 0)))
+        record.replans = max(record.replans, int(life.get("replans", 0)))
+        record.auto_continues = max(
+            record.auto_continues, int(life.get("auto_continues", 0))
+        )
+        record.tier2_compactions = max(
+            record.tier2_compactions, record.mid_run_compactions
+        )
+        return totals
+
+    def _accounting_fields(self, record: RunRecord) -> dict[str, Any]:
+        """The ledger-derived columns every terminal run row must persist."""
+        return {
+            "cached_input_tokens": record.cached_input_tokens,
+            "reasoning_tokens": record.reasoning_tokens,
+            "model_calls": record.model_calls,
+            "tool_calls": record.tool_calls,
+            "cache_hit_ratio": record.cache_hit_ratio,
+            "retries": record.retries,
+            "replans": record.replans,
+            "auto_continues": record.auto_continues,
+            "tier1_compactions": record.tier1_compactions,
+            "tier2_compactions": record.tier2_compactions,
+        }
+
     async def _finalize_completed(self, record: RunRecord, data: dict[str, Any]) -> None:
         duration = max(0.0, time.time() - (record.started_at or time.time()))
         usage = data.get("usage") or {}
@@ -1683,6 +1802,7 @@ class RunManager:
             record.output_tokens,
             record.cost_usd,
         ) = _combined_usage(usage, record, self.config, record.final_output)
+        self._fold_accounting(record)
         record.state = "completed"
         record.state_changed.set()
         self.metrics.inc_run_completed()
@@ -1697,7 +1817,9 @@ class RunManager:
             input_tokens=record.input_tokens,
             output_tokens=record.output_tokens,
             final_output=record.final_output,
+            **self._accounting_fields(record),
         )
+        await self._acct().flush(self.db, record.run_id)
         todos = await self._load_todos(record.session_id)
         outstanding = [
             t.get("content", "")
@@ -1820,15 +1942,34 @@ class RunManager:
             return
         if not new_entries:
             return
-        task = asyncio.create_task(
-            capture_run(
-                self.db,
-                new_entries,
-                self.config,
-                session_id=record.session_id,
-                run_id=record.run_id,
-            )
+        learning_sink = self._acct().make_llm_sink(
+            run_id=record.run_id,
+            session_id=record.session_id,
+            purpose="learning",
+            model=resolve_profile(self.config, "fast").model,
+            model_role="fast",
+            profile_name=profile_name_for_role(self.config, "fast"),
         )
+
+        async def _capture_and_flush() -> None:
+            try:
+                await capture_run(
+                    self.db,
+                    new_entries,
+                    self.config,
+                    session_id=record.session_id,
+                    run_id=record.run_id,
+                    usage_sink=learning_sink,
+                )
+            finally:
+                # The learning call lands after the run finalised and flushed;
+                # persist its ledger row too (issue #58 Increment 0).
+                try:
+                    await self._acct().flush(self.db, record.run_id)
+                except Exception:  # noqa: BLE001 - capture stays best-effort
+                    logger.debug("post-capture ledger flush failed", exc_info=True)
+
+        task = asyncio.create_task(_capture_and_flush())
         self._capture_tasks.add(task)
         task.add_done_callback(self._capture_tasks.discard)
 
@@ -1842,6 +1983,7 @@ class RunManager:
         record.error_code = code
         record.error_message = message or ""
         self.metrics.inc_run_failed()
+        self._fold_accounting(record)
         await self.db.update_run(
             record.run_id,
             state="failed",
@@ -1849,7 +1991,9 @@ class RunManager:
             error_code=code,
             error_message=record.error_message,
             turns_used=record.turns_used,
+            **self._accounting_fields(record),
         )
+        await self._acct().flush(self.db, record.run_id)
         if record.parent_run_id is None:
             self._append_turn_status(
                 record,
@@ -1880,13 +2024,16 @@ class RunManager:
         duration = max(0.0, time.time() - (record.started_at or time.time()))
         record.state = "cancelled"
         record.state_changed.set()
+        self._fold_accounting(record)
         await self.db.update_run(
             record.run_id,
             state="cancelled",
             finished_at=utcnow(),
             error_code="cancelled",
             error_message="Run cancelled",
+            **self._accounting_fields(record),
         )
+        await self._acct().flush(self.db, record.run_id)
         if record.parent_run_id is None:
             self._append_turn_status(
                 record,

@@ -13,9 +13,12 @@ points at a local server whose base URL the operator configured.
 from __future__ import annotations
 
 import json
-from typing import Any
+import time
+from typing import Any, Callable
 
 import httpx
+
+from .accounting import get_default_recorder
 
 
 class LlmCallError(Exception):
@@ -31,14 +34,33 @@ async def openai_chat_completion(
     temperature: float = 0.2,
     max_tokens: int = 2048,
     timeout: float = 300.0,
+    purpose: str = "other",
+    usage_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Return the assistant text from one chat-completion request.
 
     ``base_url`` may be given with or without the ``/v1`` suffix; both are
     accepted because local servers differ. Raises :class:`LlmCallError` on any
     failure -- callers that treat the result as optional should catch it.
+
+    ``usage_sink`` (issue #58, Increment 0) is called exactly once per logical
+    call -- on success *and* on failure -- with a plain dict::
+
+        {"purpose", "model", "started_at", "finished_at", "duration_ms",
+         "outcome": "ok"|"error", "error_code", "attempt",
+         "usage": {"input_tokens", "output_tokens", "cached_input_tokens",
+                   "reasoning_tokens"} | None,
+         "measured": bool}
+
+    so every auxiliary call (compaction, router, learning, fixer, ...) lands
+    in the unified ledger without changing this function's return type. The
+    ``max_tokens`` rename retry is one logical call with ``attempt=2``, not two
+    records. A sink that raises is swallowed: telemetry must never break a
+    completion.
     """
     if not base_url:
+        _emit(usage_sink, purpose, model, time.time(), time.time(), 0.0,
+              "error", "no_base_url", 1, None)
         raise LlmCallError("No base_url configured for the LLM endpoint")
 
     url = _join(base_url)
@@ -56,29 +78,129 @@ async def openai_chat_completion(
     key = api_key or "local"
     headers = {"Authorization": f"Bearer {key}", "api-key": key}
 
+    started = time.time()
+    attempt = 1
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            # gpt-5/6-class reasoning models reject ``max_tokens`` and require
-            # ``max_completion_tokens``. When the endpoint says so explicitly,
-            # rename the field and resend exactly once.
-            if resp.status_code == 400 and _rejects_max_tokens(resp):
-                payload["max_completion_tokens"] = payload.pop("max_tokens")
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        raise LlmCallError(f"LLM request failed: {exc}") from exc
+                # gpt-5/6-class reasoning models reject ``max_tokens`` and require
+                # ``max_completion_tokens``. When the endpoint says so explicitly,
+                # rename the field and resend exactly once.
+                if resp.status_code == 400 and _rejects_max_tokens(resp):
+                    attempt = 2
+                    payload["max_completion_tokens"] = payload.pop("max_tokens")
+                    resp = await client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            _emit(usage_sink, purpose, model, started, time.time(),
+                  (time.time() - started) * 1000.0, "error",
+                  exc.__class__.__name__, attempt, None)
+            raise LlmCallError(f"LLM request failed: {exc}") from exc
 
-    if resp.status_code >= 400:
-        raise LlmCallError(
-            f"LLM endpoint returned {resp.status_code}: {resp.text[:300]}"
-        )
+        if resp.status_code >= 400:
+            _emit(usage_sink, purpose, model, started, time.time(),
+                  (time.time() - started) * 1000.0, "error",
+                  f"http_{resp.status_code}", attempt, None)
+            raise LlmCallError(
+                f"LLM endpoint returned {resp.status_code}: {resp.text[:300]}"
+            )
 
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            _emit(usage_sink, purpose, model, started, time.time(),
+                  (time.time() - started) * 1000.0, "error",
+                  "invalid_json", attempt, None)
+            raise LlmCallError(
+                f"LLM returned non-JSON response: {resp.text[:200]}"
+            ) from exc
+
+        usage = _extract_usage(data)
+        try:
+            text = _extract_text(data)
+        except LlmCallError:
+            _emit(usage_sink, purpose, model, started, time.time(),
+                  (time.time() - started) * 1000.0, "error",
+                  "no_text", attempt, usage)
+            raise
+        _emit(usage_sink, purpose, model, started, time.time(),
+              (time.time() - started) * 1000.0, "ok", "", attempt, usage)
+        return text
+    except LlmCallError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - unexpected shape: record, re-raise
+        _emit(usage_sink, purpose, model, started, time.time(),
+              (time.time() - started) * 1000.0, "error",
+              exc.__class__.__name__, attempt, None)
+        raise
+
+
+def _emit(
+    sink: Callable[[dict[str, Any]], None] | None,
+    purpose: str,
+    model: str,
+    started_at: float,
+    finished_at: float,
+    duration_ms: float,
+    outcome: str,
+    error_code: str,
+    attempt: int,
+    usage: dict[str, int] | None,
+) -> None:
+    """Fire the accounting sink once, defensively: telemetry never breaks calls.
+
+    With no explicit sink the process-wide default recorder (installed by the
+    supervisor when accounting is wired) is used, so auxiliary calls made
+    without a run context -- fixer, consolidation, the config probe -- are
+    still accounted for.
+    """
+    fn = sink if sink is not None else get_default_recorder()
+    if fn is None:
+        return
     try:
-        data = resp.json()
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise LlmCallError(f"LLM returned non-JSON response: {resp.text[:200]}") from exc
+        fn(
+            {
+                "purpose": purpose,
+                "model": model,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": duration_ms,
+                "outcome": outcome,
+                "error_code": error_code,
+                "attempt": attempt,
+                "usage": usage,
+                "measured": usage is not None,
+            }
+        )
+    except Exception:  # noqa: BLE001 - a broken sink must not fail the call
+        pass
 
-    return _extract_text(data)
+
+def _extract_usage(data: dict[str, Any]) -> dict[str, int] | None:
+    """Pull provider usage out of a chat-completion body, if it reports any.
+
+    Maps the OpenAI wire fields onto Claudio's accounting names:
+    ``prompt_tokens`` -> input, ``completion_tokens`` -> output,
+    ``prompt_tokens_details.cached_tokens`` -> cached input, and
+    ``completion_tokens_details.reasoning_tokens`` -> reasoning (a *subset*
+    of output tokens, kept separate so totals never double-count).
+    """
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    cdetails = usage.get("completion_tokens_details")
+    cdetails = cdetails if isinstance(cdetails, dict) else {}
+    try:
+        return {
+            "input_tokens": int(usage.get("prompt_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+            "cached_input_tokens": int(details.get("cached_tokens") or 0),
+            "reasoning_tokens": int(cdetails.get("reasoning_tokens") or 0),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def _join(base_url: str) -> str:

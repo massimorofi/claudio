@@ -150,12 +150,18 @@ def _extract_json_array(text: str) -> list[Any]:
 
 
 async def extract_learnings(
-    transcript: list[dict[str, Any]], config: AppConfig
+    transcript: list[dict[str, Any]],
+    config: AppConfig,
+    usage_sink=None,
 ) -> list[Learning]:
     """Run one LLM extraction pass over a transcript and return the learnings.
 
     Returns an empty list when the model finds nothing worth recording or the
     call fails — capture is best-effort and must never break the run.
+
+    ``usage_sink`` (issue #58, Increment 0) receives the call's accounting
+    payload so the learning extraction is recorded in the unified ledger with
+    ``purpose="learning"``.
     """
     digest = render_digest(transcript)
     if not digest.strip():
@@ -179,6 +185,8 @@ async def extract_learnings(
             temperature=0.2,
             max_tokens=2048,
             timeout=float(fast.timeout_seconds),
+            purpose="learning",
+            usage_sink=usage_sink,
         )
     except Exception as exc:  # noqa: BLE001 - capture must never break the run
         logger.warning("learning extraction call failed: %s", exc)
@@ -252,15 +260,19 @@ async def capture_run(
     config: AppConfig,
     session_id: str | None = None,
     run_id: str | None = None,
+    usage_sink=None,
 ) -> int:
     """Extract learnings from a transcript and store them. Returns count stored.
 
     This is the fire-and-forget entry point called after a run completes. It
     swallows all errors: capture is opportunistic and must never surface a
     failure to the run that triggered it.
+
+    ``usage_sink`` (issue #58, Increment 0) is forwarded to the extraction
+    call so its tokens land in the unified ledger.
     """
     try:
-        learnings = await extract_learnings(transcript, config)
+        learnings = await extract_learnings(transcript, config, usage_sink=usage_sink)
         stored = 0
         for learning in learnings:
             await dedupe_or_insert(

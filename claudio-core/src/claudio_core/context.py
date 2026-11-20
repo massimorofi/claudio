@@ -55,6 +55,10 @@ class ToolContext:
     assistant_text: list[str] = field(default_factory=list)
     # Set by the run manager so tools (e.g. delegate_task) can build agents.
     agent_factory: Any = None
+    # Unified call/tool ledger (issue #58, Increment 0). A
+    # ``claudio_core.accounting.CallAccountant`` when accounting is wired;
+    # ``None`` in legacy/test callers, which simply skip telemetry.
+    accountant: Any = None
 
     def record_tool_call(self, name: str) -> None:
         """Note that a tool actually ran, for the plan/act audit."""
@@ -96,6 +100,8 @@ def context_usage_payload(
     config: "AppConfig",
     source: str = "estimate",
     auto_disabled: bool = False,
+    cached_input_tokens: int = 0,
+    cache_hit_ratio: float = 0.0,
 ) -> dict[str, Any]:
     """Compute the ``context_usage`` payload from a used-token count.
 
@@ -109,6 +115,11 @@ def context_usage_payload(
     report the threshold that actually triggers it. When no fast profile is
     configured, :func:`resolve_profile` falls back to the ``llm`` section with
     ``agent.context_window``, so an unprofiled config is unchanged.
+
+    ``cached_input_tokens`` / ``cache_hit_ratio`` (issue #58, Increment 0)
+    carry the provider-reported prompt-cache signal for the turn so the gauge
+    can show cache effectiveness; both are 0 when the provider reports no
+    cache details.
     """
     window = int(resolve_profile(config, "fast").context_window)
     reserve = int(config.agent.compaction_reserve)
@@ -124,4 +135,6 @@ def context_usage_payload(
         "compact_threshold": usable,
         "source": source,
         "auto_disabled": auto_disabled,
+        "cached_input_tokens": int(cached_input_tokens or 0),
+        "cache_hit_ratio": round(float(cache_hit_ratio or 0.0), 4),
     }

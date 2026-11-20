@@ -174,6 +174,7 @@ async def test_llm(request: Request, payload: dict) -> dict:
             max_tokens=512,
             temperature=0.0,
             timeout=30.0,
+            purpose="probe",
         )
     except (LlmCallError, Exception) as e:  # noqa: BLE001
         latency_ms = int((time.time() - start) * 1000)

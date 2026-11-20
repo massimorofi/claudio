@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from claudio_core.accounting import CallAccountant, set_default_recorder
 from claudio_core.compaction import Compactor
 from claudio_core.db import Database, utcnow
 from claudio_core.metrics import Metrics
@@ -43,6 +44,10 @@ class Supervisor:
         self.db: Database | None = None
         self.session_store: SessionStore | None = None
         self.metrics = Metrics()
+        # Unified LLM-call ledger (issue #58, Increment 0), shared between the
+        # engine (primary/delegate calls) and the run manager (router,
+        # compaction, learning calls).
+        self.accountant = CallAccountant(metrics=self.metrics)
         self.compactor: Compactor | None = None
         self.engine = None
         self.run_manager: RunManager | None = None
@@ -83,8 +88,11 @@ class Supervisor:
             # restart clears the breaker outright.
             # The engine is the single ADK-aware component; the run manager
             # drives it through the framework-free RunEngine protocol.
-            self.engine = create_engine(self.config, self.db)
+            self.engine = create_engine(self.config, self.db, accountant=self.accountant)
             self.engine.profile_health = self.model_health
+            # Calls that outlive any run (the daemon agent, the config probe)
+            # fall back to this recorder so they still land in the ledger.
+            set_default_recorder(self.accountant.make_engine_recorder())
             self.run_manager = RunManager(
                 config=self.config,
                 db=self.db,
@@ -92,6 +100,7 @@ class Supervisor:
                 metrics=self.metrics,
                 compactor=self.compactor,
                 engine=self.engine,
+                accountant=self.accountant,
             )
             # Autonomous watch layer: health service + scheduler. The scheduler
             # is always started; it gates itself on the enabled flag each cycle,
@@ -106,7 +115,10 @@ class Supervisor:
             # the health scheduler, it gates itself on autonomous.enabled each
             # cycle, so toggling it needs no restart.
             self.task_runner = TaskRunner(
-                config=self.config, db=self.db, notifier=self.notifier
+                config=self.config,
+                db=self.db,
+                notifier=self.notifier,
+                accountant=self.accountant,
             )
             self.task_scheduler = TaskScheduler(
                 task_runner=self.task_runner, db=self.db, config=self.config
@@ -141,6 +153,12 @@ class Supervisor:
                     await self.engine.close()
                 except Exception as e:  # noqa: BLE001 - teardown is best-effort
                     logger.warning("Error closing engine MCP sessions: %s", e)
+            # Persist any ledger rows not yet flushed (daemon/probe calls).
+            if self.db:
+                try:
+                    await self.accountant.flush(self.db)
+                except Exception as e:  # noqa: BLE001 - teardown is best-effort
+                    logger.warning("Error flushing call ledger: %s", e)
             if self.db:
                 await self.db.close()
         except Exception as e:  # noqa: BLE001

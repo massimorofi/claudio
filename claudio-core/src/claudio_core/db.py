@@ -86,6 +86,58 @@ CREATE TABLE IF NOT EXISTS claudio_runs (
 CREATE INDEX IF NOT EXISTS idx_runs_session ON claudio_runs (session_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_state ON claudio_approvals (state);
 
+-- Unified LLM-call ledger (issue #58, Increment 0). One row per *logical*
+-- model call: primary turn, retry (attempt > 1), router, compaction,
+-- delegate, learning, wrap-up, daemon, probe. Failed attempts are recorded
+-- too -- an optimization that hides work in unreported retries or failures
+-- must not be able to hide it here. ``measured`` distinguishes provider-
+-- reported usage from calls where the provider sent no usage object.
+CREATE TABLE IF NOT EXISTS claudio_llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT 'primary',
+    model TEXT NOT NULL DEFAULT '',
+    model_role TEXT NOT NULL DEFAULT '',
+    profile_name TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT '',
+    started_at REAL NOT NULL DEFAULT 0,
+    finished_at REAL NOT NULL DEFAULT 0,
+    duration_ms REAL NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT 'ok',
+    error_code TEXT NOT NULL DEFAULT '',
+    attempt INTEGER NOT NULL DEFAULT 1,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    measured INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON claudio_llm_calls (run_id);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_purpose ON claudio_llm_calls (purpose);
+
+-- Tool-execution telemetry (issue #58, Increment 0): duration, outcome and
+-- the estimated token weight of each tool payload, plus the concurrency
+-- group it ran in (empty until bounded parallel execution lands).
+CREATE TABLE IF NOT EXISTS claudio_tool_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    call_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    started_at REAL NOT NULL DEFAULT 0,
+    finished_at REAL NOT NULL DEFAULT 0,
+    duration_ms REAL NOT NULL DEFAULT 0,
+    is_error INTEGER NOT NULL DEFAULT 0,
+    result_chars INTEGER NOT NULL DEFAULT 0,
+    est_result_tokens INTEGER NOT NULL DEFAULT 0,
+    concurrency_group TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON claudio_tool_calls (run_id);
+
 CREATE TABLE IF NOT EXISTS claudio_health_checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -272,6 +324,28 @@ class Database:
                 "ALTER TABLE claudio_runs ADD COLUMN resume_state_json TEXT"
             )
             await self.conn.commit()
+        # Issue #58 Increment 0: per-run accounting aggregates. Cached and
+        # reasoning tokens come from provider usage (never estimated); the
+        # lifecycle counters make retries/replans/continuations/compactions
+        # durable instead of loop-local.
+        _run_counters = {
+            "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "model_calls": "INTEGER NOT NULL DEFAULT 0",
+            "retries": "INTEGER NOT NULL DEFAULT 0",
+            "replans": "INTEGER NOT NULL DEFAULT 0",
+            "auto_continues": "INTEGER NOT NULL DEFAULT 0",
+            "tier1_compactions": "INTEGER NOT NULL DEFAULT 0",
+            "tier2_compactions": "INTEGER NOT NULL DEFAULT 0",
+            "tool_calls": "INTEGER NOT NULL DEFAULT 0",
+            "cache_hit_ratio": "REAL NOT NULL DEFAULT 0",
+        }
+        for _col, _decl in _run_counters.items():
+            if _col not in cols:
+                await self.conn.execute(
+                    f"ALTER TABLE claudio_runs ADD COLUMN {_col} {_decl}"
+                )
+                await self.conn.commit()
         async with self.conn.execute("PRAGMA table_info(claudio_sessions)") as cur:
             scols = {row["name"] for row in await cur.fetchall()}
         if "last_context_tokens" not in scols:
@@ -652,6 +726,134 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else {}
+
+    # ---- LLM-call ledger & tool telemetry (issue #58 Increment 0) --------
+
+    _LLM_CALL_COLUMNS = (
+        "run_id", "session_id", "purpose", "model", "model_role",
+        "profile_name", "reasoning_effort", "started_at", "finished_at",
+        "duration_ms", "outcome", "error_code", "attempt", "input_tokens",
+        "output_tokens", "cached_input_tokens", "reasoning_tokens",
+        "cost_usd", "measured",
+    )
+
+    _LLM_CALL_INT_COLUMNS = frozenset(
+        {
+            "attempt", "input_tokens", "output_tokens",
+            "cached_input_tokens", "reasoning_tokens", "measured",
+        }
+    )
+    _LLM_CALL_FLOAT_COLUMNS = frozenset(
+        {"started_at", "finished_at", "duration_ms", "cost_usd"}
+    )
+
+    async def add_llm_calls(self, rows: list[dict[str, Any]]) -> None:
+        """Insert buffered :class:`LlmCallRecord` dicts in one transaction."""
+        if not rows:
+            return
+        cols = ", ".join(self._LLM_CALL_COLUMNS)
+        marks = ", ".join("?" for _ in self._LLM_CALL_COLUMNS)
+
+        def coerce(col: str, r: dict[str, Any]) -> Any:
+            val = r.get(col)
+            if col in self._LLM_CALL_INT_COLUMNS:
+                return int(val or 0)
+            if col in self._LLM_CALL_FLOAT_COLUMNS:
+                return float(val or 0.0)
+            return val if val is not None else ""
+
+        await self.conn.executemany(
+            f"INSERT INTO claudio_llm_calls ({cols}) VALUES ({marks})",
+            [tuple(coerce(c, r) for c in self._LLM_CALL_COLUMNS) for r in rows],
+        )
+        await self.conn.commit()
+
+    async def list_llm_calls(self, run_id: str) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_llm_calls WHERE run_id = ? ORDER BY id",
+            (run_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def llm_call_stats(self, run_id: str | None = None) -> dict[str, Any]:
+        """Aggregate the ledger (one run, or all runs when ``run_id`` is None).
+
+        Token sums cover *measured* calls only, so unmeasured attempts cannot
+        dilute the cache-hit ratio. ``by_purpose`` breaks the call count down
+        by purpose for the reconciliation the plan asks for.
+        """
+        where = "WHERE run_id = ?" if run_id is not None else ""
+        params: tuple = (run_id,) if run_id is not None else ()
+        async with self.conn.execute(
+            f"""SELECT
+                  COUNT(*) AS calls,
+                  COALESCE(SUM(CASE WHEN outcome != 'ok' THEN 1 ELSE 0 END), 0) AS errors,
+                  COALESCE(SUM(CASE WHEN measured = 1 THEN input_tokens ELSE 0 END), 0) AS input_tokens,
+                  COALESCE(SUM(CASE WHEN measured = 1 THEN output_tokens ELSE 0 END), 0) AS output_tokens,
+                  COALESCE(SUM(CASE WHEN measured = 1 THEN cached_input_tokens ELSE 0 END), 0) AS cached_input_tokens,
+                  COALESCE(SUM(CASE WHEN measured = 1 THEN reasoning_tokens ELSE 0 END), 0) AS reasoning_tokens,
+                  COALESCE(SUM(cost_usd), 0) AS cost_usd
+                FROM claudio_llm_calls {where}""",
+            params,
+        ) as cur:
+            row = dict(await cur.fetchone() or {})
+        by_purpose: dict[str, int] = {}
+        async with self.conn.execute(
+            f"SELECT purpose, COUNT(*) AS n FROM claudio_llm_calls {where} GROUP BY purpose",
+            params,
+        ) as cur:
+            for r in await cur.fetchall():
+                by_purpose[r["purpose"]] = r["n"]
+        tin = int(row.get("input_tokens") or 0)
+        cached = int(row.get("cached_input_tokens") or 0)
+        row["by_purpose"] = by_purpose
+        row["cache_hit_ratio"] = (
+            round(min(1.0, max(0.0, cached / tin)), 4) if tin > 0 else 0.0
+        )
+        return row
+
+    _TOOL_CALL_COLUMNS = (
+        "run_id", "session_id", "call_id", "name", "started_at",
+        "finished_at", "duration_ms", "is_error", "result_chars",
+        "est_result_tokens", "concurrency_group",
+    )
+
+    _TOOL_CALL_BOOL_COLUMNS = frozenset({"is_error"})
+    _TOOL_CALL_INT_COLUMNS = frozenset({"result_chars", "est_result_tokens"})
+    _TOOL_CALL_FLOAT_COLUMNS = frozenset(
+        {"started_at", "finished_at", "duration_ms"}
+    )
+
+    async def add_tool_calls(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cols = ", ".join(self._TOOL_CALL_COLUMNS)
+        marks = ", ".join("?" for _ in self._TOOL_CALL_COLUMNS)
+
+        def coerce(col: str, r: dict[str, Any]) -> Any:
+            val = r.get(col)
+            if col in self._TOOL_CALL_BOOL_COLUMNS:
+                return int(bool(val))
+            if col in self._TOOL_CALL_INT_COLUMNS:
+                return int(val or 0)
+            if col in self._TOOL_CALL_FLOAT_COLUMNS:
+                return float(val or 0.0)
+            return val if val is not None else ""
+
+        await self.conn.executemany(
+            f"INSERT INTO claudio_tool_calls ({cols}) VALUES ({marks})",
+            [tuple(coerce(c, r) for c in self._TOOL_CALL_COLUMNS) for r in rows],
+        )
+        await self.conn.commit()
+
+    async def list_tool_calls(self, run_id: str) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM claudio_tool_calls WHERE run_id = ? ORDER BY id",
+            (run_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     async def fail_interrupted_runs(self) -> int:
         """On boot, mark any run left 'running' by a crash as failed."""

@@ -52,7 +52,9 @@ async def test_capture_slices_by_watermark(harness, monkeypatch):
     db, store, rm = harness
     captured: list[list] = []
 
-    async def fake_capture_run(db_, transcript, config, session_id=None, run_id=None):
+    async def fake_capture_run(
+        db_, transcript, config, session_id=None, run_id=None, usage_sink=None
+    ):
         captured.append(list(transcript))
         return 0
 
@@ -94,7 +96,9 @@ async def test_stale_watermark_above_transcript_is_clamped(harness, monkeypatch)
     db, store, rm = harness
     captured: list[list] = []
 
-    async def fake_capture_run(db_, transcript, config, session_id=None, run_id=None):
+    async def fake_capture_run(
+        db_, transcript, config, session_id=None, run_id=None, usage_sink=None
+    ):
         captured.append(list(transcript))
         return 0
 

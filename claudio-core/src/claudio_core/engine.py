@@ -44,6 +44,10 @@ class ModelSpec:
     # cannot help when a single large tool result jumps the prompt past the
     # ceiling between two proactive checks.
     context_window: int = 32768
+    # Reasoning-effort level in effect for calls made with this spec
+    # ("" = provider default). Recorded by the call ledger (issue #58
+    # Increment 0); phase-aware effort scaling (Increment 5) sets it.
+    reasoning_effort: str = ""
 
 
 @dataclass(frozen=True)

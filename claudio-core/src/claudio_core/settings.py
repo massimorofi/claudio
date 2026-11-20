@@ -89,6 +89,10 @@ class LLMConfig(BaseModel):
     retry_attempts: int = 3
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0
+    # Reasoning-effort level sent to reasoning models ("" = provider default).
+    # Recorded by the call ledger now; phase-aware scaling (issue #58 Inc 5)
+    # will drive it per turn phase.
+    reasoning_effort: str = ""
 
 
 class ModelProfile(BaseModel):
@@ -114,6 +118,7 @@ class ModelProfile(BaseModel):
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0
     timeout_seconds: int = 300
+    reasoning_effort: str = ""
 
 
 class RolesConfig(BaseModel):
@@ -493,6 +498,7 @@ def _llm_as_profile(llm: LLMConfig, context_window: int) -> ModelProfile:
         price_input_per_mtok=llm.price_input_per_mtok,
         price_output_per_mtok=llm.price_output_per_mtok,
         timeout_seconds=llm.timeout_seconds,
+        reasoning_effort=llm.reasoning_effort,
     )
 
 

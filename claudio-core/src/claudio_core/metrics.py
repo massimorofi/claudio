@@ -23,6 +23,11 @@ class Metrics:
         self.tokens_out = 0
         self.cost_usd_total = 0.0
         self.llm_errors_total = 0
+        # Issue #58 Increment 0: unified-call accounting aggregates, fed by
+        # the CallAccountant (see claudio_core.accounting).
+        self.llm_calls_total = 0
+        self.cached_input_tokens_total = 0
+        self.accounted_input_tokens_total = 0
         self._latencies: deque[float] = deque(maxlen=500)
 
     def inc_request(self) -> None:
@@ -63,6 +68,26 @@ class Metrics:
         with self._lock:
             self._latencies.append(ms)
 
+    def add_llm_call_stats(
+        self,
+        *,
+        input_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        error: bool = False,
+    ) -> None:
+        """Fold one accounted LLM call into the uptime aggregates.
+
+        Called by the :class:`claudio_core.accounting.CallAccountant` for
+        every recorded call so ``/monitoring/metrics`` can show physical call
+        counts and the prompt-cache hit ratio without re-reading the ledger.
+        """
+        with self._lock:
+            self.llm_calls_total += 1
+            self.accounted_input_tokens_total += int(input_tokens or 0)
+            self.cached_input_tokens_total += int(cached_input_tokens or 0)
+            if error:
+                self.llm_errors_total += 1
+
     def _percentile(self, sorted_vals: list[float], pct: float) -> float:
         if not sorted_vals:
             return 0.0
@@ -87,5 +112,22 @@ class Metrics:
                 "retry_count": self.retry_count,
                 "tool_errors_total": self.tool_errors_total,
                 "llm_errors_total": self.llm_errors_total,
+                "llm_calls_total": self.llm_calls_total,
+                "cached_input_tokens_total": self.cached_input_tokens_total,
+                "prompt_cache_hit_ratio": (
+                    round(
+                        min(
+                            1.0,
+                            max(
+                                0.0,
+                                self.cached_input_tokens_total
+                                / self.accounted_input_tokens_total,
+                            ),
+                        ),
+                        4,
+                    )
+                    if self.accounted_input_tokens_total > 0
+                    else 0.0
+                ),
                 "queue_depth": queue_depth,
             }

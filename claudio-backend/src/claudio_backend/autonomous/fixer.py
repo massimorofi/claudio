@@ -271,6 +271,7 @@ async def propose_fix(
             temperature=0.2,
             max_tokens=1024,
             timeout=float(fast.timeout_seconds),
+            purpose="fixer",
         )
         data = _extract_json(raw)
         command = str(data.get("command", "")).strip()

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator
 
 import openai
@@ -34,6 +35,8 @@ from google.adk.integrations.openai import OpenAILlm
 from google.adk.integrations.openai import _openai_llm as _adk_openai
 from google.genai import types
 from openai import AsyncOpenAI
+
+from claudio_core.accounting import get_default_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,11 @@ def _is_max_tokens_rejection(exc: openai.BadRequestError) -> bool:
     return "max_tokens" in msg and "max_completion_tokens" in msg
 
 
-def make_openai_client(base_url: str | None, api_key: str | None) -> AsyncOpenAI:
+def make_openai_client(
+    base_url: str | None,
+    api_key: str | None,
+    call_context: dict[str, Any] | None = None,
+) -> AsyncOpenAI:
     """Build an ``AsyncOpenAI`` client that survives header-stripping gateways.
 
     Two adaptations for enterprise LLM gateways (e.g. Merck's GPTeal) that
@@ -66,6 +73,15 @@ def make_openai_client(base_url: str | None, api_key: str | None) -> AsyncOpenAI
        advance, so ``chat.completions.create`` is wrapped to rename the field
        and retry once when the endpoint rejects it. This covers both the
        streaming and non-streaming paths.
+
+    ``call_context`` (issue #58, Increment 0) attaches unified-call accounting
+    to every HTTP call this client makes: ``{"recorder": callable, "run_id",
+    "session_id", "purpose", "model_role", "profile_name", "model"}``. The
+    recorder is called once per *logical* call (the max_tokens rename is one
+    call with ``attempt=2``) with the same payload shape the
+    :mod:`claudio_core.llm` usage sink uses. When no recorder is given the
+    process-wide default recorder is used, so the daemon agent's calls are
+    accounted for too.
     """
     key = api_key or "local"
     client = AsyncOpenAI(
@@ -73,23 +89,135 @@ def make_openai_client(base_url: str | None, api_key: str | None) -> AsyncOpenAI
         api_key=key,
         default_headers={"api-key": key},
     )
+    client._claudio_call_context = dict(call_context or {})  # type: ignore[attr-defined]
     _patch_max_tokens_retry(client)
     return client
 
 
+def _usage_from_response(result: Any) -> dict[str, int] | None:
+    """Map an OpenAI ChatCompletion's usage onto Claudio's accounting names.
+
+    ``reasoning_tokens`` is a *subset* of ``completion_tokens`` (the OpenAI
+    wire contract) -- it is kept in its own field so run totals never
+    double-count it.
+    """
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return None
+    try:
+        details = getattr(usage, "prompt_tokens_details", None)
+        cdetails = getattr(usage, "completion_tokens_details", None)
+        return {
+            "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "cached_input_tokens": int(
+                getattr(details, "cached_tokens", 0) or 0
+            ),
+            "reasoning_tokens": int(
+                getattr(cdetails, "reasoning_tokens", 0) or 0
+            ),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_call(
+    recorder: Any,
+    ctx: dict[str, Any],
+    model: str,
+    started: float,
+    attempt: int,
+    outcome: str,
+    error_code: str,
+    usage: dict[str, int] | None,
+) -> None:
+    """Fire the accounting recorder defensively -- telemetry never breaks a call."""
+    if recorder is None:
+        return
+    now = time.time()
+    try:
+        recorder(
+            {
+                "purpose": ctx.get("purpose") or "primary",
+                "model": model or ctx.get("model") or "",
+                "run_id": ctx.get("run_id", ""),
+                "session_id": ctx.get("session_id", ""),
+                "model_role": ctx.get("model_role", ""),
+                "profile_name": ctx.get("profile_name", ""),
+                "reasoning_effort": ctx.get("reasoning_effort", ""),
+                "started_at": started,
+                "finished_at": now,
+                "duration_ms": (now - started) * 1000.0,
+                "outcome": outcome,
+                "error_code": error_code,
+                "attempt": attempt,
+                "usage": usage,
+                "measured": usage is not None,
+            }
+        )
+    except Exception:  # noqa: BLE001 - a broken recorder must not fail the call
+        logger.debug("llm-call recorder failed", exc_info=True)
+
+
 def _patch_max_tokens_retry(client: AsyncOpenAI) -> None:
-    """Replace ``chat.completions.create`` with a max_tokens-rename retry."""
+    """Replace ``chat.completions.create`` with a max_tokens-rename retry.
+
+    Also the unified accounting seam for the engine path: every HTTP call this
+    client makes -- primary turns, worker sub-agents, the daemon agent --
+    flows through this wrapper exactly once per logical call.
+    """
     original_create = client.chat.completions.create
 
     async def create_with_retry(*args: Any, **kwargs: Any):
+        ctx = getattr(client, "_claudio_call_context", None) or {}
+        recorder = ctx.get("recorder") or get_default_recorder()
+        if recorder is None:
+            # Fast path: no accounting attached, behave exactly as before.
+            try:
+                return await original_create(*args, **kwargs)
+            except openai.BadRequestError as exc:
+                if "max_tokens" not in kwargs or not _is_max_tokens_rejection(exc):
+                    raise
+                kwargs = dict(kwargs)
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                return await original_create(*args, **kwargs)
+
+        model = str(kwargs.get("model") or "")
+        started = time.time()
+        attempt = 1
         try:
-            return await original_create(*args, **kwargs)
-        except openai.BadRequestError as exc:
-            if "max_tokens" not in kwargs or not _is_max_tokens_rejection(exc):
-                raise
-            kwargs = dict(kwargs)
-            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
-            return await original_create(*args, **kwargs)
+            try:
+                result = await original_create(*args, **kwargs)
+            except openai.BadRequestError as exc:
+                if "max_tokens" not in kwargs or not _is_max_tokens_rejection(exc):
+                    _record_call(
+                        recorder, ctx, model, started, attempt,
+                        "error", exc.__class__.__name__, None,
+                    )
+                    # Mark it so the outer handler does not record twice.
+                    try:
+                        exc._claudio_recorded = True
+                    except AttributeError:  # pragma: no cover - exotic exceptions
+                        pass
+                    raise
+                attempt = 2
+                kwargs = dict(kwargs)
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                result = await original_create(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - record, then surface unchanged
+            if not getattr(exc, "_claudio_recorded", False):
+                _record_call(
+                    recorder, ctx, model, started, attempt,
+                    "error", exc.__class__.__name__, None,
+                )
+            raise
+        # A streaming call's usage arrives on the final chunk, not on the
+        # create() return value; record it as unmeasured here and let the
+        # engine's per-turn event accounting remain the source of truth.
+        streaming = bool(kwargs.get("stream"))
+        usage = None if streaming else _usage_from_response(result)
+        _record_call(recorder, ctx, model, started, attempt, "ok", "", usage)
+        return result
 
     client.chat.completions.create = create_with_retry  # type: ignore[method-assign]
 

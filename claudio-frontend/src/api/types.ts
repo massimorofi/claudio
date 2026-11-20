@@ -376,6 +376,8 @@ export interface ContextUsage {
   compact_threshold: number
   source: 'model' | 'estimate' | 'stored'
   auto_disabled: boolean
+  cached_input_tokens: number
+  cache_hit_ratio: number
 }
 
 // ---- Phase 5: completion status ----
