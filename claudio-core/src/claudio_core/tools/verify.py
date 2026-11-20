@@ -56,9 +56,16 @@ def check_syntax(path: Path, text: str) -> dict | None:
 def _balance_check(text: str) -> str | None:
     """Return an error string if brackets are unbalanced, else ``None``.
 
-    Crude but dependency-free: ignores string literals only well enough to
-    avoid the most common false positives, and reports the first imbalance.
+    Dependency-free and deliberately conservative: it strips line and block
+    comments and skips string literals before counting, so brackets inside
+    comments/strings do not cause false "unbalanced" reports (issue #58
+    review). It does not attempt to parse regex literals, so a bracket inside a
+    regex may still be miscounted -- which is why the caller treats a failure
+    as a non-fatal verification note, never a hard error.
     """
+    # Strip block then line comments (best-effort; not string-aware for the
+    # comment markers themselves, which is acceptable for a smoke test).
+    text = _strip_comments(text)
     pairs = {")": "(", "]": "[", "}": "{"}
     openers = set(pairs.values())
     stack: list[tuple[str, int]] = []
@@ -84,6 +91,44 @@ def _balance_check(text: str) -> str | None:
         ch, ln = stack[-1]
         return f"unclosed '{ch}' opened at line {ln}"
     return None
+
+
+def _strip_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_str: str | None = None
+    prev = ""
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+            out.append(ch)
+            prev = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            # line comment: skip to end of line
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        prev = ch
+        i += 1
+    return "".join(out)
 
 
 __all__ = ["check_syntax"]

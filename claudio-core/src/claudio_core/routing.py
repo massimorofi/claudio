@@ -7,13 +7,17 @@ contains a code fence, or asks to write/edit/run something -- does not need a
 model to learn it is not a one-line chat answer.
 
 ``deterministic_route`` makes that conservative call: it returns ``"primary"``
-only when the request carries unambiguous structured indicators of tool work,
-and ``"unknown"`` otherwise (the caller then falls back to the LLM classifier,
-or to the default role). It deliberately does NOT try to classify free-form
-natural language by keyword -- that is the brittle guessing the plan warns
-against. The effect is that the router LLM call disappears for the common
-coding/tool case while genuinely ambiguous short questions keep the model's
-judgment.
+when the request carries structured indicators of tool work (a path-like token,
+a code fence, an explicit tool name, an action verb, or multiple lines), and
+``"unknown"`` otherwise (the caller then falls back to the LLM classifier, or to
+the default role).
+
+The asymmetry is the safety property: it can only ever short-circuit to
+``"primary"`` -- the same role a request gets when auto-routing is off -- so a
+false positive merely means "this message was not fast-routed", never a wrong
+fast-route that starves a real task of the big model. It never returns
+``"fast"``: deciding a request is a trivial no-tool answer from text alone is
+the genuinely brittle judgment, and that stays with the model.
 """
 from __future__ import annotations
 

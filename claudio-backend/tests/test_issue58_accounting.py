@@ -145,7 +145,10 @@ def test_recorder_counts_max_tokens_rename_as_attempt_two():
     assert events[0]["outcome"] == "ok"
 
 
-def test_recorder_streaming_call_is_unmeasured():
+def test_recorder_streaming_defers_to_generator():
+    # create_with_retry must NOT record a streaming call (usage is unknown at
+    # create time); the streaming generator records it with real usage. This
+    # keeps the Inc-5 token budget working under streaming (issue #58 review).
     events = []
 
     async def fake_create(*args, **kwargs):
@@ -155,8 +158,7 @@ def test_recorder_streaming_call_is_unmeasured():
         fake_create, {"recorder": events.append, "run_id": "r1"}
     )
     asyncio.run(client.chat.completions.create(model="m", stream=True))
-    assert len(events) == 1
-    assert events[0]["measured"] is False
+    assert events == []  # deferred to the generator, not recorded here
 
 
 def test_recorder_none_is_noop():

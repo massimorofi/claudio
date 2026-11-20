@@ -245,38 +245,38 @@ class CallAccountant:
     async def flush(self, db: Any, run_id: str | None = None) -> int:
         """Write buffered rows to SQLite. Returns the number of LLM rows.
 
-        ``run_id=None`` flushes every run's buffer. Rows are removed from the
-        buffer only after a successful write, so a failed flush retries on the
-        next call instead of silently dropping telemetry.
+        ``run_id=None`` flushes every run's buffer. Each run is written as one
+        unit and detached from the buffer only after its write commits, so a
+        failure on one run re-queues *that* run (and only that run) for the
+        next flush -- already-committed runs are never written twice. A failed
+        flush re-raises so the caller can react, but never duplicates rows.
         """
-        # Detach the buffer under the lock (FIFO), write it, and re-queue at
-        # the front only if a write fails -- so a transient DB error retries
-        # the same rows instead of dropping telemetry.
         with self._lock:
             run_ids = list(self._llm) if run_id is None else [run_id]
-            llm: dict[str, list[LlmCallRecord]] = {}
-            tools: dict[str, list[ToolCallRecord]] = {}
-            for rid in run_ids:
-                llm[rid] = self._llm.pop(rid, [])
-                tools[rid] = self._tools.pop(rid, [])
         n = 0
-        try:
-            for rid, recs in llm.items():
+        for rid in run_ids:
+            with self._lock:
+                recs = self._llm.pop(rid, [])
+                tool_recs = self._tools.pop(rid, [])
+            try:
                 if recs:
                     await db.add_llm_calls([r.as_dict() for r in recs])
                     n += len(recs)
-            for rid, recs in tools.items():
-                if recs:
-                    await db.add_tool_calls([r.as_dict() for r in recs])
-        except Exception:
-            with self._lock:
-                for rid, recs in llm.items():
+                if tool_recs:
+                    await db.add_tool_calls([r.as_dict() for r in tool_recs])
+            except Exception:
+                # Only this run's rows are re-queued; earlier runs already
+                # committed and must not be written again.
+                with self._lock:
                     if recs:
                         self._llm[rid] = recs + self._llm.get(rid, [])
-                for rid, recs in tools.items():
-                    if recs:
-                        self._tools[rid] = recs + self._tools.get(rid, [])
-            raise
+                    if tool_recs:
+                        self._tools[rid] = tool_recs + self._tools.get(rid, [])
+                raise
+            # Fully written: drop the run's lifecycle bookkeeping too so the
+            # accountant does not grow unbounded over the process lifetime.
+            with self._lock:
+                self._lifecycle.pop(rid, None)
         return n
 
     # -- sink factories ------------------------------------------------------
@@ -301,14 +301,19 @@ class CallAccountant:
 
         def sink(payload: dict[str, Any]) -> None:
             usage = payload.get("usage") or {}
+            # The payload's own identity fields win over the closure defaults:
+            # the engine-path recorder is shared across runs, so each call
+            # carries its run_id/session_id/role in the payload (issue #58
+            # review). The closure values are the fallback for sinks built per
+            # call (router/compaction/learning) that don't set them.
             rec = LlmCallRecord(
-                run_id=run_id,
-                session_id=session_id,
+                run_id=str(payload.get("run_id") or run_id),
+                session_id=str(payload.get("session_id") or session_id),
                 purpose=payload.get("purpose") or purpose,
                 model=payload.get("model") or model,
-                model_role=model_role,
-                profile_name=profile_name,
-                reasoning_effort=reasoning_effort,
+                model_role=str(payload.get("model_role") or model_role),
+                profile_name=str(payload.get("profile_name") or profile_name),
+                reasoning_effort=str(payload.get("reasoning_effort") or reasoning_effort),
                 started_at=float(payload.get("started_at") or 0.0),
                 finished_at=float(payload.get("finished_at") or 0.0),
                 duration_ms=float(payload.get("duration_ms") or 0.0),

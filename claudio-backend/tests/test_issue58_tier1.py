@@ -54,11 +54,13 @@ def test_tier1_pass_collapses_stale_bulky_response():
         _fc_turn("c1", "read_file", {"path": "a.py"}),
         _fr_turn("c1", "read_file", {"ok": True, "content": big}),
     ] + [_text_turn("model", f"t{i}") for i in range(6)]
-    stats, applied = _tier1_pass(contents)
+    new_contents, stats, applied = _tier1_pass(contents)
     assert applied == 1
     assert stats.changed
-    # The response was shrunk in place; the call/response pair is intact.
-    fr = contents[1].parts[0].function_response
+    # The ORIGINAL is untouched (no shared mutation); the NEW content carries
+    # the stub with the same call id/name (pairing intact).
+    assert contents[1].parts[0].function_response.response == {"ok": True, "content": big}
+    fr = new_contents[1].parts[0].function_response
     assert fr.id == "c1" and fr.name == "read_file"
     assert fr.response.get("_tier1_pruned") is True
     assert len(str(fr.response)) < len(big)
@@ -70,9 +72,9 @@ def test_tier1_pass_preserves_pairing_and_leaves_recent_intact():
         _fr_turn("c1", "read_file", {"ok": True, "content": "y" * 5000}),
     ]
     # Only two turns, both within the recent window -> nothing pruned.
-    stats, applied = _tier1_pass(contents, )
+    new_contents, stats, applied = _tier1_pass(contents)
     assert applied == 0
-    assert contents[1].parts[0].function_response.response == {
+    assert new_contents[1].parts[0].function_response.response == {
         "ok": True, "content": "y" * 5000
     }
 
@@ -82,9 +84,23 @@ def test_tier1_pass_prunes_failed_response():
         _fc_turn("c1", "run_command", {"command": "ls"}),
         _fr_turn("c1", "run_command", {"ok": False, "error": "boom " * 200}),
     ] + [_text_turn("model", f"t{i}") for i in range(6)]
-    stats, applied = _tier1_pass(contents)
+    new_contents, stats, applied = _tier1_pass(contents)
     assert applied == 1
     assert stats.pruned_failures == 1
+
+
+def test_tier1_dedupe_respects_line_ranges():
+    # Two reads of the same file but different line ranges are NOT superseded.
+    contents = [
+        _fc_turn("c1", "read_file", {"path": "a.py", "start_line": 1, "end_line": 10}),
+        _fr_turn("c1", "read_file", {"ok": True, "content": "A" * 3000}),
+        _fc_turn("c2", "read_file", {"path": "a.py", "start_line": 11, "end_line": 20}),
+        _fr_turn("c2", "read_file", {"ok": True, "content": "B" * 3000}),
+    ] + [_text_turn("model", f"t{i}") for i in range(4)]
+    new_contents, stats, applied = _tier1_pass(contents)
+    # Different ranges -> not deduped; both are old+bulky so both collapse,
+    # but neither is marked "superseded".
+    assert stats.deduped_reads == 0
 
 
 def test_guard_fires_prune_callback_once():

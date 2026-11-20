@@ -181,13 +181,19 @@ def _fixed_overhead_tokens(llm_request: Any) -> int:
     return int(chars // _GUARD_CHARS_PER_TOKEN)
 
 
-def _tier1_pass(contents: list[Any]) -> tuple[Any, int]:
-    """Apply the deterministic Tier-1 reduction to request contents in place.
+def _tier1_pass(contents: list[Any]) -> tuple[list[Any], Any, int]:
+    """Apply the deterministic Tier-1 reduction, returning a NEW contents list.
 
-    Shrinks the payload text of stale/failed/duplicate tool responses inside
-    their existing ``function_response`` parts -- never dropping or reordering
-    a turn, so call/response pairing is preserved by construction. Returns the
-    :class:`Tier1Stats` and the number of responses actually shrunk.
+    Shrinks the payload text of stale/failed/duplicate tool responses. It does
+    NOT mutate the incoming ``function_response`` objects in place: ADK builds
+    request contents as shallow copies that share the FunctionResponse with the
+    session event, so mutating one would rewrite the persisted history (which
+    ADK's request-copy contract forbids). Instead a pruned turn gets a freshly
+    built Content/Part carrying the same call id/name and a stubbed response,
+    and only the request's contents list is replaced. Call/response pairing is
+    preserved by construction -- ids and order are untouched.
+
+    Returns ``(new_contents, Tier1Stats, applied_count)``.
     """
     from claudio_core.tier1 import plan_tier1
 
@@ -204,15 +210,16 @@ def _tier1_pass(contents: list[Any]) -> tuple[Any, int]:
                 )
 
     turns: list[dict[str, Any]] = []
-    resp_parts: list[tuple[int, Any]] = []
+    # (content_idx, part_idx, fresp) for each tool-response part.
+    resp_locs: list[tuple[int, int, Any]] = []
     for idx, content in enumerate(contents):
         parts = getattr(content, "parts", None) or []
-        fresp_part = next(
-            (p for p in parts if getattr(p, "function_response", None) is not None),
-            None,
-        )
-        if fresp_part is not None:
-            fresp = fresp_part.function_response
+        found = False
+        for pidx, part in enumerate(parts):
+            fresp = getattr(part, "function_response", None)
+            if fresp is None:
+                continue
+            found = True
             name = getattr(fresp, "name", "") or ""
             call_name, call_args = calls.get(getattr(fresp, "id", "") or "", (name, {}))
             tool = call_name or name
@@ -224,7 +231,13 @@ def _tier1_pass(contents: list[Any]) -> tuple[Any, int]:
                 text = str(getattr(fresp, "response", None))
             dedupe = None
             if tool in ("read_file", "list_dir"):
-                dedupe = str(call_args.get("path") or call_args.get("file_path") or "") or None
+                # Key on path AND line range so chunked reads of one file are
+                # not collapsed as "superseded" when they cover different lines.
+                path = str(call_args.get("path") or call_args.get("file_path") or "")
+                if path:
+                    lo = call_args.get("start_line")
+                    hi = call_args.get("end_line")
+                    dedupe = f"{path}:{lo}:{hi}" if (lo or hi) else path
             turns.append(
                 {
                     "text": text,
@@ -234,8 +247,8 @@ def _tier1_pass(contents: list[Any]) -> tuple[Any, int]:
                     "dedupe_key": dedupe,
                 }
             )
-            resp_parts.append((idx, fresp_part))
-        else:
+            resp_locs.append((idx, pidx, fresp))
+        if not found:
             turns.append(
                 {
                     "text": _turn_text(content),
@@ -247,17 +260,47 @@ def _tier1_pass(contents: list[Any]) -> tuple[Any, int]:
             )
 
     replacements, stats = plan_tier1(turns)
+    # Build replacement Content objects for pruned turns (never mutate shared
+    # parts). ``turns`` is indexed by content index, so a response at content
+    # ``cidx`` reads ``replacements[cidx]`` (resp_locs is sparse -- do not zip
+    # it positionally against the dense replacements list).
+    by_content: dict[int, list[tuple[int, str]]] = {}
     applied = 0
-    for idx, part in resp_parts:
-        repl = replacements[idx]
+    for (cidx, pidx, _fresp) in resp_locs:
+        repl = replacements[cidx]
         if repl is None:
             continue
+        by_content.setdefault(cidx, []).append((pidx, repl))
+        applied += 1
+
+    if not by_content:
+        return contents, stats, 0
+
+    new_contents: list[Any] = list(contents)
+    for cidx, swaps in by_content.items():
+        old_content = contents[cidx]
+        old_parts = list(getattr(old_content, "parts", None) or [])
+        for pidx, repl in swaps:
+            fresp = getattr(old_parts[pidx], "function_response", None)
+            if fresp is None:
+                continue
+            try:
+                new_fr = types.FunctionResponse(
+                    id=getattr(fresp, "id", "") or "",
+                    name=getattr(fresp, "name", "") or "",
+                    response={"_tier1_pruned": True, "preview": repl},
+                )
+                old_parts[pidx] = types.Part(function_response=new_fr)
+            except Exception:  # noqa: BLE001 - leave the original part intact
+                continue
         try:
-            part.function_response.response = {"_tier1_pruned": True, "preview": repl}
-            applied += 1
-        except Exception:  # noqa: BLE001 - a part we cannot shrink stays whole
+            new_contents[cidx] = types.Content(
+                role=getattr(old_content, "role", "user") or "user",
+                parts=old_parts,
+            )
+        except Exception:  # noqa: BLE001
             continue
-    return stats, applied
+    return new_contents, stats, applied
 
 
 def make_context_guard(
@@ -296,13 +339,16 @@ def make_context_guard(
                 return None
             # Tier-1: deterministic zero-LLM shrink of stale tool payloads.
             try:
-                _stats, applied = _tier1_pass(contents)
-                if applied and on_tier1_prune is not None and not pruned_flag["fired"]:
-                    pruned_flag["fired"] = True
-                    try:
-                        on_tier1_prune(_stats)
-                    except Exception:  # noqa: BLE001 - counter must not break the call
-                        pass
+                new_contents, _stats, applied = _tier1_pass(contents)
+                if applied:
+                    contents = new_contents
+                    llm_request.contents = new_contents
+                    if on_tier1_prune is not None and not pruned_flag["fired"]:
+                        pruned_flag["fired"] = True
+                        try:
+                            on_tier1_prune(_stats)
+                        except Exception:  # noqa: BLE001 - counter must not break the call
+                            pass
             except Exception as exc:  # noqa: BLE001 - Tier-1 is best-effort
                 logger.debug("tier-1 pass skipped: %s", exc)
             fixed = _fixed_overhead_tokens(llm_request)
@@ -486,7 +532,8 @@ def make_adk_tool(
         the order concurrent calls happen to complete in.
         """
         conc = getattr(ctx, "concurrency", None)
-        if conc is None or concurrency_class == "read_only" and conc.read_semaphore is None:
+        if conc is None:
+            # No scheduling controller (legacy/test caller): run directly.
             return await coro_factory()
         if concurrency_class == "exclusive":
             async with conc.exclusive_lock:
@@ -494,7 +541,7 @@ def make_adk_tool(
         if concurrency_class == "state_mutating":
             async with conc.mutation_lock:
                 return await coro_factory()
-        # read_only: bounded fan-out.
+        # read_only: bounded concurrent fan-out.
         async with conc.read_semaphore:
             return await coro_factory()
 
@@ -818,6 +865,9 @@ class AdkEngine:
         self._mcp_toolsets: list[McpToolset] = []
         self._mcp_entries: list[dict[str, Any]] = []
         self._mcp_key: tuple | None = None
+        # Guards the check-then-build of the MCP toolset cache so two concurrent
+        # runs cannot both rebuild it (issue #58 review).
+        self._mcp_lock = asyncio.Lock()
 
     # -- construction helpers -------------------------------------------
 
@@ -1275,7 +1325,14 @@ class AdkEngine:
         key = (self._mcp_signature(), approval_mode)
         if self._mcp_key == key:
             return
+        async with self._mcp_lock:
+            await self._ensure_mcp_locked(key, approval_mode)
 
+    async def _ensure_mcp_locked(self, key: tuple, approval_mode: str) -> None:
+        # Re-check under the lock: another coroutine may have built the cache
+        # while this one waited.
+        if self._mcp_key == key:
+            return
         # Release the previous toolsets before building the replacement set.
         for ts in self._mcp_toolsets:
             try:

@@ -760,11 +760,12 @@ class RunManager:
         low = str(getattr(self.config.agent, "reasoning_effort_low", "") or "")
         if not high and not low:
             return ""
-        # First clean attempt, or a restart right after a failure/replan, gets
-        # the high-effort level; steady continuations drop to low.
-        if record.attempt <= 1 and record.retries == 0 and record.replans == 0:
-            return high or ""
+        # A restart right after a failure/replan needs the model's best
+        # reasoning -> high. The very first clean attempt is also high. A plain
+        # auto-continuation (progress, no fresh failure) is routine -> low.
         if record.retries > 0 or record.replans > 0:
+            return high or ""
+        if record.attempt <= 1 and record.auto_continues == 0:
             return high or ""
         return low or ""
 
@@ -1362,6 +1363,13 @@ class RunManager:
         prev_outstanding: int | None = None
         prev_files_written = 0
         while True:
+            # Hard resource ceilings apply to resumed runs too (issue #58
+            # review): a run that paused for approval must not bypass them for
+            # the rest of its life.
+            ceiling = self._run_ceiling(record)
+            if ceiling is not None:
+                await self._finalize_failed(record, ceiling, f"Run stopped: {ceiling}")
+                return
             # Same boundary compaction as the fresh-run loop: a manual
             # request that landed during the run, or a last-turn size over
             # the threshold, is applied before the next attempt.
@@ -1853,6 +1861,20 @@ class RunManager:
         )
         return totals
 
+    async def _flush_ledger(self, record: RunRecord) -> None:
+        """Persist the run's ledger rows without ever affecting its outcome.
+
+        Telemetry persistence must not be able to flip a completed run to
+        failed (issue #58 review): a DB error here is logged and swallowed, and
+        the rows stay buffered for the next flush.
+        """
+        try:
+            await self._acct().flush(self.db, record.run_id)
+        except Exception as exc:  # noqa: BLE001 - telemetry never changes state
+            logger.warning(
+                "call-ledger flush failed for run %s: %s", record.run_id, exc
+            )
+
     def _accounting_fields(self, record: RunRecord) -> dict[str, Any]:
         """The ledger-derived columns every terminal run row must persist."""
         return {
@@ -1894,7 +1916,7 @@ class RunManager:
             final_output=record.final_output,
             **self._accounting_fields(record),
         )
-        await self._acct().flush(self.db, record.run_id)
+        await self._flush_ledger(record)
         todos = await self._load_todos(record.session_id)
         outstanding = [
             t.get("content", "")
@@ -2040,7 +2062,7 @@ class RunManager:
                 # The learning call lands after the run finalised and flushed;
                 # persist its ledger row too (issue #58 Increment 0).
                 try:
-                    await self._acct().flush(self.db, record.run_id)
+                    await self._flush_ledger(record)
                 except Exception:  # noqa: BLE001 - capture stays best-effort
                     logger.debug("post-capture ledger flush failed", exc_info=True)
 
@@ -2049,6 +2071,11 @@ class RunManager:
         task.add_done_callback(self._capture_tasks.discard)
 
     async def _finalize_failed(self, record: RunRecord, code: str | Exception, message: str | None = None) -> None:
+        # A run that already reached a terminal state must not be rewritten --
+        # e.g. a late telemetry error must not flip a completed run to failed
+        # (issue #58 review). Mirrors the guard in _finalize_cancelled.
+        if record.state in ("completed", "failed", "cancelled"):
+            return
         duration = max(0.0, time.time() - (record.started_at or time.time()))
         if isinstance(code, Exception):
             code, _retryable = _classify_error(code)
@@ -2068,7 +2095,7 @@ class RunManager:
             turns_used=record.turns_used,
             **self._accounting_fields(record),
         )
-        await self._acct().flush(self.db, record.run_id)
+        await self._flush_ledger(record)
         if record.parent_run_id is None:
             self._append_turn_status(
                 record,
@@ -2108,7 +2135,7 @@ class RunManager:
             error_message="Run cancelled",
             **self._accounting_fields(record),
         )
-        await self._acct().flush(self.db, record.run_id)
+        await self._flush_ledger(record)
         if record.parent_run_id is None:
             self._append_turn_status(
                 record,

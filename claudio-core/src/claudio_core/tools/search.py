@@ -37,11 +37,23 @@ _DEFAULT_MAX_MATCHES = 50
 
 def _iter_text_files(root: Path, glob: str | None, limit: int = 4000):
     pattern = glob or "**/*"
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        root_resolved = root
     count = 0
     for path in root.glob(pattern):
         if count >= limit:
             return
-        if any(part in _SKIP_DIRS for part in path.parts):
+        # Skip only directories named in the skip set RELATIVE to the search
+        # root -- checking the absolute path would wrongly skip a workspace that
+        # happens to live under a dir named build/target/venv/... (issue #58
+        # review).
+        try:
+            rel_parts = path.relative_to(root_resolved).parts
+        except ValueError:
+            rel_parts = path.parts
+        if any(part in _SKIP_DIRS for part in rel_parts[:-1]):
             continue
         if not path.is_file():
             continue

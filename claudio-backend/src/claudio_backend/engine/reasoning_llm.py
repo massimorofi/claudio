@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from types import SimpleNamespace
 from typing import Any, AsyncGenerator
 
 import openai
@@ -212,10 +213,14 @@ def _patch_max_tokens_retry(client: AsyncOpenAI) -> None:
                 )
             raise
         # A streaming call's usage arrives on the final chunk, not on the
-        # create() return value; record it as unmeasured here and let the
-        # engine's per-turn event accounting remain the source of truth.
-        streaming = bool(kwargs.get("stream"))
-        usage = None if streaming else _usage_from_response(result)
+        # create() return value. Recording it here would be unmeasured (zero
+        # tokens), which would silently defeat the Inc-5 token budget and zero
+        # the cache signal whenever streaming is on. So the streaming generator
+        # (ReasoningOpenAILlm._generate_content_streaming) records the call once
+        # with the real usage when it completes; we skip the create-time record.
+        if bool(kwargs.get("stream")):
+            return result
+        usage = _usage_from_response(result)
         _record_call(recorder, ctx, model, started, attempt, "ok", "", usage)
         return result
 
@@ -278,7 +283,22 @@ class ReasoningOpenAILlm(OpenAILlm):
         kwargs["stream"] = True
         # Ask for the trailing usage-only chunk, same as the upstream path.
         kwargs["stream_options"] = {"include_usage": True}
+        _t0 = time.time()
         raw_stream = await self._openai_client.chat.completions.create(**kwargs)
+
+        def _record_streamed(usage_obj: Any) -> None:
+            # Record the streaming call once, with the real usage from the
+            # trailing chunk, so the token budget and cache signal work under
+            # streaming (issue #58 review). create_with_retry skips its own
+            # record for stream=True to avoid double-counting.
+            ctx = getattr(self._openai_client, "_claudio_call_context", None) or {}
+            recorder = ctx.get("recorder") or get_default_recorder()
+            if recorder is None:
+                return
+            _record_call(
+                recorder, ctx, str(kwargs.get("model") or ""), _t0, 1,
+                "ok", "", _usage_from_response(SimpleNamespace(usage=usage_obj)),
+            )
 
         text_accumulated = ""
         reasoning_accumulated = ""
@@ -394,6 +414,7 @@ class ReasoningOpenAILlm(OpenAILlm):
             parts.append(part)
 
         mapped_finish_reason = _adk_openai._map_finish_reason(finish_reason)
+        _record_streamed(usage)
 
         if not parts and mapped_finish_reason not in (
             None,

@@ -288,7 +288,13 @@ async def batch_read(
     budget = max(1, int(budget))
     results: list[dict] = []
     spent = 0
-    for raw in paths[:50]:
+    capped = paths[:50]
+    if len(paths) > len(capped):
+        results.append(
+            {"path": None, "ok": False,
+             "error": f"only the first 50 of {len(paths)} paths were read"}
+        )
+    for raw in capped:
         target = ctx.resolve_path(raw)
         if ctx.approval_mode == "on_request" and not ctx.is_within_workspace(target):
             results.append({"path": raw, "ok": False, "error": "outside workspace"})
