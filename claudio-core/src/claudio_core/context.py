@@ -6,6 +6,7 @@ seam; the tool functions themselves never see the wrapper.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,36 @@ from .settings import resolve_profile
 if TYPE_CHECKING:
     from .db import Database
     from .settings import AppConfig
+
+
+@dataclass
+class RunConcurrency:
+    """Per-run scheduling primitives (issue #58, Increment 1).
+
+    ADK already fans a turn's function calls out concurrently, so the engine
+    uses these to keep that concurrency safe: independent read-only calls run
+    together under a bounded semaphore, while state-mutating calls are
+    serialized behind a single lock so filesystem/DB/counter writes never
+    interleave. ``exclusive`` tools (e.g. rewind) take a stricter lock that
+    also excludes the ordinary mutations.
+
+    A tool's completion order is non-deterministic under concurrency; because
+    every mutation happens under the same lock, the *final* ToolContext state
+    is deterministic regardless of that order.
+    """
+
+    read_semaphore: asyncio.Semaphore
+    mutation_lock: asyncio.Lock
+    exclusive_lock: asyncio.Lock
+
+    @classmethod
+    def create(cls, max_read_concurrency: int = 4) -> "RunConcurrency":
+        cap = max(1, int(max_read_concurrency))
+        return cls(
+            read_semaphore=asyncio.Semaphore(cap),
+            mutation_lock=asyncio.Lock(),
+            exclusive_lock=asyncio.Lock(),
+        )
 
 
 @dataclass
@@ -59,6 +90,9 @@ class ToolContext:
     # ``claudio_core.accounting.CallAccountant`` when accounting is wired;
     # ``None`` in legacy/test callers, which simply skip telemetry.
     accountant: Any = None
+    # Per-run concurrency primitives (issue #58, Increment 1). ``None`` means
+    # no scheduling control (legacy/test callers); the engine sets one per run.
+    concurrency: "RunConcurrency | None" = None
 
     def record_tool_call(self, name: str) -> None:
         """Note that a tool actually ran, for the plan/act audit."""

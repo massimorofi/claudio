@@ -26,32 +26,43 @@ class ToolMeta:
     is_destructive: bool = False
     # Name of the argument holding a filesystem path, if any (for out-of-workspace checks).
     path_arg: str | None = None
+    # Concurrency class (issue #58, Increment 1). ADK already runs a turn's
+    # function calls concurrently, so the engine uses this to decide how to
+    # schedule each call:
+    #   "read_only"      -- safe to run concurrently (bounded by a semaphore).
+    #   "state_mutating" -- must be serialized (filesystem/DB/ctx writes).
+    #   "exclusive"      -- holds a global per-run lock (e.g. rewind).
+    concurrency: str = "read_only"
 
 
 # Metadata for every built-in tool.
 TOOL_META: dict[str, ToolMeta] = {
-    "read_file": ToolMeta("read_file", is_read_only=True, path_arg="path"),
-    "write_file": ToolMeta("write_file", is_destructive=True, path_arg="path"),
-    "edit_file": ToolMeta("edit_file", is_destructive=True, path_arg="path"),
-    "list_dir": ToolMeta("list_dir", is_read_only=True, path_arg="path"),
+    "read_file": ToolMeta("read_file", is_read_only=True, path_arg="path", concurrency="read_only"),
+    "write_file": ToolMeta("write_file", is_destructive=True, path_arg="path", concurrency="state_mutating"),
+    "edit_file": ToolMeta("edit_file", is_destructive=True, path_arg="path", concurrency="state_mutating"),
+    "list_dir": ToolMeta("list_dir", is_read_only=True, path_arg="path", concurrency="read_only"),
     # Compound read-only tools (issue #58 Inc 2): one call replaces a
     # grep-then-read or multi-read sequence, so no extra LLM turn is spent.
-    "batch_read": ToolMeta("batch_read", is_read_only=True),
-    "search_with_context": ToolMeta("search_with_context", is_read_only=True),
-    "locate_symbol": ToolMeta("locate_symbol", is_read_only=True),
-    "rewind_files": ToolMeta("rewind_files", is_destructive=True),
-    "run_command": ToolMeta("run_command", is_destructive=True),
-    "web_fetch": ToolMeta("web_fetch", is_read_only=True),
-    "web_search": ToolMeta("web_search", is_read_only=True),
-    "todo_write": ToolMeta("todo_write", is_read_only=True),
+    "batch_read": ToolMeta("batch_read", is_read_only=True, concurrency="read_only"),
+    "search_with_context": ToolMeta("search_with_context", is_read_only=True, concurrency="read_only"),
+    "locate_symbol": ToolMeta("locate_symbol", is_read_only=True, concurrency="read_only"),
+    # Rewind rewrites many files at once -- serialize it against every other
+    # filesystem mutation.
+    "rewind_files": ToolMeta("rewind_files", is_destructive=True, concurrency="exclusive"),
+    "run_command": ToolMeta("run_command", is_destructive=True, concurrency="state_mutating"),
+    "web_fetch": ToolMeta("web_fetch", is_read_only=True, concurrency="read_only"),
+    "web_search": ToolMeta("web_search", is_read_only=True, concurrency="read_only"),
+    # todo_write is read-only in spirit but mutates the run's ctx counter and the
+    # session row, so it is serialized with the other state mutations.
+    "todo_write": ToolMeta("todo_write", is_read_only=True, concurrency="state_mutating"),
     # Creating a task row is not itself a system mutation: the task is created
     # disabled + report-only and only acts once the operator enables it.
-    "create_scheduled_task": ToolMeta("create_scheduled_task"),
+    "create_scheduled_task": ToolMeta("create_scheduled_task", concurrency="state_mutating"),
     # A delegation runs a worker that can mutate whatever its tool list allows,
     # so delegation is treated as destructive: under ``on_request`` the human
     # approves the work order (the task brief + the tools the worker may use)
     # once, instead of approving each nested tool call inside the worker.
-    "delegate_task": ToolMeta("delegate_task", is_destructive=True),
+    "delegate_task": ToolMeta("delegate_task", is_destructive=True, concurrency="state_mutating"),
 }
 
 ALL_TOOL_NAMES = list(TOOL_META.keys())

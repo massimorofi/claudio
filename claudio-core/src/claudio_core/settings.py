@@ -235,6 +235,9 @@ class AgentConfig(BaseModel):
     # Issue #58 Inc 2: short-circuit the auto-router's LLM call when the
     # request unambiguously needs tools (deterministic "primary" first).
     router_deterministic_first: bool = True
+    # Issue #58 Inc 1: cap on concurrent read-only tool calls per run. State
+    # mutations are always serialized regardless of this value.
+    max_read_concurrency: int = Field(default=4, ge=1)
     subagent_approval_mode: str = "one_gate"
     tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)
     subagents: dict[str, SubagentConfig] = Field(default_factory=dict)

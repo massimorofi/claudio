@@ -58,7 +58,7 @@ from google.genai import types
 from mcp import StdioServerParameters
 
 from claudio_core import Database
-from claudio_core.context import ToolContext, context_usage_payload
+from claudio_core.context import RunConcurrency, ToolContext, context_usage_payload
 from claudio_core.engine import EngineError, ModelSpec, RunRequest
 from claudio_core.events import EventName
 from claudio_core.instructions import (
@@ -471,14 +471,37 @@ def make_adk_tool(
     context carries an accountant.
     """
     fn = TOOL_FUNCTIONS[name]
+    meta = TOOL_META.get(name)
+    concurrency_class = getattr(meta, "concurrency", "read_only") if meta else "read_only"
 
     real = inspect.signature(fn)
     model_params = [p for p in real.parameters.values() if p.name != "ctx"]
 
+    async def _run_guarded(coro_factory):
+        """Apply the per-run scheduling policy for this tool's concurrency class.
+
+        Read-only calls overlap under a bounded semaphore; state mutations and
+        exclusive calls serialize behind a lock, so ToolContext/filesystem/DB
+        writes are race-free and the final state is deterministic regardless of
+        the order concurrent calls happen to complete in.
+        """
+        conc = getattr(ctx, "concurrency", None)
+        if conc is None or concurrency_class == "read_only" and conc.read_semaphore is None:
+            return await coro_factory()
+        if concurrency_class == "exclusive":
+            async with conc.exclusive_lock:
+                return await coro_factory()
+        if concurrency_class == "state_mutating":
+            async with conc.mutation_lock:
+                return await coro_factory()
+        # read_only: bounded fan-out.
+        async with conc.read_semaphore:
+            return await coro_factory()
+
     async def wrapper(**kwargs: Any) -> dict[str, Any]:
         started = time.time()
         try:
-            result = await fn(ctx, **kwargs)
+            result = await _run_guarded(lambda: fn(ctx, **kwargs))
         except Exception as exc:  # noqa: BLE001 - tool errors are data, not crashes
             logger.warning("tool %s raised: %s", name, exc)
             _record_tool_call(ctx, name, started, {"error": str(exc)}, True)
@@ -992,6 +1015,9 @@ class AdkEngine:
             workspace_state_dir=workspace_state_dir(request.workspace_id),
             run_id=request.run_id,
             accountant=self.accountant,
+            concurrency=RunConcurrency.create(
+                int(getattr(self.config.agent, "max_read_concurrency", 4))
+            ),
             # The delegate_task tool calls this to spin up a stateless worker
             # sub-agent on the worker profile. Captured per run so the worker
             # inherits this run's workspace and identity.
@@ -1082,6 +1108,9 @@ class AdkEngine:
             workspace_id=request.workspace_id,
             run_id=request.run_id,
             accountant=self.accountant,
+            concurrency=RunConcurrency.create(
+                int(getattr(self.config.agent, "max_read_concurrency", 4))
+            ),
         )
         tools: list[Any] = []
         for name in (sub.tools or []):
@@ -1255,11 +1284,15 @@ class AdkEngine:
                 logger.warning("MCP toolset close failed: %s", exc)
 
         require = approval_mode == "always"
-        toolsets: list[McpToolset] = []
-        entries: list[dict[str, Any]] = []
-        for entry in self.config.mcp.servers:
-            if not entry.enabled:
-                continue
+
+        async def _init_server(entry):
+            """Initialize one MCP server; return (toolset, entry) or None.
+
+            Independent servers initialize concurrently (issue #58, Increment
+            1); a failing or slow server is isolated -- it is logged, closed and
+            skipped without affecting the others or the run.
+            """
+            toolset = None
             try:
                 params = _mcp_connection_params(entry)
                 prefix = _sanitize_mcp_prefix(entry.id)
@@ -1269,20 +1302,25 @@ class AdkEngine:
                     require_confirmation=require,
                     tool_name_prefix=prefix,
                 )
-                tools = await toolset.get_tools()
+                tools = await asyncio.wait_for(
+                    toolset.get_tools(), timeout=MCP_CONNECT_TIMEOUT_SECONDS
+                )
             except Exception as exc:  # noqa: BLE001 - one bad server must not sink the run
                 logger.warning("MCP server %s failed to load: %s", entry.id, exc)
-                try:
-                    await toolset.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                continue
+                if toolset is not None:
+                    try:
+                        await toolset.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return None
             # Resource listing is best-effort. A server that does not implement
             # the resources capability answers resources/list with "Method not
             # found"; that must not discard the server's working tools — only the
             # catalog of readable resource names is lost.
             try:
-                resources = await toolset.list_resources()
+                resources = await asyncio.wait_for(
+                    toolset.list_resources(), timeout=MCP_CONNECT_TIMEOUT_SECONDS
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.info(
                     "MCP server %s exposes no readable resources: %s",
@@ -1297,14 +1335,25 @@ class AdkEngine:
             # that prefixing here so the prompt never names a tool the model
             # cannot invoke.
             tool_names = [f"{prefix}_{getattr(t, 'name', '')}" for t in tools]
-            toolsets.append(toolset)
-            entries.append(
-                {
-                    "id": entry.id,
-                    "tools": tool_names,
-                    "resources": list(resources or []),
-                }
-            )
+            return toolset, {
+                "id": entry.id,
+                "tools": tool_names,
+                "resources": list(resources or []),
+            }
+
+        enabled = [e for e in self.config.mcp.servers if e.enabled]
+        # Bounded concurrent fan-out; results keep declaration order so the
+        # prompt catalog is stable across runs.
+        results = await asyncio.gather(
+            *(_init_server(e) for e in enabled), return_exceptions=True
+        )
+        toolsets: list[McpToolset] = []
+        entries: list[dict[str, Any]] = []
+        for res in results:
+            if isinstance(res, BaseException) or res is None:
+                continue
+            toolsets.append(res[0])
+            entries.append(res[1])
 
         self._mcp_toolsets = toolsets
         self._mcp_entries = entries
