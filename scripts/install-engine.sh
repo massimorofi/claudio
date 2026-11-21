@@ -42,7 +42,12 @@ case "$ENGINE" in
 esac
 
 ENV_FILE=".env"
-OVERRIDE="compose.engine-${ENGINE}.yaml"
+# Engine ids use an underscore (claude_code); override files use a hyphen.
+case "$ENGINE" in
+  claude_code) _slug="claude-code" ;;
+  *) _slug="$ENGINE" ;;
+esac
+OVERRIDE="compose.engine-${_slug}.yaml"
 
 # --- helpers -----------------------------------------------------------------
 log()  { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }

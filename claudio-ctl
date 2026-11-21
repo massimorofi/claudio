@@ -30,13 +30,34 @@ fi
 COMPOSE="docker compose"
 ALL_SERVICES=(agent web)
 
+# Engine selection (issue #57). When CLAUDIO_ENGINE names an alternative engine
+# that has a compose override, add it so claudio-ctl builds/starts the matching
+# agent image variant. `adk` (or unset) keeps the default compose.yaml path.
+# The override sets the ENGINE build arg and the runtime CLAUDIO_ENGINE env.
+case "${CLAUDIO_ENGINE:-adk}" in
+  opencode|claude_code)
+    # Engine ids use an underscore (claude_code); the compose override files use
+    # a hyphen (compose.engine-claude-code.yaml). Map id -> filename slug.
+    case "$CLAUDIO_ENGINE" in
+      claude_code) _engine_slug="claude-code" ;;
+      *) _engine_slug="$CLAUDIO_ENGINE" ;;
+    esac
+    _engine_override="compose.engine-${_engine_slug}.yaml"
+    if [ -f "$_engine_override" ]; then
+      COMPOSE="docker compose -f compose.yaml -f ${_engine_override}"
+    else
+      echo "claudio-ctl: CLAUDIO_ENGINE=${CLAUDIO_ENGINE} but ${_engine_override} is missing; using default (adk)" >&2
+    fi
+    ;;
+esac
+
 # Optional Gortex code-intelligence service (compose profile "gortex", issue #54).
 # Off by default so the stack is unchanged. Set CLAUDIO_GORTEX_ENABLED=true in .env
 # to have claudio-ctl start/stop/status/logs the gortex container alongside the
 # agent. The agent's mcp.servers gortex entry must also be enabled: true.
 case "${CLAUDIO_GORTEX_ENABLED:-false}" in
   1|true|TRUE|yes|YES)
-    COMPOSE="docker compose --profile gortex"
+    COMPOSE="${COMPOSE} --profile gortex"
     ALL_SERVICES=(agent web gortex)
     ;;
 esac
