@@ -2,7 +2,7 @@
 
 **Status:** Implemented and verified
 **Date:** 2026-10-27
-**Plan:** [`docker-deployment-plan.md`](./docker-deployment-plan.md)
+**Plan:** the original `docker-deployment-plan.md` has been retired; this runbook is the live reference.
 
 The plan was implemented as specified, with four corrections where the plan's
 assumptions did not survive contact with the code. Those corrections are in
@@ -535,24 +535,19 @@ the container itself.
 
 ## Engine image variants (issue #57)
 
-The default stack builds the `adk` agent image and needs no extra CLI. To run a
-different engine, build the matching image variant and select it at runtime. The
-`agent`/`web` service names, network, ports and volumes are unchanged; switching
-variants recreates `agent` only (no frontend rebuild).
+The default stack builds the `adk` agent image and needs no extra CLI. For the
+`opencode` and `claude_code` variants, the full build / select / verify /
+rollback walkthrough is **[engine-setup.md](./engine-setup.md)** (installer §1,
+manual steps §2); the architecture behind the variants is
+**[engines.md](./engines.md)**. The essentials:
 
-```bash
-# OpenCode
-docker compose -f compose.yaml -f compose.engine-opencode.yaml build agent
-docker compose -f compose.yaml -f compose.engine-opencode.yaml up -d
-
-# Claude Code (requires an Anthropic Messages-compatible endpoint)
-ANTHROPIC_API_KEY=... docker compose -f compose.yaml -f compose.engine-claude-code.yaml build agent
-ANTHROPIC_API_KEY=... docker compose -f compose.yaml -f compose.engine-claude-code.yaml up -d
-```
-
-Pin the CLI versions via the `OPENCODE_VERSION` / `CLAUDE_CODE_VERSION` build
-args (the Dockerfile defaults are placeholders — set real pinned versions and
-verify checksums in a hardened build). The runtime `CLAUDIO_ENGINE` must match
-the `ENGINE` the image was built with; a mismatch fails startup rather than
-silently running a different engine. Roll back by selecting `adk` and
-rebuilding/recreating `agent`.
+- Build with the matching override file — `docker compose -f compose.yaml -f
+  compose.engine-<opencode|claude-code>.yaml build agent && … up -d`. The
+  `agent`/`web` service names, network, ports and volumes are unchanged;
+  switching variants recreates `agent` only.
+- Pin `OPENCODE_VERSION` / `CLAUDE_CODE_VERSION` build args (the Dockerfile
+  defaults are placeholders — set real pinned versions and verify checksums in
+  a hardened build).
+- The runtime `CLAUDIO_ENGINE` must match the image's `ENGINE` build arg; a
+  mismatch fails startup rather than silently running a different engine.
+- Roll back by rebuilding `agent` from the plain `compose.yaml` (defaults to `adk`).

@@ -107,7 +107,7 @@ streamed token. The contract permits that and the frontend appends.
 | `usage_from_event(event)` | `(input_tokens, output_tokens)` |
 | `adk_state_path(request)` | where ADK keeps its session DB |
 | `CONFIRMATION_TOOL` | `"adk_request_confirmation"` |
-| `create_engine(config, db, kind=None)` | factory; `kind` defaults to `$CLAUDIO_ENGINE`, then `"adk"` |
+| `create_engine(...)` | **moved** to `engine/factory.py` — the deployment-wide engine factory (`adk` / `opencode` / `claude_code`); see [engines.md](./engines.md) |
 
 #### Event translation
 
@@ -134,9 +134,9 @@ Ported and running. The `RunManager` owns everything that is not about the
 model: run lifecycle, the SSE fan-out and reconnection machinery, budget
 enforcement, the recovery loop, and finalisation.
 
-For profile resolution, role assignments, automatic routing, delegation, and
-the intended workload for each model, see
-[Model profiles, roles, and routing](./archive/model-routing.md).
+For profile resolution, role assignments and automatic routing, see the
+`model_profiles` / `roles` sections of
+[configuration.md](./configuration.md#model-profiles-named-inference-endpoints).
 
 - **`RunRecord`** — per-run state: a ring buffer of `(seq, sse)` pairs, the
   subscriber queue set, a cancel event, the task handle, token/cost
@@ -492,31 +492,17 @@ supplies none of them.
 
 ## Pluggable backend engines (issue #57)
 
-The backend can be driven by different agent engines behind one factory, while
-the FastAPI surface, SSE contract, approvals, sessions and tool policy stay
-identical. The engine is selected deployment-wide (one per backend process), not
-per session.
+The ADK engine above is one of **three interchangeable engines** behind one
+factory (`engine/factory.py`): `adk` (default, in-process), `opencode` and
+`claude_code` (pinned CLI child processes driven through the shared
+`engine/process.py` runner). Selection is deployment-wide
+(`CLAUDIO_ENGINE` env > `engine.kind` config), approval pauses persist as an
+opaque engine-tagged checkpoint envelope, and the FastAPI surface, SSE
+contract, approvals, sessions and tool policy are identical whichever engine
+drives.
 
-- **Engine IDs:** `adk` (default, in-process Google ADK), `opencode`, `claude_code`.
-- **Selection:** `engine.kind` in config, overridable by the `CLAUDIO_ENGINE`
-  environment variable (the env wins). The effective value is reported by
-  `GET /api/v1/version` as `engine` / `engine_version` / `engine_capabilities`.
-- **Boundary:** `claudio_backend.engine` is the only package that may import a
-  concrete engine (ADK) or launch an engine CLI. `api/` and `runs/` depend only
-  on the framework-neutral `claudio_core.engine.RunEngine` protocol; the
-  import-linter contract enforces this.
-- **Lifecycle:** every engine implements `start()` (validate binary/config at
-  startup; fail clearly if unavailable — no silent fallback), `close()`,
-  `reload_config()`, and a `descriptor`/`capabilities`.
-- **Checkpoints:** an approval pause is persisted as an opaque, versioned,
-  engine-tagged envelope `{engine, schema_version, payload}`. The run manager
-  stores it without interpreting the payload and rejects a checkpoint produced
-  by a different engine.
-- **Adapters:** `engine/opencode` and `engine/claude_code` drive their pinned
-  CLIs through the shared `engine/process.py` runner (argv-only launch, minimal
-  environment, bounded output, per-run timeout, process-tree cancellation) and
-  translate native JSONL events into Claudio events at the boundary. Claude Code
-  additionally refuses to start against a non-Anthropic endpoint unless
-  `engine.claude_code.allow_openai_endpoint` is set after verification.
-
-See `doc/docker.md` for building/selecting each engine image variant.
+The canonical architecture reference — selection/startup, capabilities matrix,
+checkpoint envelope, subprocess-runner guarantees, per-adapter details and the
+Mermaid state diagrams of the run flow — is
+**[engines.md](./engines.md)**. Container build/selection of each engine image
+variant: [engine-setup.md](./engine-setup.md) and [docker.md](./docker.md).

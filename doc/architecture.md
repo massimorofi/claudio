@@ -46,6 +46,27 @@ default `http://127.0.0.1:8100`). It is the **only component with authority**.
 transition is owned by the agent's `RunManager`, never by a client. A run does
 not care whether anyone is watching.
 
+```mermaid
+stateDiagram-v2
+    [*] --> pending: POST /chat/stream — run row created
+    pending --> running: driver task spawned (run_started)
+    running --> running: run_restarting — backoff retry<br/>or one fallback-model attempt
+    running --> awaiting_approval: approval_required —<br/>checkpoint persisted
+    awaiting_approval --> running: approve → engine.resume(checkpoint)
+    awaiting_approval --> running: deny → resume with rejection reason
+    running --> completed: run_completed — deliverable check,<br/>totals, learning capture
+    running --> failed: run_failed — budget, max_turns,<br/>terminal engine error
+    running --> cancelled: POST /chat/runs/id/cancel
+    awaiting_approval --> cancelled: cancel
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
+
+The engine (ADK, OpenCode or Claude Code) only *proposes* terminal events; the
+RunManager persists them. How each engine drives a run and how approvals
+round-trip across engines: [engines.md](./engines.md).
+
 **Durable state.** Runs, messages, costs, approvals and settings live in SQLite
 (`claudio-core/db.py`). A client that reconnects reads the same truth the agent
 is acting on. Nothing important exists only in a browser's memory.
@@ -76,7 +97,7 @@ everything the clients can see and drive:
 | Component | Lives in | Responsibility |
 |---|---|---|
 | **RunManager** | `runs/manager.py` | Owns every run's lifecycle — create, start, pause, resume, complete, cancel. The single authority over run state. |
-| **Tool execution** | `engine/` + `claudio_core/tools/` | Runs the actual tools — file edits, shell commands, web fetch/search — in order, in one process, recording every result. |
+| **Tool execution** | `engine/` + `claudio_core/tools/` | Runs the actual tools — file edits, shell commands, web fetch/search — in order, in one process, recording every result. The engine behind this seam is pluggable (`adk` / `opencode` / `claude_code`): [engines.md](./engines.md). |
 | **Approvals** | `api/approvals.py` + engine pause/resume | Gates destructive actions. A run pauses here until a decision arrives from any client — or never. |
 | **Scheduled jobs** | `autonomous/scheduler.py`, `task_scheduler.py` | Cron-style tasks that fire on the agent's own clock, independent of any client being connected. |
 | **Self-maintenance loop** | `autonomous/` (health, maintenance, recovery, fixer) + self-improvement (`consolidation.py`, `promotion.py`) | Watches the system, runs upkeep, recovers from failures, and turns recurring learnings into skills. |
@@ -113,8 +134,8 @@ control of a long task possible.
 
 ## 3. The VS Code extension
 
-The third surface (`claudio-vscode`, design brief in
-[doc/vscode-extension-plan.md](./vscode-extension-plan.md)). Same API, same
+The third surface (`claudio-vscode`, *planned* — its design brief will live at
+`doc/vscode-extension-plan.md` once written). Same API, same
 event protocol, different ergonomics: it lives inside the editor and binds the
 agent to the folder you have open.
 

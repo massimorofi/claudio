@@ -93,8 +93,8 @@ A dict of `name -> ModelProfile`. Each profile is one reachable model server:
 
 A role left unset falls back to the `llm` section, so a config with no
 `model_profiles`/`roles` behaves exactly as before (one model everywhere).
-See [model-routing.md (archive)](./archive/model-routing.md) for the routing
-narrative.
+(The old `model-routing.md` narrative was retired; this section is the
+reference.)
 
 ### `agent`
 
@@ -190,6 +190,30 @@ the `gortex` binary must be installed **inside the agent container** on the
 backend's `PATH` and index the same repo path. This couples the daemon to the
 agent's lifecycle; prefer the HTTP container above. See `doc/docker.md` §9.3.
 
+### `engine`
+
+Pluggable backend engine selection (issue #57). Architecture and flows:
+[engines.md](./engines.md); container setup: [engine-setup.md](./engine-setup.md).
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `kind` | str | `adk` | `adk` \| `opencode` \| `claude_code`. **`CLAUDIO_ENGINE` env wins over this.** One engine per process; changing it needs a backend restart (and a matching image for CLI engines). |
+| `startup_timeout_seconds` | int | `30` | Wall clock for the engine's `start()` version probe. |
+| `run_timeout_seconds` | int | `1800` | Per-run wall clock for CLI-backed engines. |
+| `opencode.binary` | str | `opencode` | CLI name/path baked into the image. |
+| `opencode.config_dir` | str\|None | `None` | Default: private dir under the backend data dir. |
+| `opencode.server_mode` | str | `standalone` | `standalone` \| `server`. |
+| `opencode.model` | str\|None | `None` | Default: resolved Claudio primary profile. |
+| `claude_code.binary` | str | `claude` | CLI name/path baked into the image. |
+| `claude_code.config_dir` | str\|None | `None` | Becomes `CLAUDE_CONFIG_DIR` (+ `HOME`) for the CLI — kept on the persistent data volume. |
+| `claude_code.permission_mode` | str | `default` | `default` \| `acceptEdits` \| `plan`. Never a permission-bypass flag. |
+| `claude_code.model` | str\|None | `None` | Default: `llm.model`, passed as `--model` + `ANTHROPIC_MODEL` + `ANTHROPIC_SMALL_FAST_MODEL`. |
+| `claude_code.allow_openai_endpoint` | bool | `false` | **Endpoint gate.** Claude Code needs an Anthropic Messages (`/v1/messages`) endpoint. Set `true` only after verifying a conversion gateway. Env overrides that the loader would otherwise miss: `CLAUDE_CODE_ALLOW_OPENAI_ENDPOINT` / `CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT`. |
+
+Deployment env vars (Docker/`.env`, not config fields): `CLAUDIO_ENGINE`,
+`OPENCODE_VERSION`, `CLAUDE_CODE_VERSION` (image build args — pin real
+versions), `ANTHROPIC_API_KEY`.
+
 ### `monitoring`
 
 | Field | Type | Default | Notes |
@@ -270,6 +294,7 @@ Secrets never round-trip through the UI in the clear.
 | Changed key | Restart required |
 |---|---|
 | `server.host`, `server.port` | Backend process |
+| `engine.kind` | Backend restart — and for `opencode`/`claude_code`, an image built with the matching `ENGINE` arg (`reload_config` refuses an engine swap) |
 | Any `mcp.*` | Agent runtime (`POST /agent/restart`) |
 | Everything else | Hot-reload |
 
