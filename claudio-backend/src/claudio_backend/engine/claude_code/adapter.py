@@ -45,12 +45,22 @@ _CLI_TOOL_NAMES = {
     "TodoWrite": "todo_write",
 }
 
-# Without this nudge local models answer multi-step tasks in prose and never
-# call TodoWrite, leaving the UI's PLAN panel empty (issue #57).
+# Since CLI v2.1.268 the task-tool group is model-gated and absent for custom
+# gateway model names; these env vars opt the session in and keep the
+# wholesale-replacement TodoWrite contract Claudio's PLAN panel expects
+# (the Task* successors are incremental per-id updates). (issue #57)
+TODO_TOOL_ENV = {
+    "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
+    "CLAUDE_CODE_ENABLE_TASKS": "0",
+}
+
+# Local models skip the todo list for tasks they deem trivial; only a
+# mandatory phrasing reliably produces plan updates. (issue #57)
 _PLAN_SYSTEM_PROMPT = (
-    "For any multi-step task, maintain a task list with the TodoWrite tool: "
-    "write the list before starting, mark one item in_progress at a time, and "
-    "mark items completed as you finish them."
+    "MANDATORY: as your FIRST action for any task with two or more steps, "
+    "call TodoWrite to create one todo item per step (all pending). Before "
+    "starting each step mark it in_progress; right after finishing it mark it "
+    "completed. Never skip the todo list, even for trivial steps."
 )
 
 
@@ -242,6 +252,7 @@ class ClaudeCodeEngine:
             # default to a Haiku id a custom gateway may not serve.
             extra["ANTHROPIC_MODEL"] = model
             extra["ANTHROPIC_SMALL_FAST_MODEL"] = model
+        extra.update(TODO_TOOL_ENV)
         return proc.build_env(
             base={"HOME": str(self._config_dir()), "CLAUDE_CONFIG_DIR": str(self._config_dir())},
             extra=extra,
@@ -489,6 +500,10 @@ class ClaudeCodeEngine:
                 })
             elif btype == "tool_use":
                 raw = str(p.get("name") or "")
+                if raw == "ToolSearch":
+                    # Internal tool-loading plumbing, not real work: keep it
+                    # out of the workflow panel.
+                    continue
                 name = _CLI_TOOL_NAMES.get(raw, raw)
                 args = p.get("input") or {}
                 if raw == "TodoWrite":

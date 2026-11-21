@@ -311,6 +311,9 @@ def test_claude_code_passes_configured_model(tmp_path):
     env = eng._env()
     assert env["ANTHROPIC_MODEL"] == "my-local-model"
     assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "my-local-model"
+    # Task-tool group is model-gated since CLI 2.1.268; opt in + keep TodoWrite.
+    assert env["CLAUDE_CODE_ENABLE_TODO_TOOLS"] == "1"
+    assert env["CLAUDE_CODE_ENABLE_TASKS"] == "0"
 
 
 def test_claude_code_base_url_normalized_for_cli(tmp_path):
@@ -441,6 +444,7 @@ def test_claude_code_translates_nested_blocks(tmp_path):
         "     {'content':'read docs','status':'completed'},"
         "     {'content':'write plan','status':'in_progress'},"
         "     {'content':'verify','status':'pending'}]}},"
+        "  {'type':'tool_use','id':'t0','name':'ToolSearch','input':{'query':'select:TodoWrite'}},"
         "  {'type':'tool_use','id':'t2','name':'Write','input':{'file_path':'doc/x.md','content':'hi'}},"
         "  {'type':'text','text':'working'}]}}))\n"
         "print(json.dumps({'type':'user','message':{'content':["
@@ -462,6 +466,8 @@ def test_claude_code_translates_nested_blocks(tmp_path):
     # CLI names normalize to Claudio's tool contract so artifact tracking works.
     assert calls[1]["name"] == "write_file"
     assert json.loads(calls[1]["arguments"])["file_path"] == "doc/x.md"
+    # ToolSearch is internal tool-loading plumbing, never surfaced.
+    assert all(c["name"] != "ToolSearch" for c in calls)
     results = by_name.get(EventName.TOOL_RESULT.value, [])
     assert results and results[0]["call_id"] == "t1"
     assert results[0]["output"] == "todos saved"
