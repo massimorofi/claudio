@@ -239,6 +239,19 @@ def test_claude_code_gate_allows_with_flag(tmp_path):
     asyncio.run(eng.start())  # allowed after explicit opt-in
 
 
+def test_claude_code_gate_allows_via_env_despite_config_pinning(tmp_path, monkeypatch):
+    # Regression (issue #57): a seeded config.yaml pinning allow_openai_endpoint
+    # =false must not override the operator's deployment env var.
+    cli = _write_fake_cli(tmp_path, "claude.py", "print('1.0')")
+    monkeypatch.setenv("CLAUDE_CODE_ALLOW_OPENAI_ENDPOINT", "true")
+    cfg = AppConfig.model_validate({
+        "llm": {"base_url": "http://192.168.1.172:8731/"},
+        "engine": {"kind": "claude_code", "claude_code": {"binary": cli, "allow_openai_endpoint": False}},
+    })
+    eng = ClaudeCodeEngine(EngineContext(config=cfg, db=None))
+    asyncio.run(eng.start())  # env wins over the pinned config field
+
+
 def test_claude_code_streams_events(tmp_path):
     body = (
         "import sys;sys.stdin.read()\nimport json\n"

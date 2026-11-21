@@ -83,6 +83,29 @@ class ClaudeCodeEngine:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def _allow_openai_endpoint(self) -> bool:
+        """Whether the operator has explicitly allowed a non-Anthropic endpoint.
+
+        Honors the config field AND the deployment env vars directly, because
+        the config loader treats the YAML file as authoritative over env — a
+        seeded ``config.yaml`` pinning ``allow_openai_endpoint: false`` would
+        otherwise silently override the operator's ``CLAUDE_CODE_ALLOW_OPENAI_ENDPOINT``
+        / ``CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT`` (issue #57).
+        The engine selector already reads ``CLAUDIO_ENGINE`` from env directly;
+        this keeps the endpoint gate consistent with that deployment-intent model.
+        """
+        if self._cc.allow_openai_endpoint:
+            return True
+        import os
+        for name in (
+            "CLAUDE_CODE_ALLOW_OPENAI_ENDPOINT",
+            "CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT",
+        ):
+            val = (os.environ.get(name) or "").strip().lower()
+            if val in ("1", "true", "yes", "on"):
+                return True
+        return False
+
     def _endpoint_is_anthropic(self) -> bool:
         """Whether the configured endpoint can serve the Anthropic Messages API.
 
@@ -90,7 +113,7 @@ class ClaudeCodeEngine:
         an OpenAI-only local server. Operators using a conversion gateway set the
         allow flag after verifying ``/v1/messages`` works.
         """
-        if self._cc.allow_openai_endpoint:
+        if self._allow_openai_endpoint():
             return True
         base = (self.config.llm.base_url or "").lower()
         # Heuristic: treat a base_url naming "anthropic" as compatible; anything

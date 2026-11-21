@@ -630,21 +630,33 @@ def validate_role_references(config: "AppConfig") -> list[str]:
 
 
 def _env_overrides() -> dict[str, Any]:
-    """Collect CLAUDIO__SECTION__KEY env vars into a nested dict."""
+    """Collect ``CLAUDIO__SECTION__KEY`` env vars into a nested dict.
+
+    Supports arbitrary nesting depth (``__`` separates levels), so a value under
+    a sub-model works too — e.g. ``CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT``
+    maps to ``engine.claude_code.allow_openai_endpoint`` (issue #57). The final
+    segment is the key; earlier segments are nested sections.
+    """
     out: dict[str, Any] = {}
     for raw_key, value in os.environ.items():
         if not raw_key.startswith(ENV_PREFIX):
             continue
         parts = raw_key[len(ENV_PREFIX):].lower().split("__")
-        if len(parts) != 2:
+        if len(parts) < 2:
             continue
-        section, key = parts
         # Try to parse JSON for non-string types (lists, numbers, bools, null).
         try:
             parsed: Any = json.loads(value)
         except (json.JSONDecodeError, ValueError):
             parsed = value
-        out.setdefault(section, {})[key] = parsed
+        node = out
+        for part in parts[:-1]:
+            nxt = node.get(part)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                node[part] = nxt
+            node = nxt
+        node[parts[-1]] = parsed
     return out
 
 
