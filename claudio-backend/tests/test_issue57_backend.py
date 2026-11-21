@@ -126,6 +126,22 @@ def test_process_timeout(tmp_path):
         asyncio.run(go())
 
 
+def test_process_nonzero_exit_raises_with_stderr(tmp_path):
+    # A CLI that exits non-zero (bad flag, auth error) must surface as an
+    # error with the stderr tail, never as an empty successful stream.
+    cli = _write_fake_cli(
+        tmp_path, "fail.py",
+        "import sys\nsys.stderr.write('kaboom: bad flag\\n')\nsys.exit(3)\n",
+    )
+    with pytest.raises(proc.ProcessError) as ei:
+        async def go():
+            async for _ in proc.stream_lines([cli], cwd=tmp_path, env=proc.build_env(), timeout_seconds=10):
+                pass
+        asyncio.run(go())
+    assert "3" in str(ei.value)
+    assert "kaboom" in str(ei.value)
+
+
 def test_process_missing_binary():
     with pytest.raises(proc.ProcessError):
         async def go():
@@ -250,6 +266,31 @@ def test_claude_code_gate_allows_via_env_despite_config_pinning(tmp_path, monkey
     })
     eng = ClaudeCodeEngine(EngineContext(config=cfg, db=None))
     asyncio.run(eng.start())  # env wins over the pinned config field
+
+
+def test_claude_code_argv_includes_verbose(tmp_path):
+    # Regression: `claude -p --output-format stream-json` REQUIRES --verbose;
+    # without it the CLI exits 1 with empty stdout and the chat shows
+    # "Completed · no output" instead of a reply.
+    eng = _claude_engine(tmp_path, "print('x')")
+    argv = eng._argv(_request(tmp_path))
+    assert "--verbose" in argv
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+
+
+def test_claude_code_cli_failure_surfaces_as_run_failed(tmp_path):
+    body = (
+        "import sys\nsys.stdin.read()\n"
+        "sys.stderr.write('Error: stream-json requires --verbose\\n')\n"
+        "sys.exit(1)\n"
+    )
+    eng = _claude_engine(tmp_path, body)
+    events = _collect(eng, _request(tmp_path))
+    kinds = [e["event"] for e in events]
+    assert EventName.RUN_FAILED.value in kinds
+    assert EventName.RUN_COMPLETED.value not in kinds
+    failed = [e for e in events if e["event"] == EventName.RUN_FAILED.value][0]
+    assert "requires --verbose" in failed["data"]["error"]["message"]
 
 
 def test_claude_code_streams_events(tmp_path):

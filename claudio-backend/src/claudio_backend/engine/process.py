@@ -121,8 +121,33 @@ async def stream_lines(
                 )
             if line.strip():
                 yield line
+        # stdout reached EOF: the child is done (or nearly). A CLI that fails
+        # (bad flag, auth error, crash) often exits non-zero after printing
+        # nothing on stdout -- surface that as an error with the stderr tail
+        # instead of letting the adapter synthesize an empty success.
+        await _check_exit(proc)
     finally:
         await terminate_tree(proc)
+
+
+async def _check_exit(proc: asyncio.subprocess.Process) -> None:
+    """After stdout EOF, require a clean exit; otherwise raise with a stderr tail."""
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    rc = proc.returncode
+    if rc is None or rc == 0:
+        return
+    tail = ""
+    if proc.stderr is not None:
+        with contextlib.suppress(Exception):
+            raw = await asyncio.wait_for(proc.stderr.read(65_536), timeout=2)
+            tail = raw.decode("utf-8", errors="replace").strip()
+    summary = " | ".join(tail.splitlines()[-5:])
+    if len(summary) > 500:
+        summary = summary[-500:]
+    raise ProcessError(
+        f"process exited with code {rc}" + (f": {summary}" if summary else "")
+    )
 
 
 async def terminate_tree(proc: asyncio.subprocess.Process, grace: float = DEFAULT_GRACE_SECONDS) -> None:

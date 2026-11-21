@@ -174,10 +174,15 @@ class ClaudeCodeEngine:
         )
 
     def _argv(self, request: RunRequest) -> list[str]:
-        # Non-interactive, structured streaming output. No permission-bypass flag.
+        # Non-interactive, structured streaming output. No permission-bypass
+        # flag. NOTE: the CLI refuses to start with
+        # "--output-format=stream-json requires --verbose" when printing, so
+        # --verbose is mandatory here (without it the run exits 1 with an empty
+        # stdout and the chat shows "no output").
         return [
             self._binary, "-p",
             "--output-format", "stream-json",
+            "--verbose",
             "--permission-mode", self._cc.permission_mode,
         ]
 
