@@ -44,7 +44,14 @@ from typing import Any
 from claudio_core.accounting import CallAccountant
 from claudio_core.context import context_usage_payload
 from claudio_core.db import Database, utcnow
-from claudio_core.engine import ModelSpec, RunRequest, ToolPolicy
+from claudio_core.engine import (
+    CheckpointError,
+    EngineCheckpoint,
+    EngineError,
+    ModelSpec,
+    RunRequest,
+    ToolPolicy,
+)
 from claudio_core.events import EventName
 from claudio_core.instructions import build_instructions
 from claudio_core.learning import capture_run
@@ -255,6 +262,32 @@ class RunManager:
         # weak reference doesn't let them be GC'd mid-flight; each discards
         # itself on completion.
         self._capture_tasks: set = set()
+
+    def _engine_id(self) -> str:
+        """The selected engine's id, for tagging resume checkpoints (issue #57)."""
+        desc = getattr(self.engine, "descriptor", None)
+        return getattr(desc, "id", "adk")
+
+    def _unwrap_checkpoint(self, state_json: str) -> Any:
+        """Validate a resume checkpoint envelope and return its inner payload.
+
+        Accepts both the new ``{engine, schema_version, payload}`` envelope and a
+        legacy raw state string (pre-envelope runs), so an upgrade does not
+        strand an in-flight approval. A checkpoint from a different engine is
+        rejected rather than resumed against the wrong engine.
+        """
+        try:
+            parsed = json.loads(state_json) if isinstance(state_json, str) else state_json
+        except (ValueError, TypeError):
+            return state_json
+        if isinstance(parsed, dict) and "engine" in parsed and "schema_version" in parsed:
+            try:
+                cp = EngineCheckpoint.from_dict(parsed)
+                cp.validate_for(self._engine_id())
+            except CheckpointError as exc:
+                raise EngineError("bad_resume_state", str(exc), retryable=False) from exc
+            return cp.payload
+        return state_json
 
     def _acct(self) -> CallAccountant:
         """The unified ledger, lazily created for partial-manager test doubles
@@ -1351,7 +1384,7 @@ class RunManager:
         fallback = self.config.llm.fallback_model
         attempt = 0
         used_fallback = False
-        state = state_json
+        state = self._unwrap_checkpoint(state_json)
         budget = float(self.config.agent.max_budget_usd or 0.0)
         max_continues = max(0, int(self.config.agent.max_auto_continues or 0))
         total_input = 0
@@ -1717,14 +1750,18 @@ class RunManager:
         reason = data.get("reason") or f"Approval required to run {tool}"
         record.state = "awaiting_approval"
         record.state_changed.set()
+        # The engine-specific pause state is wrapped in an engine-neutral,
+        # versioned envelope (issue #57) so a checkpoint produced by one engine
+        # is never resumed by another. The payload is opaque to the manager.
+        payload = {
+            "kind": "adk_confirmation",
+            "confirmation_id": confirmation_id,
+            "tool_name": tool,
+            "arguments": _parse_args(raw_args),
+            "hint": reason,
+        }
         record.resume_state_json = json.dumps(
-            {
-                "kind": "adk_confirmation",
-                "confirmation_id": confirmation_id,
-                "tool_name": tool,
-                "arguments": _parse_args(raw_args),
-                "hint": reason,
-            }
+            EngineCheckpoint(engine=self._engine_id(), payload=payload).to_dict()
         )
         await self.db.update_run(
             record.run_id,

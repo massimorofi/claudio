@@ -119,9 +119,141 @@ class EngineError(Exception):
         self.retryable = retryable
 
 
+@dataclass(frozen=True)
+class EngineCapabilities:
+    """What an engine implementation can do, for diagnostics and validation.
+
+    The run manager and the ``/version`` endpoint read these to decide which
+    Claudio features are available for the selected engine, instead of assuming
+    the ADK implementation's abilities. An engine that cannot honour a capability
+    must declare it false so the surface degrades honestly rather than
+    fabricating success.
+    """
+
+    streaming: bool = True
+    approvals: bool = True
+    tools: bool = True
+    compaction: bool = True
+    resume_after_restart: bool = True
+    usage_reporting: bool = True
+
+
+@dataclass(frozen=True)
+class EngineDescriptor:
+    """Stable identity for a selected engine (issue #57)."""
+
+    id: str
+    version: str = "unknown"
+    capabilities: EngineCapabilities = field(default_factory=EngineCapabilities)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "version": self.version,
+            "capabilities": {
+                k: v
+                for k, v in self.capabilities.__dict__.items()
+            },
+        }
+
+
+#: The checkpoint envelope schema version. Bump when the envelope shape changes.
+CHECKPOINT_SCHEMA_VERSION = 1
+
+
+class CheckpointError(Exception):
+    """A run checkpoint could not be validated for the selected engine."""
+
+
+@dataclass
+class EngineCheckpoint:
+    """An opaque, versioned, engine-tagged resume checkpoint (issue #57).
+
+    ``RunManager`` persists and returns this structure *without interpreting*
+    ``payload`` -- the payload is owned by the engine that produced it. The
+    envelope carries the producing engine id and a schema version so the
+    backend can reject an incompatible checkpoint explicitly instead of trying
+    to resume a run against the wrong engine.
+    """
+
+    engine: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = CHECKPOINT_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "engine": self.engine,
+            "schema_version": self.schema_version,
+            "payload": self.payload,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "EngineCheckpoint":
+        if not isinstance(data, dict):
+            raise CheckpointError("checkpoint must be a JSON object")
+        engine = data.get("engine")
+        if not engine:
+            raise CheckpointError("checkpoint is missing its engine id")
+        version = data.get("schema_version", CHECKPOINT_SCHEMA_VERSION)
+        if version != CHECKPOINT_SCHEMA_VERSION:
+            raise CheckpointError(
+                f"unsupported checkpoint schema_version {version!r}"
+            )
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        return cls(engine=str(engine), payload=payload, schema_version=int(version))
+
+    def validate_for(self, engine_id: str) -> None:
+        """Raise :class:`CheckpointError` unless this checkpoint is ours."""
+        if self.engine != engine_id:
+            raise CheckpointError(
+                f"checkpoint was produced by engine {self.engine!r}, "
+                f"but the selected engine is {engine_id!r}"
+            )
+
+
 @runtime_checkable
 class RunEngine(Protocol):
-    """The contract every engine implementation must satisfy."""
+    """The contract every engine implementation must satisfy.
+
+    Beyond the run operations (``stream``/``resume``/``cancel``/conversation
+    access), an engine exposes a lifecycle (``start``/``close``/``reload_config``)
+    and identity (``descriptor``/``capabilities``) so the supervisor and API can
+    treat every implementation uniformly instead of assuming ADK specifics.
+    """
+
+    @property
+    def descriptor(self) -> EngineDescriptor:
+        """Stable engine id/version/capabilities for diagnostics and /version."""
+        ...
+
+    def capabilities(self) -> EngineCapabilities:
+        """The features this engine honours (mirrors ``descriptor.capabilities``)."""
+        ...
+
+    async def start(self) -> None:
+        """Validate the selected binary/config at startup.
+
+        Must raise a clear, actionable error if the engine is unavailable or
+        misconfigured; the backend must not silently fall back to another engine.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Stop engine-owned servers/subprocesses and release sessions.
+
+        Safe to call more than once.
+        """
+        ...
+
+    def reload_config(self, config: Any) -> None:
+        """Apply reloadable settings.
+
+        If the change would require a different engine/image, raise
+        :class:`EngineError` to reject the hot reload (a restart is required).
+        """
+        ...
 
     async def stream(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
         """Drive the agent, yielding Claudio SSE events as they happen.

@@ -83,6 +83,16 @@ logger = logging.getLogger(__name__)
 
 CONFIRMATION_TOOL = "adk_request_confirmation"
 
+
+def _adk_version() -> str:
+    """The installed google-adk version, for the engine descriptor."""
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        return _pkg_version("google-adk")
+    except Exception:  # noqa: BLE001 - version is informational
+        return "unknown"
+
 # Per-call timeout applied to MCP connections (connect + each tool/resource call).
 # ADK's own default is 5s, which is tight for a remote server that may be cold;
 # give it a more forgiving budget so a slow first connect does not drop the
@@ -1432,6 +1442,36 @@ class AdkEngine:
         self._mcp_toolsets = []
         self._mcp_entries = []
         self._mcp_key = None
+
+    # -- lifecycle / identity (issue #57) --------------------------------
+
+    @property
+    def descriptor(self) -> Any:
+        from claudio_core.engine import EngineCapabilities, EngineDescriptor
+
+        return EngineDescriptor(
+            id="adk",
+            version=_adk_version(),
+            capabilities=EngineCapabilities(
+                streaming=True, approvals=True, tools=True,
+                compaction=True, resume_after_restart=True, usage_reporting=True,
+            ),
+        )
+
+    def capabilities(self) -> Any:
+        return self.descriptor.capabilities
+
+    async def start(self) -> None:
+        """Validate the ADK engine at startup.
+
+        ADK is an in-process library (no external binary), so there is no CLI to
+        check; we confirm the import surface is present and the config resolves.
+        """
+        import google.adk  # noqa: F401 - presence check, engine is in-process
+
+    def reload_config(self, config: Any) -> None:
+        # ADK reads config live per run; swapping the object is sufficient.
+        self.config = config
 
     # -- RunEngine API ---------------------------------------------------
 

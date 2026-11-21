@@ -1,0 +1,29 @@
+# Engine override: Claude Code backend (issue #57).
+#
+# Builds the agent image with the pinned Claude Code CLI and selects the
+# claude_code engine at runtime. Claude Code speaks the Anthropic Messages API;
+# the adapter refuses to start against an OpenAI-only endpoint unless the
+# endpoint's /v1/messages compatibility has been verified and
+# CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT=true is set.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.engine-claude-code.yaml build agent
+#   docker compose -f compose.yaml -f compose.engine-claude-code.yaml up -d
+#
+# Credentials come from the environment (never baked into the image).
+services:
+  agent:
+    build:
+      args:
+        ENGINE: claude_code
+        # Pin the Claude Code CLI version here (do not use `latest`).
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-0.0.0-pin-me}
+    environment:
+      CLAUDIO_ENGINE: claude_code
+      # Anthropic Messages-compatible base URL + key for Claude Code. Supply via
+      # .env / secrets; the adapter fails startup if the endpoint is not declared
+      # Anthropic-compatible.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Set true ONLY after verifying /v1/messages works on the configured
+      # endpoint (e.g. via a conversion gateway).
+      CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT: ${CLAUDE_CODE_ALLOW_OPENAI_ENDPOINT:-false}

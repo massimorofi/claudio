@@ -50,6 +50,7 @@ class Supervisor:
         self.accountant = CallAccountant(metrics=self.metrics)
         self.compactor: Compactor | None = None
         self.engine = None
+        self.engine_ready = False
         self.run_manager: RunManager | None = None
         self.notifier: Notifier | None = None
         self.health_service: HealthService | None = None
@@ -86,10 +87,21 @@ class Supervisor:
             # engine's per-request context guard, so a session that trips the
             # breaker mid-run degrades to truncation instead of dying, and a
             # restart clears the breaker outright.
-            # The engine is the single ADK-aware component; the run manager
-            # drives it through the framework-free RunEngine protocol.
-            self.engine = create_engine(self.config, self.db, accountant=self.accountant)
+            # The engine is the single framework-aware component; the run
+            # manager drives it through the framework-free RunEngine protocol.
+            # Selection is deployment-wide (issue #57); start() validates the
+            # selected engine and fails startup clearly if it is unavailable.
+            self.engine = create_engine(
+                self.config,
+                self.db,
+                accountant=self.accountant,
+                session_store=self.session_store,
+                metrics=self.metrics,
+                profile_health=self.model_health,
+            )
             self.engine.profile_health = self.model_health
+            await self.engine.start()
+            self.engine_ready = True
             # Calls that outlive any run (the daemon agent, the config probe)
             # fall back to this recorder so they still land in the ledger.
             set_default_recorder(self.accountant.make_engine_recorder())
@@ -181,7 +193,12 @@ class Supervisor:
         if self.run_manager:
             self.run_manager.config = self.config
         if self.engine:
-            self.engine.config = self.config
+            # Engines own their reload rules (issue #57); one that cannot apply a
+            # change hot raises so the operator is told a restart is required.
+            try:
+                self.engine.reload_config(self.config)
+            except Exception as exc:  # noqa: BLE001 - surface, don't crash reload
+                logger.warning("engine reload_config rejected: %s", exc)
         if self.compactor:
             self.compactor.context_window = resolve_profile(
                 self.config, "fast"

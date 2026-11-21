@@ -1,7 +1,16 @@
 # syntax=docker/dockerfile:1
 #
-# claudio-agent — the Python backend (FastAPI/uvicorn + Google ADK runtime).
+# claudio-agent — the Python backend (FastAPI/uvicorn + a pluggable agent engine).
 #
+# ENGINE selects which agent engine's CLI is baked into this image (issue #57):
+#   ENGINE=adk          (default) — in-process Google ADK, no extra CLI
+#   ENGINE=opencode     — installs the pinned OpenCode CLI
+#   ENGINE=claude_code  — installs the pinned Claude Code CLI
+# Only ONE alternative CLI is installed per image; the default build installs
+# neither alternative, so the standard stack needs no OpenCode/Claude Code. The
+# runtime CLAUDIO_ENGINE env must match the ENGINE the image was built with;
+# the backend fails startup on a mismatch (see engine/factory.py).
+ARG ENGINE=adk
 # Base is python:3.11-slim deliberately: the host venv everything was developed
 # and tested against is 3.11.16, and `requires-python >= 3.11` forbids anything
 # older. Matching the interpreter exactly means a surprise is attributable to one
@@ -56,6 +65,26 @@ COPY . /srv/claudio/
 # depends on it.
 RUN pip install --no-cache-dir -e ./claudio-core \
     && pip install --no-cache-dir -e ./claudio-backend
+
+# Engine CLI install (issue #57). Only the selected alternative CLI is added;
+# the default `adk` image installs nothing extra and needs no Node runtime.
+# Versions are pinned. Verify checksums/signatures in a hardened build; the
+# `latest` tag is deliberately avoided.
+ARG ENGINE=adk
+ARG OPENCODE_VERSION=0.0.0-pin-me
+ARG CLAUDE_CODE_VERSION=0.0.0-pin-me
+RUN if [ "$ENGINE" = "opencode" ] || [ "$ENGINE" = "claude_code" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+        && rm -rf /var/lib/apt/lists/* ; \
+    fi \
+    && case "$ENGINE" in \
+         opencode) \
+            npm install -g "opencode-ai@${OPENCODE_VERSION}" ;; \
+         claude_code) \
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" ;; \
+         adk) : ;; \
+         *) echo "unknown ENGINE=$ENGINE" && exit 1 ;; \
+       esac
 
 # Writable state the container owns. Each of these is overridden by a named
 # volume at runtime; creating them here sets the correct ownership for the

@@ -486,6 +486,55 @@ class AutonomousConfig(BaseModel):
         return [validate_command_entry(e) for e in v]
 
 
+class OpenCodeEngineConfig(BaseModel):
+    """OpenCode engine settings (issue #57)."""
+
+    model: str | None = None            # default: resolved Claudio primary profile
+    config_dir: str | None = None       # default: private path under backend data
+    server_mode: str = "standalone"     # standalone | server
+    binary: str = "opencode"            # pinned CLI name/path in the image
+
+
+class ClaudeCodeEngineConfig(BaseModel):
+    """Claude Code engine settings (issue #57)."""
+
+    model: str | None = None            # mapped to a supported Claude Code model id
+    config_dir: str | None = None       # default: private path under backend data
+    permission_mode: str = "default"    # default | acceptEdits | plan
+    binary: str = "claude"              # pinned CLI name/path in the image
+    # Claude Code speaks the Anthropic Messages API. The adapter refuses to run
+    # against an OpenAI-only endpoint unless this is explicitly enabled after the
+    # endpoint's /v1/messages compatibility has been verified.
+    allow_openai_endpoint: bool = False
+
+
+class EngineConfig(BaseModel):
+    """Pluggable backend engine selection (issue #57).
+
+    ``kind`` is the deployment-wide engine: ``adk`` (default), ``opencode`` or
+    ``claude_code``. The ``CLAUDIO_ENGINE`` environment variable overrides it for
+    runtime compatibility; the effective value is exposed on ``/version``.
+    Selecting a non-default engine requires the matching backend image with that
+    CLI installed; startup fails clearly if the binary is missing.
+    """
+
+    kind: str = "adk"
+    startup_timeout_seconds: int = Field(default=30, ge=1)
+    run_timeout_seconds: int = Field(default=1800, ge=1)
+    opencode: OpenCodeEngineConfig = Field(default_factory=OpenCodeEngineConfig)
+    claude_code: ClaudeCodeEngineConfig = Field(default_factory=ClaudeCodeEngineConfig)
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, v: str) -> str:
+        allowed = {"adk", "opencode", "claude_code"}
+        if v not in allowed:
+            raise ValueError(
+                f"unknown engine kind {v!r}; expected one of {sorted(allowed)}"
+            )
+        return v
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -499,6 +548,7 @@ class AppConfig(BaseModel):
     self_improvement: SelfImprovementConfig = Field(
         default_factory=SelfImprovementConfig
     )
+    engine: EngineConfig = Field(default_factory=EngineConfig)
 
 
 def _llm_as_profile(llm: LLMConfig, context_window: int) -> ModelProfile:
@@ -522,6 +572,25 @@ def _llm_as_profile(llm: LLMConfig, context_window: int) -> ModelProfile:
         timeout_seconds=llm.timeout_seconds,
         reasoning_effort=llm.reasoning_effort,
     )
+
+
+def resolve_engine_kind(config: "AppConfig") -> str:
+    """The effective engine id after configuration resolution (issue #57).
+
+    ``CLAUDIO_ENGINE`` (env) wins over ``engine.kind`` (config) for runtime
+    compatibility with the existing factory; when neither is set the default is
+    ``adk``. The single effective value is what ``/version`` reports and what the
+    factory constructs -- there is exactly one authoritative engine per process.
+    """
+    import os
+
+    env = (os.environ.get("CLAUDIO_ENGINE") or "").strip().lower()
+    if env:
+        # Normalize aliases the factory accepts.
+        if env in ("google_adk", "google-adk"):
+            return "adk"
+        return env
+    return (config.engine.kind or "adk").strip().lower()
 
 
 def resolve_profile(config: "AppConfig", role: str) -> ModelProfile:

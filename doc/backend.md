@@ -489,3 +489,34 @@ ADK is not a durability upgrade. The reasons for the migration are the workflow
 primitives and the vendor neutrality, not durability — and Claudio's own
 budget, allowlist, input-filter and compaction layers must be kept because ADK
 supplies none of them.
+
+## Pluggable backend engines (issue #57)
+
+The backend can be driven by different agent engines behind one factory, while
+the FastAPI surface, SSE contract, approvals, sessions and tool policy stay
+identical. The engine is selected deployment-wide (one per backend process), not
+per session.
+
+- **Engine IDs:** `adk` (default, in-process Google ADK), `opencode`, `claude_code`.
+- **Selection:** `engine.kind` in config, overridable by the `CLAUDIO_ENGINE`
+  environment variable (the env wins). The effective value is reported by
+  `GET /api/v1/version` as `engine` / `engine_version` / `engine_capabilities`.
+- **Boundary:** `claudio_backend.engine` is the only package that may import a
+  concrete engine (ADK) or launch an engine CLI. `api/` and `runs/` depend only
+  on the framework-neutral `claudio_core.engine.RunEngine` protocol; the
+  import-linter contract enforces this.
+- **Lifecycle:** every engine implements `start()` (validate binary/config at
+  startup; fail clearly if unavailable — no silent fallback), `close()`,
+  `reload_config()`, and a `descriptor`/`capabilities`.
+- **Checkpoints:** an approval pause is persisted as an opaque, versioned,
+  engine-tagged envelope `{engine, schema_version, payload}`. The run manager
+  stores it without interpreting the payload and rejects a checkpoint produced
+  by a different engine.
+- **Adapters:** `engine/opencode` and `engine/claude_code` drive their pinned
+  CLIs through the shared `engine/process.py` runner (argv-only launch, minimal
+  environment, bounded output, per-run timeout, process-tree cancellation) and
+  translate native JSONL events into Claudio events at the boundary. Claude Code
+  additionally refuses to start against a non-Anthropic endpoint unless
+  `engine.claude_code.allow_openai_endpoint` is set after verification.
+
+See `doc/docker.md` for building/selecting each engine image variant.

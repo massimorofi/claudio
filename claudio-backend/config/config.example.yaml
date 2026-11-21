@@ -240,3 +240,26 @@ self_improvement:
   max_learnings: 5000
   retention_days: 180
   max_auto_skills: 20
+
+# Pluggable backend engine (issue #57). Deployment-wide: one engine per backend
+# process. `adk` is the default and needs no extra CLI. Selecting `opencode` or
+# `claude_code` requires the matching backend image (see compose.engine-*.yaml)
+# and a backend restart; it is not a per-session choice. The CLAUDIO_ENGINE
+# environment variable overrides `kind` at runtime.
+engine:
+  kind: adk                    # adk | opencode | claude_code
+  startup_timeout_seconds: 30
+  run_timeout_seconds: 1800
+  opencode:
+    model: null                # default: resolved Claudio primary profile
+    config_dir: null           # default: private path under backend data
+    server_mode: standalone
+    binary: opencode
+  claude_code:
+    model: null                # mapped to a supported Claude Code model id
+    config_dir: null
+    permission_mode: default   # default | acceptEdits | plan
+    binary: claude
+    # Claude Code needs an Anthropic Messages (/v1/messages) endpoint. Set true
+    # ONLY after verifying the configured endpoint serves that protocol.
+    allow_openai_endpoint: false

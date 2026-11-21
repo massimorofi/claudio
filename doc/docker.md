@@ -532,3 +532,27 @@ the container itself.
   (mounted as the `gortex-data` volume). Gortex publishes signed binaries for
   linux/amd64 and linux/arm64; the image uses the one-line installer with
   `GORTEX_INSTALL_DIR=/usr/local/bin` (Debian base, not the Alpine `.apk`).
+
+## Engine image variants (issue #57)
+
+The default stack builds the `adk` agent image and needs no extra CLI. To run a
+different engine, build the matching image variant and select it at runtime. The
+`agent`/`web` service names, network, ports and volumes are unchanged; switching
+variants recreates `agent` only (no frontend rebuild).
+
+```bash
+# OpenCode
+docker compose -f compose.yaml -f compose.engine-opencode.yaml build agent
+docker compose -f compose.yaml -f compose.engine-opencode.yaml up -d
+
+# Claude Code (requires an Anthropic Messages-compatible endpoint)
+ANTHROPIC_API_KEY=... docker compose -f compose.yaml -f compose.engine-claude-code.yaml build agent
+ANTHROPIC_API_KEY=... docker compose -f compose.yaml -f compose.engine-claude-code.yaml up -d
+```
+
+Pin the CLI versions via the `OPENCODE_VERSION` / `CLAUDE_CODE_VERSION` build
+args (the Dockerfile defaults are placeholders — set real pinned versions and
+verify checksums in a hardened build). The runtime `CLAUDIO_ENGINE` must match
+the `ENGINE` the image was built with; a mismatch fails startup rather than
+silently running a different engine. Roll back by selecting `adk` and
+rebuilding/recreating `agent`.

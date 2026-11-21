@@ -1,0 +1,22 @@
+# Engine override: OpenCode backend (issue #57).
+#
+# Build and run the agent image with the OpenCode CLI installed, and select the
+# opencode engine at runtime. Keep the canonical `agent`/`web` service names and
+# the normal stack topology; only the agent image variant changes.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.engine-opencode.yaml build agent
+#   docker compose -f compose.yaml -f compose.engine-opencode.yaml up -d
+#
+# The frontend (`web`) is unchanged and does not need a rebuild.
+services:
+  agent:
+    build:
+      args:
+        ENGINE: opencode
+        # Pin the OpenCode CLI version here (do not use `latest`).
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-0.0.0-pin-me}
+    environment:
+      # Must match the ENGINE the image was built with; a mismatch fails startup.
+      # CLAUDIO_ENGINE is the authoritative runtime selector (issue #57).
+      CLAUDIO_ENGINE: opencode
