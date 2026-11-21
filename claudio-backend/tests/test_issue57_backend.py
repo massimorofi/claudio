@@ -174,12 +174,14 @@ def test_opencode_start_missing_binary_fails(tmp_path):
 
 
 def test_opencode_streams_events(tmp_path):
+    # Real `opencode run --format json` schema: text under part.text, no
+    # terminal event (stream ends at process exit -> synthesized completion).
     body = (
-        "import sys\nsys.stdin.read()\n"
-        "import json\n"
-        "print(json.dumps({'type':'token','text':'Hel'}))\n"
-        "print(json.dumps({'type':'token','text':'lo'}))\n"
-        "print(json.dumps({'type':'run_completed','final_output':'Hello','turns':1}))\n"
+        "import sys, json\n"
+        "print(json.dumps({'type':'step_start','sessionID':'ses_1','part':{'type':'step-start'}}))\n"
+        "print(json.dumps({'type':'text','sessionID':'ses_1','part':{'type':'text','text':'Hel'}}))\n"
+        "print(json.dumps({'type':'text','sessionID':'ses_1','part':{'type':'text','text':'lo'}}))\n"
+        "print(json.dumps({'type':'step_finish','sessionID':'ses_1','part':{'type':'step-finish','tokens':{'input':5,'output':2,'reasoning':0},'cost':0.01}}))\n"
     )
     eng = _opencode_engine(tmp_path, body)
     events = _collect(eng, _request(tmp_path))
@@ -188,26 +190,54 @@ def test_opencode_streams_events(tmp_path):
     assert kinds.count(EventName.RUN_COMPLETED.value) == 1
     completed = [e for e in events if e["event"] == EventName.RUN_COMPLETED.value][0]
     assert completed["data"]["final_output"] == "Hello"
+    assert completed["data"]["usage"]["input_tokens"] == 5
 
 
 def test_opencode_translates_tool_events(tmp_path):
     body = (
-        "import sys;sys.stdin.read()\nimport json\n"
-        "print(json.dumps({'type':'tool_call','id':'c1','name':'read_file','arguments':{'path':'a'}}))\n"
-        "print(json.dumps({'type':'tool_result','id':'c1','name':'read_file','output':'data'}))\n"
-        "print(json.dumps({'type':'run_completed','final_output':'done'}))\n"
+        "import sys, json\n"
+        "print(json.dumps({'type':'tool_use','sessionID':'ses_1','part':{'type':'tool','tool':'write','callID':'c1','state':{'status':'completed','input':{'filePath':'a'},'output':'data'}}}))\n"
     )
     eng = _opencode_engine(tmp_path, body)
     events = _collect(eng, _request(tmp_path))
     tc = [e for e in events if e["event"] == EventName.TOOL_CALL.value][0]
     assert tc["data"]["call_id"] == "c1"
+    assert tc["data"]["name"] == "write_file"  # normalized
     assert isinstance(tc["data"]["arguments"], str)  # JSON string per contract
     tr = [e for e in events if e["event"] == EventName.TOOL_RESULT.value][0]
     assert tr["data"]["output"] == "data"
 
 
+def test_opencode_reasoning_and_todowrite(tmp_path):
+    body = (
+        "import sys, json\n"
+        "print(json.dumps({'type':'reasoning','sessionID':'s','part':{'type':'reasoning','text':'thinking...'}}))\n"
+        "print(json.dumps({'type':'tool_use','sessionID':'s','part':{'type':'tool','tool':'todowrite','callID':'t1','state':{'status':'completed','input':{'todos':[{'content':'a','status':'completed'},{'content':'b','status':'in_progress'}]},'output':'ok'}}}))\n"
+    )
+    eng = _opencode_engine(tmp_path, body)
+    events = _collect(eng, _request(tmp_path))
+    reasoning = [e for e in events if e["event"] == EventName.REASONING.value]
+    assert reasoning and reasoning[0]["data"]["text"] == "thinking..."
+    tc = [e for e in events if e["event"] == EventName.TOOL_CALL.value][0]
+    assert tc["data"]["name"] == "todo_write"
+    plan = json.loads(tc["data"]["arguments"])
+    assert [i["status"] for i in plan["items"]] == ["done", "in_progress"]
+
+
+def test_opencode_error_line_fails_run(tmp_path):
+    body = (
+        "import sys, json\n"
+        "print(json.dumps({'type':'error','sessionID':'s','error':{'name':'APIError','data':{'message':'max_tokens exceeds cap'}}}))\n"
+    )
+    eng = _opencode_engine(tmp_path, body)
+    events = _collect(eng, _request(tmp_path))
+    kinds = [e["event"] for e in events]
+    assert EventName.RUN_FAILED.value in kinds
+    assert EventName.RUN_COMPLETED.value not in kinds
+
+
 def test_opencode_malformed_line_is_skipped(tmp_path):
-    body = "import sys;sys.stdin.read()\nprint('not json')\nprint('{\"type\":\"run_completed\",\"final_output\":\"x\"}')\n"
+    body = "print('not json')\nprint('{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"x\"}}')\n"
     eng = _opencode_engine(tmp_path, body)
     events = _collect(eng, _request(tmp_path))
     assert [e for e in events if e["event"] == EventName.RUN_COMPLETED.value]
@@ -525,9 +555,8 @@ def any_engine(request, tmp_path, monkeypatch):
         return kind, eng
     if kind == "opencode":
         cli = _write_fake_cli(tmp_path, "oc.py",
-            "import sys;sys.stdin.read()\nimport json\n"
-            "print(json.dumps({'type':'token','text':'x'}))\n"
-            "print(json.dumps({'type':'run_completed','final_output':'x'}))\n")
+            "import json\n"
+            "print(json.dumps({'type':'text','sessionID':'s','part':{'type':'text','text':'x'}}))\n")
         cfg = AppConfig.model_validate({"engine": {"kind": "opencode", "opencode": {"binary": cli}}})
         return kind, OpenCodeEngine(EngineContext(config=cfg, db=None))
     cli = _write_fake_cli(tmp_path, "cc.py",

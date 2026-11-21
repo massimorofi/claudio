@@ -39,6 +39,17 @@ from ...paths import workspace_state_dir
 from ..base import EngineContext
 from .. import process as proc
 
+# opencode tool name -> Claudio canonical name (artifact tracking + cards).
+_OC_TOOL_NAMES = {
+    "write": "write_file",
+    "edit": "edit_file",
+    "read": "read_file",
+    "bash": "run_command",
+    "todowrite": "todo_write",
+    "webfetch": "web_fetch",
+}
+_OC_TODO_STATUS = {"completed": "done", "in_progress": "in_progress"}
+
 
 class OpenCodeEngine:
     """A :class:`claudio_core.engine.RunEngine` backed by the OpenCode CLI."""
@@ -92,6 +103,7 @@ class OpenCodeEngine:
                 "select the opencode backend image or set engine.kind=adk",
                 retryable=False,
             )
+        self._write_provider_config()
         # Best-effort version capture; never fatal.
         try:
             result = await proc.run_collect(
@@ -115,6 +127,70 @@ class OpenCodeEngine:
                 retryable=False,
             )
         self.config = config
+        self._write_provider_config()
+
+    def _write_provider_config(self) -> None:
+        """Generate opencode.json registering the Claudio gateway as a provider.
+
+        OpenCode has no generic "custom OpenAI base URL" env override the way
+        Claude Code has ANTHROPIC_BASE_URL: a non-OpenAI model id must be
+        declared under a provider in opencode.json, or the CLI rejects it. The
+        API key is referenced as {env:OPENAI_API_KEY} so the secret stays in
+        the runtime environment and is never written to disk (issue #57).
+        """
+        llm = self.config.llm
+        oc = self._oc
+        model = (llm.model or "").strip()
+        cfg_dir = self._config_dir() / ".config" / "opencode"
+        try:
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            provider = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Claudio gateway",
+                "options": {
+                    "baseURL": llm.base_url or "",
+                    "apiKey": "{env:OPENAI_API_KEY}",
+                },
+                "models": {
+                    model: {"limit": {"output": int(oc.output_token_limit)}}
+                } if model else {},
+            }
+            (cfg_dir / "opencode.json").write_text(
+                json.dumps({
+                    "$schema": "https://opencode.ai/config.json",
+                    "provider": {oc.provider_name: provider},
+                }, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # best-effort; a run without it fails loudly at the CLI
+
+    def _session_path(self, session_id: str) -> Path:
+        base = workspace_state_dir("__engine__") / "opencode-sessions"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{session_id}.json"
+
+    def _load_native_session(self, session_id: str) -> str:
+        try:
+            return str(json.loads(self._session_path(session_id).read_text())["native_session"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return ""
+
+    def _save_native_session(self, session_id: str, native: str) -> None:
+        if not native:
+            return
+        try:
+            self._session_path(session_id).write_text(
+                json.dumps({"native_session": native})
+            )
+        except OSError:
+            pass
+
+    def _clear_native_session(self, session_id: str) -> None:
+        try:
+            self._session_path(session_id).unlink()
+        except OSError:
+            pass
 
     async def close(self) -> None:
         self._closed = True
@@ -123,13 +199,14 @@ class OpenCodeEngine:
 
     def _env(self) -> dict[str, str]:
         # Minimal environment: only what OpenCode needs, never the whole .env.
+        # The provider config references {env:OPENAI_API_KEY}, so the key must
+        # be present here (issue #57).
         llm = self.config.llm
         return proc.build_env(
             base={"HOME": str(self._config_dir())},
             extra={
-                "OPENAI_BASE_URL": llm.base_url or "",
                 "OPENAI_API_KEY": llm.api_key or "local",
-                "OPENCODE_CONFIG_DIR": str(self._config_dir()),
+                "XDG_CONFIG_HOME": str(self._config_dir() / ".config"),
             },
         )
 
@@ -142,12 +219,42 @@ class OpenCodeEngine:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def _model_ref(self) -> str:
+        model = (self.config.llm.model or "").strip()
+        if not model:
+            return ""
+        # opencode wants provider/model; if the operator already qualified it,
+        # use as-is.
+        return model if "/" in model else f"{self._oc.provider_name}/{model}"
+
     def _argv(self, request: RunRequest) -> list[str]:
-        # argv list only -- prompt text is passed via stdin, never interpolated.
-        return [self._binary, "run", "--format", "json"]
+        # argv list only -- the message is a positional argument (execv, never
+        # shell-interpolated). --format json emits raw JSONL events; --thinking
+        # surfaces reasoning blocks (issue #57).
+        argv = [self._binary, "run", request.user_input, "--format", "json", "--thinking"]
+        model_ref = self._model_ref()
+        if model_ref:
+            argv += ["-m", model_ref]
+        native = self._load_native_session(request.session_id)
+        if native:
+            argv += ["-s", native]
+        return argv
 
     async def stream(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
+        async for evt in self._stream_with_resume_fallback(request):
+            yield evt
+
+    async def _stream_with_resume_fallback(
+        self, request: RunRequest
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Retry fresh if the stored native session is stale (issue #57)."""
         async for evt in self._drive(request, resume_checkpoint=None):
+            code = ((evt.get("data") or {}).get("error") or {}).get("code")
+            if evt.get("event") == EventName.RUN_FAILED.value and code == "engine_resume_stale":
+                self._clear_native_session(request.session_id)
+                async for evt2 in self._drive(request, resume_checkpoint=None):
+                    yield evt2
+                return
             yield evt
 
     async def resume(self, request: RunRequest, state: Any) -> AsyncIterator[dict[str, Any]]:
@@ -168,117 +275,139 @@ class OpenCodeEngine:
     ) -> AsyncIterator[dict[str, Any]]:
         env = self._env()
         argv = self._argv(request)
-        stdin_text = request.user_input
+        self._last_text = ""
+        self._usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        self._saw_terminal = False
         try:
             async for line in proc.stream_lines(
                 argv,
                 cwd=request.workspace,
                 env=env,
                 timeout_seconds=self.config.engine.run_timeout_seconds,
-                stdin_text=stdin_text,
             ):
                 if request.run_id in self._cancelled:
                     yield self._failed(request, "cancelled", "Run cancelled by user")
                     return
-                event = self._translate_line(line, request)
-                if event is None:
-                    continue
-                yield event
-                if event["event"] in (EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value,
-                                      EventName.APPROVAL_REQUIRED.value):
-                    return
+                for event in self._translate_line(line, request):
+                    yield event
+                    if event["event"] in (EventName.RUN_COMPLETED.value,
+                                          EventName.RUN_FAILED.value,
+                                          EventName.APPROVAL_REQUIRED.value):
+                        self._saw_terminal = True
+                        return
         except proc.ProcessError as exc:
             # Launch/exit failures are config problems: replanning would fail
             # identically forever. Only a timeout stays retryable.
             code = "engine_error" if "timeout" in str(exc).lower() else "engine_config_error"
             yield self._failed(request, code, str(exc))
             return
-        # Stream ended without a terminal event: synthesize completion from the
-        # accumulated text so the run manager sees exactly one terminal event.
-        yield {
-            "event": EventName.RUN_COMPLETED.value,
-            "data": {
-                "run_id": request.run_id,
-                "session_id": request.session_id,
-                "final_output": getattr(self, "_last_text", ""),
-                "usage": {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
-                "turns": 0,
-            },
-        }
-
-    def _translate_line(self, line: str, request: RunRequest) -> dict[str, Any] | None:
-        """Map one OpenCode JSONL line to a Claudio event (or None).
-
-        Unknown event types are ignored (logged), never fabricated. A parse
-        failure is surfaced by the caller as a run_failed via ProcessError only
-        for structural problems; a bad JSON line here is skipped defensively.
-        """
-        try:
-            obj = json.loads(line)
-        except (ValueError, TypeError):
-            return None
-        if not isinstance(obj, dict):
-            return None
-        kind = obj.get("type") or obj.get("event")
-        if kind in ("token", "text", "message"):
-            text = obj.get("text") or obj.get("content") or ""
-            if text:
-                self._last_text = getattr(self, "_last_text", "") + text
-                return {"event": EventName.TOKEN.value, "data": {"text": text}}
-        elif kind == "reasoning":
-            return {"event": EventName.REASONING.value, "data": {"text": obj.get("text", "")}}
-        elif kind in ("tool_call", "tool-use"):
-            return {
-                "event": EventName.TOOL_CALL.value,
-                "data": {
-                    "call_id": str(obj.get("id") or obj.get("call_id") or ""),
-                    "name": str(obj.get("name") or obj.get("tool") or ""),
-                    "arguments": json.dumps(obj.get("arguments") or obj.get("args") or {}),
-                },
-            }
-        elif kind in ("tool_result", "tool-result"):
-            return {
-                "event": EventName.TOOL_RESULT.value,
-                "data": {
-                    "call_id": str(obj.get("id") or obj.get("call_id") or ""),
-                    "name": str(obj.get("name") or obj.get("tool") or ""),
-                    "output": str(obj.get("output") or obj.get("result") or ""),
-                    "is_error": bool(obj.get("is_error") or obj.get("error")),
-                },
-            }
-        elif kind == "approval_required":
-            checkpoint = EngineCheckpoint(
-                engine=self.ENGINE_ID,
-                payload={"native_session": obj.get("session_id"), "call_id": obj.get("call_id")},
-            )
-            return {
-                "event": EventName.APPROVAL_REQUIRED.value,
-                "data": {
-                    "approval_id": str(obj.get("call_id") or ""),
-                    "tool": str(obj.get("tool") or obj.get("name") or ""),
-                    "arguments": json.dumps(obj.get("arguments") or {}),
-                    "reason": str(obj.get("reason") or "OpenCode requires approval"),
-                },
-                "_checkpoint": checkpoint,
-            }
-        elif kind == "run_completed":
-            return {
+        # opencode emits no explicit terminal event -- the stream ends when the
+        # process exits. Synthesize exactly one completion from accumulated
+        # text + summed step_finish usage so the run manager sees a terminal.
+        if not self._saw_terminal:
+            yield {
                 "event": EventName.RUN_COMPLETED.value,
                 "data": {
                     "run_id": request.run_id,
                     "session_id": request.session_id,
-                    "final_output": obj.get("final_output") or getattr(self, "_last_text", ""),
-                    "usage": obj.get("usage") or {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
-                    "turns": obj.get("turns", 0),
+                    "final_output": self._last_text,
+                    "usage": self._usage,
+                    "turns": 0,
                 },
             }
-        elif kind == "run_failed":
-            return self._failed(
-                request,
-                str(obj.get("code") or "engine_error"),
-                str(obj.get("message") or "OpenCode run failed"),
-            )
-        return None
+
+    def _translate_line(self, line: str, request: RunRequest) -> list[dict[str, Any]]:
+        """Map one OpenCode JSONL line to zero or more Claudio events.
+
+        The real ``opencode run --format json`` schema (captured from the CLI,
+        issue #57): top-level ``type`` in {step_start, text, reasoning,
+        tool_use, step_finish, error}; the payload lives under ``part`` with
+        hyphenated inner types. There is no explicit terminal event -- the
+        stream ends when the process exits (handled by _drive).
+        """
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(obj, dict):
+            return []
+        native = obj.get("sessionID")
+        if native:
+            self._save_native_session(request.session_id, str(native))
+        kind = obj.get("type")
+        part = obj.get("part") or {}
+        if kind == "text":
+            text = str(part.get("text") or "")
+            if text:
+                self._last_text = getattr(self, "_last_text", "") + text
+                return [{"event": EventName.TOKEN.value, "data": {"text": text}}]
+            return []
+        if kind == "reasoning":
+            text = str(part.get("text") or "")
+            if text:
+                return [{"event": EventName.REASONING.value, "data": {"text": text}}]
+            return []
+        if kind == "tool_use":
+            return self._translate_tool(part)
+        if kind == "step_finish":
+            tokens = part.get("tokens") or {}
+            usage = getattr(self, "_usage", None)
+            if isinstance(usage, dict):
+                usage["input_tokens"] += int(tokens.get("input") or 0)
+                usage["output_tokens"] += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+                usage["cost_usd"] += float(part.get("cost") or 0.0)
+            return []
+        if kind == "error":
+            err = obj.get("error") or {}
+            data = err.get("data") or {}
+            msg = str(data.get("message") or err.get("name") or "OpenCode run failed")
+            low = msg.lower()
+            if "session" in low and ("not found" in low or "no such" in low or "invalid" in low):
+                return [self._failed(request, "engine_resume_stale", msg)]
+            return [self._failed(request, "engine_config_error", msg)]
+        return []
+
+    def _translate_tool(self, part: dict[str, Any]) -> list[dict[str, Any]]:
+        """One tool_use line yields a TOOL_CALL and, when completed, a TOOL_RESULT."""
+        raw = str(part.get("tool") or "")
+        name = _OC_TOOL_NAMES.get(raw, raw)
+        state = part.get("state") or {}
+        call_id = str(part.get("callID") or part.get("id") or "")
+        args = state.get("input") or {}
+        if raw == "todowrite":
+            args = {
+                "items": [
+                    {
+                        "content": str(t.get("content") or ""),
+                        "status": _OC_TODO_STATUS.get(str(t.get("status")), "pending"),
+                    }
+                    for t in (args.get("todos") or [])
+                    if isinstance(t, dict)
+                ]
+            }
+        out: list[dict[str, Any]] = [{
+            "event": EventName.TOOL_CALL.value,
+            "data": {
+                "call_id": call_id,
+                "name": name,
+                "arguments": json.dumps(args),
+            },
+        }]
+        status = str(state.get("status") or "")
+        if status in ("completed", "error"):
+            output = state.get("output")
+            if not isinstance(output, str):
+                output = json.dumps(output) if output is not None else ""
+            out.append({
+                "event": EventName.TOOL_RESULT.value,
+                "data": {
+                    "call_id": call_id,
+                    "name": name,
+                    "output": output,
+                    "is_error": status == "error",
+                },
+            })
+        return out
 
     def _failed(self, request: RunRequest, code: str, message: str) -> dict[str, Any]:
         return {

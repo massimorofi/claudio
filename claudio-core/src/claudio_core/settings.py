@@ -493,6 +493,12 @@ class OpenCodeEngineConfig(BaseModel):
     config_dir: str | None = None       # default: private path under backend data
     server_mode: str = "standalone"     # standalone | server
     binary: str = "opencode"            # pinned CLI name/path in the image
+    # Provider id the generated opencode.json registers for the Claudio
+    # gateway; model references become "<provider>/<llm.model>".
+    provider_name: str = "claudio"
+    # opencode defaults max_tokens to 32000, which strict gateways reject;
+    # keep the declared model output limit under the server cap.
+    output_token_limit: int = 16000
 
 
 class ClaudeCodeEngineConfig(BaseModel):
