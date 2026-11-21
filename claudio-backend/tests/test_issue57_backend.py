@@ -293,6 +293,40 @@ def test_claude_code_cli_failure_surfaces_as_run_failed(tmp_path):
     assert "requires --verbose" in failed["data"]["error"]["message"]
 
 
+def test_claude_code_passes_configured_model(tmp_path):
+    # Regression: without --model/ANTHROPIC_MODEL the CLI uses its built-in
+    # default (claude-opus-5-5), which a custom gateway does not serve, and
+    # every run fails with "issue with the selected model".
+    cli = _write_fake_cli(tmp_path, "claude.py", "print('1.0')")
+    cfg = AppConfig.model_validate({
+        "llm": {"base_url": "https://api.anthropic.com/v1", "model": "my-local-model"},
+        "engine": {"kind": "claude_code", "claude_code": {"binary": cli}},
+    })
+    eng = ClaudeCodeEngine(EngineContext(config=cfg, db=None))
+    argv = eng._argv(_request(tmp_path))
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == "my-local-model"
+    env = eng._env()
+    assert env["ANTHROPIC_MODEL"] == "my-local-model"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "my-local-model"
+
+
+def test_claude_code_result_is_error_fails_run(tmp_path):
+    # The CLI exits 0 even on a failed run (unknown model, auth problem);
+    # the failure lives in the result line's is_error flag.
+    body = (
+        "import sys;sys.stdin.read()\nimport json\n"
+        "print(json.dumps({'type':'result','result':'There is an issue with the selected model','is_error':True,'usage':{}}))\n"
+    )
+    eng = _claude_engine(tmp_path, body)
+    events = _collect(eng, _request(tmp_path))
+    kinds = [e["event"] for e in events]
+    assert EventName.RUN_FAILED.value in kinds
+    assert EventName.RUN_COMPLETED.value not in kinds
+    failed = [e for e in events if e["event"] == EventName.RUN_FAILED.value][0]
+    assert "selected model" in failed["data"]["error"]["message"]
+
+
 def test_claude_code_streams_events(tmp_path):
     body = (
         "import sys;sys.stdin.read()\nimport json\n"

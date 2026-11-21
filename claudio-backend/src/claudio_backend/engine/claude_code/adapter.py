@@ -165,12 +165,20 @@ class ClaudeCodeEngine:
 
     def _env(self) -> dict[str, str]:
         llm = self.config.llm
+        extra = {
+            "ANTHROPIC_BASE_URL": llm.base_url or "",
+            "ANTHROPIC_API_KEY": llm.api_key or "",
+        }
+        model = (llm.model or "").strip()
+        if model:
+            # Pin the model for the main loop AND for the CLI's background
+            # helper calls (topic detection, summaries), which otherwise
+            # default to a Haiku id a custom gateway may not serve.
+            extra["ANTHROPIC_MODEL"] = model
+            extra["ANTHROPIC_SMALL_FAST_MODEL"] = model
         return proc.build_env(
             base={"HOME": str(self._config_dir()), "CLAUDE_CONFIG_DIR": str(self._config_dir())},
-            extra={
-                "ANTHROPIC_BASE_URL": llm.base_url or "",
-                "ANTHROPIC_API_KEY": llm.api_key or "",
-            },
+            extra=extra,
         )
 
     def _argv(self, request: RunRequest) -> list[str]:
@@ -179,12 +187,18 @@ class ClaudeCodeEngine:
         # "--output-format=stream-json requires --verbose" when printing, so
         # --verbose is mandatory here (without it the run exits 1 with an empty
         # stdout and the chat shows "no output").
-        return [
+        argv = [
             self._binary, "-p",
             "--output-format", "stream-json",
             "--verbose",
-            "--permission-mode", self._cc.permission_mode,
         ]
+        model = (self.config.llm.model or "").strip()
+        if model:
+            # Without --model the CLI uses its built-in default (e.g.
+            # claude-opus-5-5), which a custom gateway does not serve.
+            argv += ["--model", model]
+        argv += ["--permission-mode", self._cc.permission_mode]
+        return argv
 
     async def stream(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
         async for evt in self._drive(request):
@@ -275,12 +289,20 @@ class ClaudeCodeEngine:
             }
         elif kind == "result":
             usage = obj.get("usage") or {}
+            text = obj.get("result") or getattr(self, "_last_text", "")
+            if obj.get("is_error"):
+                # The CLI exits 0 even when the run failed (unknown model,
+                # auth problem, ...): the failure lives in this line.
+                return self._failed(
+                    request, "engine_error",
+                    str(text or "Claude Code reported an error"),
+                )
             return {
                 "event": EventName.RUN_COMPLETED.value,
                 "data": {
                     "run_id": request.run_id,
                     "session_id": request.session_id,
-                    "final_output": obj.get("result") or getattr(self, "_last_text", ""),
+                    "final_output": text,
                     "usage": {
                         "input_tokens": int(usage.get("input_tokens") or 0),
                         "output_tokens": int(usage.get("output_tokens") or 0),
