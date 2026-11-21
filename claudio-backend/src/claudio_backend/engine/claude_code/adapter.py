@@ -58,6 +58,7 @@ from claudio_core.engine import (
     RunRequest,
 )
 from claudio_core.events import EventName
+from claudio_core.settings import resolve_engine_kind
 
 from ...paths import workspace_state_dir
 from ..base import EngineContext
@@ -177,7 +178,11 @@ class ClaudeCodeEngine:
             self._resolved_version = "unknown"
 
     def reload_config(self, config: Any) -> None:
-        if getattr(config.engine, "kind", "adk") != self.ENGINE_ID:
+        # Compare the EFFECTIVE engine (CLAUDIO_ENGINE env wins over
+        # engine.kind, exactly like the factory). Checking the raw config
+        # field made every hot config update fail for env-selected engines --
+        # the operator's change silently never reached the adapter (issue #57).
+        if resolve_engine_kind(config) != self.ENGINE_ID:
             raise EngineError(
                 "engine_reload_requires_restart",
                 "changing engine.kind requires a backend restart/rebuild",

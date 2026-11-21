@@ -33,6 +33,7 @@ from claudio_core.engine import (
     RunRequest,
 )
 from claudio_core.events import EventName
+from claudio_core.settings import resolve_engine_kind
 
 from ...paths import workspace_state_dir
 from ..base import EngineContext
@@ -105,7 +106,9 @@ class OpenCodeEngine:
             self._resolved_version = "unknown"
 
     def reload_config(self, config: Any) -> None:
-        if getattr(config.engine, "kind", "adk") != self.ENGINE_ID:
+        # Effective engine (env-aware), not the raw config field -- see the
+        # Claude Code adapter for why (issue #57).
+        if resolve_engine_kind(config) != self.ENGINE_ID:
             raise EngineError(
                 "engine_reload_requires_restart",
                 "changing engine.kind requires a backend restart/rebuild",

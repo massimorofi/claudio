@@ -409,6 +409,25 @@ def test_claude_code_stale_resume_retries_fresh(tmp_path):
     assert eng._load_cli_session(sid) == "cli-new"
 
 
+def test_reload_config_accepts_env_selected_engine(tmp_path, monkeypatch):
+    # Regression: engine chosen via CLAUDIO_ENGINE leaves engine.kind="adk"
+    # in the config; reload_config compared the raw field and rejected every
+    # hot config update, so config changes (e.g. permission_mode) never
+    # reached the adapter (issue #57).
+    monkeypatch.setenv("CLAUDIO_ENGINE", "claude_code")
+    cli = _write_fake_cli(tmp_path, "claude.py", "print('1.0')")
+    cfg = AppConfig.model_validate({
+        "engine": {"kind": "adk", "claude_code": {"binary": cli, "permission_mode": "acceptEdits"}},
+    })
+    eng = ClaudeCodeEngine(EngineContext(config=cfg, db=None))
+    eng.reload_config(cfg)  # must NOT raise
+    assert eng._argv(_request(tmp_path)).count("--permission-mode") == 1
+    # A genuine engine switch still requires a restart.
+    monkeypatch.delenv("CLAUDIO_ENGINE")
+    with pytest.raises(EngineError):
+        eng.reload_config(cfg)
+
+
 def test_claude_code_translates_nested_blocks(tmp_path):
     # Real stream-json nests thinking/tool_use inside assistant messages and
     # tool_result inside user messages; the UI's tool cards, reasoning blocks
