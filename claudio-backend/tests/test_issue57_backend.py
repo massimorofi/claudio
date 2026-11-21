@@ -355,6 +355,60 @@ def test_claude_code_result_is_error_fails_run(tmp_path):
     assert failed["data"]["error"]["code"] == "engine_config_error"
 
 
+def _request_for(tmp_path, session_id):
+    return RunRequest(
+        run_id="r1", session_id=session_id, workspace=tmp_path, instructions="",
+        user_input="hi", model=ModelSpec(model="m"), tools=ToolPolicy(),
+    )
+
+
+def test_claude_code_resume_continuity(tmp_path):
+    # The CLI keeps its own transcript; the adapter must pass --resume with the
+    # session id the CLI reported, so turn 2 sees turn 1.
+    sid = f"resume-{os.getpid()}-{id(tmp_path)}"
+    body = (
+        "import sys,json\nsys.stdin.read()\n"
+        "argv=' '.join(sys.argv[1:])\n"
+        "print(json.dumps({'type':'result','result':'argv:'+argv,'session_id':'cli-777','usage':{}}))\n"
+    )
+    eng = _claude_engine(tmp_path, body)
+    req = _request_for(tmp_path, sid)
+
+    events = _collect(eng, req)
+    done = [e for e in events if e["event"] == EventName.RUN_COMPLETED.value][0]
+    assert "--resume" not in done["data"]["final_output"]  # first turn: fresh
+    assert eng._load_cli_session(sid) == "cli-777"
+
+    events = _collect(eng, req)
+    done = [e for e in events if e["event"] == EventName.RUN_COMPLETED.value][0]
+    assert "--resume cli-777" in done["data"]["final_output"]  # second turn: resumed
+
+
+def test_claude_code_stale_resume_retries_fresh(tmp_path):
+    # After an image rebuild the CLI's stored sessions are gone; --resume then
+    # fails with "No conversation found". The adapter must transparently retry
+    # without --resume instead of surfacing the failure.
+    sid = f"stale-{os.getpid()}-{id(tmp_path)}"
+    body = (
+        "import sys,json\n"
+        "argv=' '.join(sys.argv[1:])\n"
+        "sys.stdin.read()\n"
+        "if '--resume' in sys.argv:\n"
+        "    print(json.dumps({'type':'result','result':'No conversation found with session ID: cli-stale','is_error':True,'usage':{}}))\n"
+        "else:\n"
+        "    print(json.dumps({'type':'result','result':'fresh ok','session_id':'cli-new','usage':{}}))\n"
+    )
+    eng = _claude_engine(tmp_path, body)
+    eng._save_cli_session(sid, "cli-stale")
+    events = _collect(eng, _request_for(tmp_path, sid))
+    kinds = [e["event"] for e in events]
+    assert EventName.RUN_COMPLETED.value in kinds
+    assert EventName.RUN_FAILED.value not in kinds
+    done = [e for e in events if e["event"] == EventName.RUN_COMPLETED.value][0]
+    assert done["data"]["final_output"] == "fresh ok"
+    assert eng._load_cli_session(sid) == "cli-new"
+
+
 def test_claude_code_streams_events(tmp_path):
     body = (
         "import sys;sys.stdin.read()\nimport json\n"

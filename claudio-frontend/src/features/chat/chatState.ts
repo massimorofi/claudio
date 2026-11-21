@@ -150,7 +150,25 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, streaming: true, runId: action.runId, error: null }
 
     case 'STOPPED':
-      return { ...state, streaming: false, reconnecting: false }
+      // The stream is closed locally on stop, so the backend's cancelled
+      // terminal event never arrives; record the interrupted bookend here so
+      // the turn doesn't silently vanish from the transcript.
+      return {
+        ...state,
+        streaming: false,
+        reconnecting: false,
+        items: [
+          ...state.items,
+          {
+            kind: 'turn_status',
+            id: uid('ts'),
+            status: 'interrupted',
+            filesWritten: [],
+            commandsRun: 0,
+            durationSeconds: 0,
+          },
+        ],
+      }
 
     case 'CONNECTION_LOST':
       // Non-terminal: keep streaming/runId/items intact, just flag the drop.

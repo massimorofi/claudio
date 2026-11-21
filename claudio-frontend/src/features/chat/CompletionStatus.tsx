@@ -81,6 +81,9 @@ export default function CompletionStatus({
   if (commandsRun > 0) {
     parts.push(`${commandsRun} command${commandsRun === 1 ? '' : 's'} run`)
   }
+  // "no output" used to print even when the agent had answered in prose, which
+  // read as "the reply is empty". Only say it when there is genuinely nothing:
+  // no files, no commands AND no reply text.
   const producedNode: ReactNode =
     parts.length > 0 ? (
       parts.map((p, i) => (
@@ -89,6 +92,8 @@ export default function CompletionStatus({
           {p}
         </span>
       ))
+    ) : replyText && replyText.trim() ? (
+      'replied'
     ) : (
       'no output'
     )

@@ -195,6 +195,33 @@ class ClaudeCodeEngine:
             extra=extra,
         )
 
+    def _cli_session_path(self, session_id: str) -> Path:
+        base = workspace_state_dir("__engine__") / "claude-code-sessions"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{session_id}.json"
+
+    def _load_cli_session(self, session_id: str) -> str:
+        try:
+            return str(json.loads(self._cli_session_path(session_id).read_text())["cli_session_id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return ""
+
+    def _save_cli_session(self, session_id: str, cli_session_id: str) -> None:
+        if not cli_session_id:
+            return
+        try:
+            self._cli_session_path(session_id).write_text(
+                json.dumps({"cli_session_id": cli_session_id})
+            )
+        except OSError:
+            pass
+
+    def _clear_cli_session(self, session_id: str) -> None:
+        try:
+            self._cli_session_path(session_id).unlink()
+        except OSError:
+            pass
+
     def _argv(self, request: RunRequest) -> list[str]:
         # Non-interactive, structured streaming output. No permission-bypass
         # flag. NOTE: the CLI refuses to start with
@@ -212,10 +239,17 @@ class ClaudeCodeEngine:
             # claude-opus-5-5), which a custom gateway does not serve.
             argv += ["--model", model]
         argv += ["--permission-mode", self._cc.permission_mode]
+        # Conversation continuity: the CLI keeps its own transcript per session
+        # under CLAUDE_CONFIG_DIR; --resume replays it so turn 2 sees turn 1.
+        # A stale id (config dir wiped by a rebuild) is handled by the
+        # fresh-run fallback in _stream_with_resume_fallback.
+        cli_session = self._load_cli_session(request.session_id)
+        if cli_session:
+            argv += ["--resume", cli_session]
         return argv
 
     async def stream(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
-        async for evt in self._drive(request):
+        async for evt in self._stream_with_resume_fallback(request):
             yield evt
 
     async def resume(self, request: RunRequest, state: Any) -> AsyncIterator[dict[str, Any]]:
@@ -226,7 +260,26 @@ class ClaudeCodeEngine:
         else:
             checkpoint = EngineCheckpoint(engine=self.ENGINE_ID, payload=state or {})
         checkpoint.validate_for(self.ENGINE_ID)
+        async for evt in self._stream_with_resume_fallback(request):
+            yield evt
+
+    async def _stream_with_resume_fallback(
+        self, request: RunRequest
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run once; if the stored CLI session is stale, retry fresh.
+
+        ``--resume`` fails with "No conversation found" when the CLI config
+        dir was wiped (image rebuild). Retrying without --resume inside the
+        adapter keeps the user's original message intact -- the run manager's
+        generic replan would resend a replan prompt instead.
+        """
         async for evt in self._drive(request):
+            code = ((evt.get("data") or {}).get("error") or {}).get("code")
+            if evt.get("event") == EventName.RUN_FAILED.value and code == "engine_resume_stale":
+                self._clear_cli_session(request.session_id)
+                async for evt2 in self._drive(request):
+                    yield evt2
+                return
             yield evt
 
     async def _drive(self, request: RunRequest) -> AsyncIterator[dict[str, Any]]:
@@ -275,6 +328,11 @@ class ClaudeCodeEngine:
         if not isinstance(obj, dict):
             return None
         kind = obj.get("type")
+        if kind in ("system", "result"):
+            # Remember the CLI's own session id so the next turn can --resume.
+            sid = obj.get("session_id")
+            if sid:
+                self._save_cli_session(request.session_id, str(sid))
         if kind == "assistant":
             # Claude Code stream-json wraps message content; extract text deltas.
             msg = obj.get("message") or {}
@@ -309,6 +367,13 @@ class ClaudeCodeEngine:
             usage = obj.get("usage") or {}
             text = obj.get("result") or getattr(self, "_last_text", "")
             if obj.get("is_error"):
+                low = str(text).lower()
+                if "no conversation found" in low or "resume" in low and "session" in low:
+                    # Stale --resume target (config dir wiped): let the
+                    # adapter's fresh-run fallback handle it.
+                    return self._failed(
+                        request, "engine_resume_stale", str(text),
+                    )
                 # The CLI exits 0 even when the run failed (unknown model,
                 # auth problem, bad endpoint path ...): the failure lives in
                 # this line. Terminal: replanning cannot fix a rejected
