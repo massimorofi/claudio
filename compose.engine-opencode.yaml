@@ -15,7 +15,7 @@ services:
       args:
         ENGINE: opencode
         # Pin the OpenCode CLI version here (do not use `latest`).
-        OPENCODE_VERSION: ${OPENCODE_VERSION:-0.0.0-pin-me}
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.19.6}
     environment:
       # Must match the ENGINE the image was built with; a mismatch fails startup.
       # CLAUDIO_ENGINE is the authoritative runtime selector (issue #57).
