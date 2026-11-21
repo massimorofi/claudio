@@ -185,7 +185,10 @@ class OpenCodeEngine:
                                       EventName.APPROVAL_REQUIRED.value):
                     return
         except proc.ProcessError as exc:
-            yield self._failed(request, "engine_error", str(exc))
+            # Launch/exit failures are config problems: replanning would fail
+            # identically forever. Only a timeout stays retryable.
+            code = "engine_error" if "timeout" in str(exc).lower() else "engine_config_error"
+            yield self._failed(request, code, str(exc))
             return
         # Stream ended without a terminal event: synthesize completion from the
         # accumulated text so the run manager sees exactly one terminal event.

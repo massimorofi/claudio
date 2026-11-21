@@ -163,10 +163,24 @@ class ClaudeCodeEngine:
     async def close(self) -> None:
         return None
 
+    def _anthropic_base_url(self) -> str:
+        """Translate Claudio's OpenAI-convention base_url to the CLI's form.
+
+        ``llm.base_url`` ends with ``/v1`` because that is what the OpenAI
+        protocol (adk/opencode engines) needs. Claude Code appends
+        ``/v1/messages`` itself, so it must receive the server ROOT: passing
+        the ``/v1`` form makes it request ``/v1/v1/messages`` and fail with a
+        misleading "issue with the selected model" error (issue #57).
+        """
+        base = (self.config.llm.base_url or "").strip().rstrip("/")
+        if base.lower().endswith("/v1"):
+            base = base[:-3]
+        return (base + "/") if base else ""
+
     def _env(self) -> dict[str, str]:
         llm = self.config.llm
         extra = {
-            "ANTHROPIC_BASE_URL": llm.base_url or "",
+            "ANTHROPIC_BASE_URL": self._anthropic_base_url(),
             "ANTHROPIC_API_KEY": llm.api_key or "",
         }
         model = (llm.model or "").strip()
@@ -236,7 +250,11 @@ class ClaudeCodeEngine:
                                       EventName.APPROVAL_REQUIRED.value):
                     return
         except proc.ProcessError as exc:
-            yield self._failed(request, "engine_error", str(exc))
+            # A launch/exit failure (bad argv, missing binary) is a config
+            # problem: replanning would fail identically forever. Only a
+            # timeout stays retryable.
+            code = "engine_error" if "timeout" in str(exc).lower() else "engine_config_error"
+            yield self._failed(request, code, str(exc))
             return
         yield {
             "event": EventName.RUN_COMPLETED.value,
@@ -292,9 +310,11 @@ class ClaudeCodeEngine:
             text = obj.get("result") or getattr(self, "_last_text", "")
             if obj.get("is_error"):
                 # The CLI exits 0 even when the run failed (unknown model,
-                # auth problem, ...): the failure lives in this line.
+                # auth problem, bad endpoint path ...): the failure lives in
+                # this line. Terminal: replanning cannot fix a rejected
+                # model/endpoint.
                 return self._failed(
-                    request, "engine_error",
+                    request, "engine_config_error",
                     str(text or "Claude Code reported an error"),
                 )
             return {

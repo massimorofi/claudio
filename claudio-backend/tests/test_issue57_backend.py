@@ -291,6 +291,7 @@ def test_claude_code_cli_failure_surfaces_as_run_failed(tmp_path):
     assert EventName.RUN_COMPLETED.value not in kinds
     failed = [e for e in events if e["event"] == EventName.RUN_FAILED.value][0]
     assert "requires --verbose" in failed["data"]["error"]["message"]
+    assert failed["data"]["error"]["code"] == "engine_config_error"
 
 
 def test_claude_code_passes_configured_model(tmp_path):
@@ -311,6 +312,32 @@ def test_claude_code_passes_configured_model(tmp_path):
     assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "my-local-model"
 
 
+def test_claude_code_base_url_normalized_for_cli(tmp_path):
+    # Regression: llm.base_url follows the OpenAI convention (ends /v1), but
+    # Claude Code appends /v1/messages itself -- passing the /v1 form makes it
+    # hit /v1/v1/messages and fail with a misleading "selected model" error.
+    cli = _write_fake_cli(tmp_path, "claude.py", "print('1.0')")
+    for raw, want in (
+        ("http://192.168.1.172:8731/v1", "http://192.168.1.172:8731/"),
+        ("http://192.168.1.172:8731/v1/", "http://192.168.1.172:8731/"),
+        ("http://192.168.1.172:8731/", "http://192.168.1.172:8731/"),
+        ("https://api.anthropic.com/v1", "https://api.anthropic.com/"),
+        ("", ""),
+    ):
+        cfg = AppConfig.model_validate({
+            "llm": {"base_url": raw},
+            "engine": {"kind": "claude_code", "claude_code": {"binary": cli}},
+        })
+        eng = ClaudeCodeEngine(EngineContext(config=cfg, db=None))
+        assert eng._env()["ANTHROPIC_BASE_URL"] == want, raw
+
+
+def test_engine_config_error_is_terminal():
+    # A rejected model/endpoint must finalize the run, not replan forever.
+    from claudio_backend.runs.manager import _TERMINAL_FAILURE_CODES
+    assert "engine_config_error" in _TERMINAL_FAILURE_CODES
+
+
 def test_claude_code_result_is_error_fails_run(tmp_path):
     # The CLI exits 0 even on a failed run (unknown model, auth problem);
     # the failure lives in the result line's is_error flag.
@@ -325,6 +352,7 @@ def test_claude_code_result_is_error_fails_run(tmp_path):
     assert EventName.RUN_COMPLETED.value not in kinds
     failed = [e for e in events if e["event"] == EventName.RUN_FAILED.value][0]
     assert "selected model" in failed["data"]["error"]["message"]
+    assert failed["data"]["error"]["code"] == "engine_config_error"
 
 
 def test_claude_code_streams_events(tmp_path):

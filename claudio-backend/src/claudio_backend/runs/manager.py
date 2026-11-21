@@ -150,6 +150,9 @@ _TERMINAL_FAILURE_CODES = frozenset(
         "llm_auth_error",
         "input_rejected",
         "bad_resume_state",
+        # CLI-engine launch/exit failures and provider-rejected model or
+        # endpoint: identical on every retry, so replanning would loop forever.
+        "engine_config_error",
     }
 )
 
