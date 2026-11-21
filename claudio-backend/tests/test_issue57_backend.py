@@ -409,6 +409,64 @@ def test_claude_code_stale_resume_retries_fresh(tmp_path):
     assert eng._load_cli_session(sid) == "cli-new"
 
 
+def test_claude_code_translates_nested_blocks(tmp_path):
+    # Real stream-json nests thinking/tool_use inside assistant messages and
+    # tool_result inside user messages; the UI's tool cards, reasoning blocks
+    # and PLAN panel all depend on these being unwrapped (issue #57).
+    body = (
+        "import sys;sys.stdin.read()\nimport json\n"
+        "print(json.dumps({'type':'assistant','message':{'content':["
+        "  {'type':'thinking','thinking':'let me plan'},"
+        "  {'type':'tool_use','id':'t1','name':'TodoWrite','input':{'todos':["
+        "     {'content':'read docs','status':'completed'},"
+        "     {'content':'write plan','status':'in_progress'},"
+        "     {'content':'verify','status':'pending'}]}},"
+        "  {'type':'text','text':'working'}]}}))\n"
+        "print(json.dumps({'type':'user','message':{'content':["
+        "  {'type':'tool_result','tool_use_id':'t1','content':[{'type':'text','text':'todos saved'}],'is_error':False}]}}))\n"
+        "print(json.dumps({'type':'result','result':'done','usage':{},'num_turns':1}))\n"
+    )
+    eng = _claude_engine(tmp_path, body)
+    events = _collect(eng, _request(tmp_path))
+    by_name = {}
+    for e in events:
+        by_name.setdefault(e["event"], []).append(e["data"])
+    reasoning = by_name.get(EventName.REASONING.value, [])
+    assert reasoning and reasoning[0]["text"] == "let me plan"
+    calls = by_name.get(EventName.TOOL_CALL.value, [])
+    assert calls and calls[0]["name"] == "todo_write"
+    plan = json.loads(calls[0]["arguments"])
+    assert [i["status"] for i in plan["items"]] == ["done", "in_progress", "pending"]
+    assert plan["items"][0]["content"] == "read docs"
+    results = by_name.get(EventName.TOOL_RESULT.value, [])
+    assert results and results[0]["call_id"] == "t1"
+    assert results[0]["output"] == "todos saved"
+    assert by_name.get(EventName.TOKEN.value, [{}])[0]["text"] == "working"
+
+
+def test_claude_code_permission_denials_logged(tmp_path, caplog):
+    body = (
+        "import sys;sys.stdin.read()\nimport json\n"
+        "print(json.dumps({'type':'result','result':'ok','usage':{},"
+        "'permission_denials':[{'tool':'Write'}]}))\n"
+    )
+    eng = _claude_engine(tmp_path, body)
+    with caplog.at_level("WARNING", logger="claudio.engine.claude_code"):
+        events = _collect(eng, _request(tmp_path))
+    assert any(e["event"] == EventName.RUN_COMPLETED.value for e in events)
+    assert any("permission(s) denied" in r.getMessage() for r in caplog.records)
+
+
+def test_finalize_failed_keeps_exception_detail():
+    # The bare "internal_error" message that made the live failure undiagnosable
+    # must now carry the exception text (issue #57).
+    from claudio_backend.runs import manager as mgr
+    exc = RuntimeError("boom: CLI died mid-stream")
+    code, _ = mgr._classify_error(exc)
+    assert code == "internal_error"
+    assert "boom" in str(exc)  # detail the manager now logs + surfaces
+
+
 def test_claude_code_streams_events(tmp_path):
     body = (
         "import sys;sys.stdin.read()\nimport json\n"

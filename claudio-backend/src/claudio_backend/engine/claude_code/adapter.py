@@ -21,9 +21,34 @@ known stream-json, with no network or credentials.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any, AsyncIterator
+
+logger = logging.getLogger("claudio.engine.claude_code")
+
+# CLI todo status -> Claudio PlanItem status (frontend: pending|in_progress|done).
+_TODO_STATUS = {"completed": "done", "in_progress": "in_progress"}
+
+
+def _plan_item(todo: dict[str, Any]) -> dict[str, str]:
+    return {
+        "content": str(todo.get("content") or todo.get("activeForm") or ""),
+        "status": _TODO_STATUS.get(str(todo.get("status")), "pending"),
+    }
+
+
+def _flatten_tool_content(content: Any) -> str:
+    """tool_result content is a string or a list of {type:text} blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(c.get("text", "")) for c in content
+            if isinstance(c, dict) and c.get("type") == "text"
+        )
+    return str(content or "")
 
 from claudio_core.engine import (
     EngineCapabilities,
@@ -295,13 +320,12 @@ class ClaudeCodeEngine:
                 if request.run_id in self._cancelled:
                     yield self._failed(request, "cancelled", "Run cancelled by user")
                     return
-                event = self._translate_line(line, request)
-                if event is None:
-                    continue
-                yield event
-                if event["event"] in (EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value,
-                                      EventName.APPROVAL_REQUIRED.value):
-                    return
+                for event in self._translate_line(line, request):
+                    yield event
+                    if event["event"] in (EventName.RUN_COMPLETED.value,
+                                          EventName.RUN_FAILED.value,
+                                          EventName.APPROVAL_REQUIRED.value):
+                        return
         except proc.ProcessError as exc:
             # A launch/exit failure (bad argv, missing binary) is a config
             # problem: replanning would fail identically forever. Only a
@@ -320,13 +344,21 @@ class ClaudeCodeEngine:
             },
         }
 
-    def _translate_line(self, line: str, request: RunRequest) -> dict[str, Any] | None:
+    def _translate_line(self, line: str, request: RunRequest) -> list[dict[str, Any]]:
+        """Translate one stream-json line into zero or more Claudio events.
+
+        The CLI nests everything (text, thinking, tool_use) as content blocks
+        inside "assistant" messages and returns tool results inside "user"
+        messages -- a top-level ``tool_use`` line never occurs in practice, so
+        the blocks must be unwrapped here or the UI shows no tool cards, no
+        reasoning, and no plan.
+        """
         try:
             obj = json.loads(line)
         except (ValueError, TypeError):
-            return None
+            return []
         if not isinstance(obj, dict):
-            return None
+            return []
         kind = obj.get("type")
         if kind in ("system", "result"):
             # Remember the CLI's own session id so the next turn can --resume.
@@ -334,55 +366,66 @@ class ClaudeCodeEngine:
             if sid:
                 self._save_cli_session(request.session_id, str(sid))
         if kind == "assistant":
-            # Claude Code stream-json wraps message content; extract text deltas.
-            msg = obj.get("message") or {}
-            parts = msg.get("content") or []
-            text = "".join(
-                p.get("text", "") for p in parts
-                if isinstance(p, dict) and p.get("type") == "text"
+            return self._translate_blocks(
+                (obj.get("message") or {}).get("content") or []
             )
-            if text:
-                self._last_text = getattr(self, "_last_text", "") + text
-                return {"event": EventName.TOKEN.value, "data": {"text": text}}
-        elif kind == "tool_use":
-            return {
+        if kind == "user":
+            out = []
+            for block in (obj.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    out.append({
+                        "event": EventName.TOOL_RESULT.value,
+                        "data": {
+                            "call_id": str(block.get("tool_use_id") or ""),
+                            "name": str(block.get("name") or ""),
+                            "output": _flatten_tool_content(block.get("content")),
+                            "is_error": bool(block.get("is_error")),
+                        },
+                    })
+            return out
+        if kind == "tool_use":  # legacy top-level form
+            return [{
                 "event": EventName.TOOL_CALL.value,
                 "data": {
                     "call_id": str(obj.get("id") or ""),
                     "name": str(obj.get("name") or ""),
                     "arguments": json.dumps(obj.get("input") or {}),
                 },
-            }
-        elif kind == "tool_result":
-            return {
+            }]
+        if kind == "tool_result":  # legacy top-level form
+            return [{
                 "event": EventName.TOOL_RESULT.value,
                 "data": {
                     "call_id": str(obj.get("tool_use_id") or obj.get("id") or ""),
                     "name": str(obj.get("name") or ""),
-                    "output": str(obj.get("content") or obj.get("output") or ""),
+                    "output": _flatten_tool_content(obj.get("content")),
                     "is_error": bool(obj.get("is_error")),
                 },
-            }
-        elif kind == "result":
+            }]
+        if kind == "result":
             usage = obj.get("usage") or {}
             text = obj.get("result") or getattr(self, "_last_text", "")
+            denials = obj.get("permission_denials") or []
+            if denials:
+                logger.warning(
+                    "run %s: %d tool permission(s) denied by the CLI",
+                    request.run_id, len(denials),
+                )
             if obj.get("is_error"):
                 low = str(text).lower()
-                if "no conversation found" in low or "resume" in low and "session" in low:
+                if "no conversation found" in low or ("resume" in low and "session" in low):
                     # Stale --resume target (config dir wiped): let the
                     # adapter's fresh-run fallback handle it.
-                    return self._failed(
-                        request, "engine_resume_stale", str(text),
-                    )
+                    return [self._failed(request, "engine_resume_stale", str(text))]
                 # The CLI exits 0 even when the run failed (unknown model,
                 # auth problem, bad endpoint path ...): the failure lives in
                 # this line. Terminal: replanning cannot fix a rejected
                 # model/endpoint.
-                return self._failed(
+                return [self._failed(
                     request, "engine_config_error",
                     str(text or "Claude Code reported an error"),
-                )
-            return {
+                )]
+            return [{
                 "event": EventName.RUN_COMPLETED.value,
                 "data": {
                     "run_id": request.run_id,
@@ -395,8 +438,50 @@ class ClaudeCodeEngine:
                     },
                     "turns": obj.get("num_turns", 0),
                 },
-            }
-        return None
+            }]
+        return []
+
+    def _translate_blocks(self, parts: list[Any]) -> list[dict[str, Any]]:
+        """Unwrap assistant content blocks into Claudio events, in order."""
+        out: list[dict[str, Any]] = []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            btype = p.get("type")
+            if btype == "text" and p.get("text"):
+                text = str(p["text"])
+                self._last_text = getattr(self, "_last_text", "") + text
+                out.append({"event": EventName.TOKEN.value, "data": {"text": text}})
+            elif btype == "thinking" and p.get("thinking"):
+                # Persisted by the run manager into the session transcript, so
+                # reasoning survives a view remount (tab switch).
+                out.append({
+                    "event": EventName.REASONING.value,
+                    "data": {"text": str(p["thinking"])},
+                })
+            elif btype == "tool_use":
+                name = str(p.get("name") or "")
+                args = p.get("input") or {}
+                if name == "TodoWrite":
+                    # Map the CLI todo list onto Claudio's plan contract so the
+                    # PLAN panel renders it (frontend expects todo_write +
+                    # {"items": [{content, status}]}).
+                    name = "todo_write"
+                    args = {
+                        "items": [
+                            _plan_item(t) for t in (args.get("todos") or [])
+                            if isinstance(t, dict)
+                        ]
+                    }
+                out.append({
+                    "event": EventName.TOOL_CALL.value,
+                    "data": {
+                        "call_id": str(p.get("id") or ""),
+                        "name": name,
+                        "arguments": json.dumps(args),
+                    },
+                })
+        return out
 
     def _failed(self, request: RunRequest, code: str, message: str) -> dict[str, Any]:
         return {

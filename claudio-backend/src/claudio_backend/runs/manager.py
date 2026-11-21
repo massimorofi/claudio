@@ -2118,8 +2118,15 @@ class RunManager:
             return
         duration = max(0.0, time.time() - (record.started_at or time.time()))
         if isinstance(code, Exception):
+            # Without this the real exception vanished and the UI only ever
+            # showed a bare "internal_error" (issue #57 diagnosis).
+            logger.error(
+                "run %s failed with unexpected exception", record.run_id,
+                exc_info=code,
+            )
+            detail = str(code).strip()
             code, _retryable = _classify_error(code)
-            message = _sanitize_error_message(code)
+            message = _sanitize_error_message(detail or code)
         record.state = "failed"
         record.state_changed.set()
         record.error_code = code

@@ -500,7 +500,10 @@ class ClaudeCodeEngineConfig(BaseModel):
 
     model: str | None = None            # mapped to a supported Claude Code model id
     config_dir: str | None = None       # default: private path under backend data
-    permission_mode: str = "default"    # default | acceptEdits | plan
+    # acceptEdits is the unattended default: in headless `-p` mode there is no
+    # interactive operator to answer permission prompts, so "default" silently
+    # auto-denies every file modification (issue #57).
+    permission_mode: str = "acceptEdits"  # default | acceptEdits | plan
     binary: str = "claude"              # pinned CLI name/path in the image
     # Claude Code speaks the Anthropic Messages API. The adapter refuses to run
     # against an OpenAI-only endpoint unless this is explicitly enabled after the
