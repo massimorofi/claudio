@@ -31,6 +31,28 @@ logger = logging.getLogger("claudio.engine.claude_code")
 # CLI todo status -> Claudio PlanItem status (frontend: pending|in_progress|done).
 _TODO_STATUS = {"completed": "done", "in_progress": "in_progress"}
 
+# CLI tool name -> Claudio's canonical tool-contract name, so the run manager's
+# produced-artifact accounting (files_written, commands_run, deliverable
+# verdict) and the frontend's tool cards behave identically across engines
+# (issue #57).
+_CLI_TOOL_NAMES = {
+    "Write": "write_file",
+    "Edit": "edit_file",
+    "MultiEdit": "edit_file",
+    "NotebookEdit": "edit_file",
+    "Read": "read_file",
+    "Bash": "run_command",
+    "TodoWrite": "todo_write",
+}
+
+# Without this nudge local models answer multi-step tasks in prose and never
+# call TodoWrite, leaving the UI's PLAN panel empty (issue #57).
+_PLAN_SYSTEM_PROMPT = (
+    "For any multi-step task, maintain a task list with the TodoWrite tool: "
+    "write the list before starting, mark one item in_progress at a time, and "
+    "mark items completed as you finish them."
+)
+
 
 def _plan_item(todo: dict[str, Any]) -> dict[str, str]:
     return {
@@ -269,6 +291,7 @@ class ClaudeCodeEngine:
             # claude-opus-5-5), which a custom gateway does not serve.
             argv += ["--model", model]
         argv += ["--permission-mode", self._cc.permission_mode]
+        argv += ["--append-system-prompt", _PLAN_SYSTEM_PROMPT]
         # Conversation continuity: the CLI keeps its own transcript per session
         # under CLAUDE_CONFIG_DIR; --resume replays it so turn 2 sees turn 1.
         # A stale id (config dir wiped by a rebuild) is handled by the
@@ -465,9 +488,10 @@ class ClaudeCodeEngine:
                     "data": {"text": str(p["thinking"])},
                 })
             elif btype == "tool_use":
-                name = str(p.get("name") or "")
+                raw = str(p.get("name") or "")
+                name = _CLI_TOOL_NAMES.get(raw, raw)
                 args = p.get("input") or {}
-                if name == "TodoWrite":
+                if raw == "TodoWrite":
                     # Map the CLI todo list onto Claudio's plan contract so the
                     # PLAN panel renders it (frontend expects todo_write +
                     # {"items": [{content, status}]}).

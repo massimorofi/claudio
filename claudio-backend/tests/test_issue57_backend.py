@@ -276,6 +276,7 @@ def test_claude_code_argv_includes_verbose(tmp_path):
     argv = eng._argv(_request(tmp_path))
     assert "--verbose" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--append-system-prompt" in argv  # plan nudge for the PLAN panel
 
 
 def test_claude_code_cli_failure_surfaces_as_run_failed(tmp_path):
@@ -440,6 +441,7 @@ def test_claude_code_translates_nested_blocks(tmp_path):
         "     {'content':'read docs','status':'completed'},"
         "     {'content':'write plan','status':'in_progress'},"
         "     {'content':'verify','status':'pending'}]}},"
+        "  {'type':'tool_use','id':'t2','name':'Write','input':{'file_path':'doc/x.md','content':'hi'}},"
         "  {'type':'text','text':'working'}]}}))\n"
         "print(json.dumps({'type':'user','message':{'content':["
         "  {'type':'tool_result','tool_use_id':'t1','content':[{'type':'text','text':'todos saved'}],'is_error':False}]}}))\n"
@@ -457,6 +459,9 @@ def test_claude_code_translates_nested_blocks(tmp_path):
     plan = json.loads(calls[0]["arguments"])
     assert [i["status"] for i in plan["items"]] == ["done", "in_progress", "pending"]
     assert plan["items"][0]["content"] == "read docs"
+    # CLI names normalize to Claudio's tool contract so artifact tracking works.
+    assert calls[1]["name"] == "write_file"
+    assert json.loads(calls[1]["arguments"])["file_path"] == "doc/x.md"
     results = by_name.get(EventName.TOOL_RESULT.value, [])
     assert results and results[0]["call_id"] == "t1"
     assert results[0]["output"] == "todos saved"
