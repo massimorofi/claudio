@@ -497,8 +497,10 @@ class OpenCodeEngineConfig(BaseModel):
     # gateway; model references become "<provider>/<llm.model>".
     provider_name: str = "claudio"
     # opencode defaults max_tokens to 32000, which strict gateways reject;
-    # keep the declared model output limit under the server cap.
+    # keep the declared model output limit under the server cap. opencode
+    # requires BOTH context and output when a limit is declared.
     output_token_limit: int = 16000
+    context_token_limit: int = 131072
 
 
 class ClaudeCodeEngineConfig(BaseModel):

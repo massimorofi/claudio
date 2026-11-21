@@ -152,7 +152,12 @@ class OpenCodeEngine:
                     "apiKey": "{env:OPENAI_API_KEY}",
                 },
                 "models": {
-                    model: {"limit": {"output": int(oc.output_token_limit)}}
+                    model: {
+                        "limit": {
+                            "context": int(oc.context_token_limit),
+                            "output": int(oc.output_token_limit),
+                        }
+                    }
                 } if model else {},
             }
             (cfg_dir / "opencode.json").write_text(
