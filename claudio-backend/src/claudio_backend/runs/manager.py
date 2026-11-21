@@ -1683,6 +1683,7 @@ class RunManager:
                 record.reads_since_write += 1
             elif tool == "todo_write":
                 record.turns_since_todo = 0
+                self._persist_plan_todos(record, data)
         elif name == EventName.TOOL_RESULT.value:
             self._mirror_tool_event(record, {"event": name, "data": data})
             if data.get("name") == "delegate_task":
@@ -2218,6 +2219,47 @@ class RunManager:
             last_context_tokens=record.last_context_tokens,
             turns_since_todo=record.turns_since_todo,
         )
+
+    def _persist_plan_todos(self, record: RunRecord, data: dict[str, Any]) -> None:
+        """Mirror a CLI-engine plan update into the session row (issue #57).
+
+        The ADK ``todo_write`` tool persists the list itself (planning.py);
+        for CLI-backed engines the translated ``todo_write`` tool_call only
+        reaches ``_track``, so without this the PLAN panel would show live
+        updates but re-seed empty after a reload or tab switch.
+        """
+        try:
+            args = data.get("arguments")
+            if isinstance(args, str):
+                args = json.loads(args)
+            items = args.get("items") if isinstance(args, dict) else None
+            if not isinstance(items, list):
+                return
+            todos = [
+                {
+                    "content": str(t.get("content") or ""),
+                    "status": str(t.get("status") or "pending"),
+                }
+                for t in items
+                if isinstance(t, dict) and str(t.get("content") or "").strip()
+            ]
+        except (ValueError, TypeError):
+            return
+        if not todos:
+            return
+
+        async def _save() -> None:
+            try:
+                await self.db.update_session(
+                    record.session_id, todos=json.dumps(todos)
+                )
+            except Exception:  # noqa: BLE001 - plan mirror is best-effort
+                logger.warning(
+                    "failed to persist plan mirror for session %s",
+                    record.session_id,
+                )
+
+        asyncio.create_task(_save())
 
     async def _load_todos(self, session_id: str) -> list[dict]:
         row = await self.db.get_session(session_id)
