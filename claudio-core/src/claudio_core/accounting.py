@@ -70,6 +70,29 @@ def estimate_tokens(text: str) -> int:
     return int(len(text) / CHARS_PER_TOKEN + 0.5)
 
 
+def overlap_ratio(records: list["ToolCallRecord"]) -> float:
+    """How much wall-clock a set of tool calls actually shared.
+
+    ``sum(duration) / span`` where ``span`` is the distance from the earliest
+    start to the latest finish. A perfectly serial sequence gives ~1.0; a batch
+    of four reads that genuinely ran together gives close to 4.0. Returns 0.0
+    for an empty group or a zero-length span so callers can distinguish "no
+    overlap measured" from "no calls".
+
+    This is the Increment 0b signal for Increment 1: before bounded parallel
+    execution lands, every group is serial and the ratio sits at ~1; a real
+    read batch must push it above 1.
+    """
+    timed = [r for r in records if r.finished_at > r.started_at]
+    if not timed:
+        return 0.0
+    span_s = max(r.finished_at for r in timed) - min(r.started_at for r in timed)
+    if span_s <= 0:
+        return 0.0
+    busy_ms = sum(float(r.duration_ms or 0.0) for r in timed)
+    return round(busy_ms / (span_s * 1000.0), 4)
+
+
 def cache_hit_ratio(cached_input_tokens: int, input_tokens: int) -> float:
     """Prompt-cache hit ratio, clamped to [0, 1]; 0.0 when nothing measured."""
     if input_tokens <= 0:
@@ -191,6 +214,26 @@ class CallAccountant:
     def tool_calls(self, run_id: str) -> list[ToolCallRecord]:
         with self._lock:
             return list(self._tools.get(run_id, ()))
+
+    def tool_groups(self, run_id: str) -> dict[str, list[ToolCallRecord]]:
+        """Recorded tool calls grouped by ``concurrency_group`` ("" = serial)."""
+        with self._lock:
+            recs = list(self._tools.get(run_id, ()))
+        out: dict[str, list[ToolCallRecord]] = {}
+        for r in recs:
+            out.setdefault(r.concurrency_group or "", []).append(r)
+        return out
+
+    def overlap_ratio(self, run_id: str, concurrency_group: str | None = None) -> float:
+        """Measured concurrency for a run (or one batch). See :func:`overlap_ratio`."""
+        if concurrency_group is None:
+            with self._lock:
+                recs = list(self._tools.get(run_id, ()))
+        else:
+            recs = [
+                r for r in self.tool_calls(run_id) if r.concurrency_group == concurrency_group
+            ]
+        return overlap_ratio(recs)
 
     def lifecycle(self, run_id: str) -> dict[str, int]:
         with self._lock:
