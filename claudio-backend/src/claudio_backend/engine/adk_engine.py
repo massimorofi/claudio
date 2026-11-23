@@ -486,12 +486,22 @@ def _record_tool_call(
     started: float,
     result: Any,
     is_error: bool,
+    concurrency_group: str | None = None,
 ) -> None:
-    """Feed one tool execution into the unified ledger (issue #58 Inc 0)."""
+    """Feed one tool execution into the unified ledger (issue #58 Inc 0/1).
+
+    ``concurrency_group`` defaults to the batch the call is running inside
+    (set by :func:`claudio_core.tool_batch.run_tool_batch`), which is what lets
+    the Increment 0b overlap ratio show that a read batch really did overlap.
+    """
     accountant = getattr(ctx, "accountant", None)
     if accountant is None:
         return
     from claudio_core.accounting import ToolCallRecord, estimate_tokens
+    from claudio_core.tool_batch import current_concurrency_group
+
+    if concurrency_group is None:
+        concurrency_group = current_concurrency_group()
 
     finished = time.time()
     text = _stringify(result)
@@ -506,6 +516,7 @@ def _record_tool_call(
             is_error=is_error,
             result_chars=len(text),
             est_result_tokens=estimate_tokens(text),
+            concurrency_group=concurrency_group,
         )
     )
 
@@ -556,15 +567,23 @@ def make_adk_tool(
             return await coro_factory()
 
     async def wrapper(**kwargs: Any) -> dict[str, Any]:
-        started = time.time()
+        # ``started`` is stamped *inside* the guard so the recorded duration is
+        # execution time, not time spent queueing for the read semaphore.
+        # Otherwise a bounded batch would report an inflated overlap ratio.
+        timing = {"started": time.time()}
+
+        async def _timed() -> Any:
+            timing["started"] = time.time()
+            return await fn(ctx, **kwargs)
+
         try:
-            result = await _run_guarded(lambda: fn(ctx, **kwargs))
+            result = await _run_guarded(_timed)
         except Exception as exc:  # noqa: BLE001 - tool errors are data, not crashes
             logger.warning("tool %s raised: %s", name, exc)
-            _record_tool_call(ctx, name, started, {"error": str(exc)}, True)
+            _record_tool_call(ctx, name, timing["started"], {"error": str(exc)}, True)
             return {"error": str(exc)}
         _record_tool_call(
-            ctx, name, started, result, _tool_result_is_error(result)
+            ctx, name, timing["started"], result, _tool_result_is_error(result)
         )
         return result
 

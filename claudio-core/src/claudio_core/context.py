@@ -38,6 +38,9 @@ class RunConcurrency:
     read_semaphore: asyncio.Semaphore
     mutation_lock: asyncio.Lock
     exclusive_lock: asyncio.Lock
+    #: The cap the semaphore was built with, so schedulers can read the bound
+    #: back instead of re-deriving it from config (issue #58, Increment 1).
+    max_read_concurrency: int = 4
 
     @classmethod
     def create(cls, max_read_concurrency: int = 4) -> "RunConcurrency":
@@ -46,6 +49,7 @@ class RunConcurrency:
             read_semaphore=asyncio.Semaphore(cap),
             mutation_lock=asyncio.Lock(),
             exclusive_lock=asyncio.Lock(),
+            max_read_concurrency=cap,
         )
 
 
@@ -93,6 +97,17 @@ class ToolContext:
     # Per-run concurrency primitives (issue #58, Increment 1). ``None`` means
     # no scheduling control (legacy/test callers); the engine sets one per run.
     concurrency: "RunConcurrency | None" = None
+    # Canonical turn-boundary tool context (issue #58, Increment 1). Written by
+    # ``claudio_core.tool_batch.apply_tool_context``: ``tool_context_text`` is
+    # the byte-stable reduction of the last batch, ``tool_context_digest`` its
+    # hash, ``tool_context_blocks`` the history of such blocks. Because the
+    # reduction sorts by request index and drops timings, two runs whose tools
+    # returned the same data produce identical bytes even when the tools
+    # completed in different orders.
+    tool_context_text: str = ""
+    tool_context_digest: str = ""
+    tool_context_entries: list[dict[str, Any]] = field(default_factory=list)
+    tool_context_blocks: list[str] = field(default_factory=list)
 
     def record_tool_call(self, name: str) -> None:
         """Note that a tool actually ran, for the plan/act audit."""
