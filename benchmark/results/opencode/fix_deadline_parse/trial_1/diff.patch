@@ -1,3 +1,11 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..45ff25b
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/timeutil.cpython-312.pyc b/app/__pycache__/timeutil.cpython-312.pyc
+new file mode 100644
+index 0000000..4e45483
+Binary files /dev/null and b/app/__pycache__/timeutil.cpython-312.pyc differ
 diff --git a/app/timeutil.py b/app/timeutil.py
 index 14104b1..2601b6a 100644
 --- a/app/timeutil.py
@@ -11,3 +19,11 @@ index 14104b1..2601b6a 100644
 +    if text.endswith('Z'):
 +        text = text[:-1]
 +    return datetime.strptime(text, '%Y-%m-%d %H:%M')
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..62b8d17
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_timeutil.cpython-312.pyc b/tests/__pycache__/test_timeutil.cpython-312.pyc
+new file mode 100644
+index 0000000..f95e3cf
+Binary files /dev/null and b/tests/__pycache__/test_timeutil.cpython-312.pyc differ

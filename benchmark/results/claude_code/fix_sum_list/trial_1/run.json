@@ -1,10 +1,14 @@
 {
   "backend": "claude_code",
   "changed_files": [
-    "app/calc.py"
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/calc.cpython-312.pyc",
+    "app/calc.py",
+    "tests/__pycache__/__init__.cpython-312.pyc",
+    "tests/__pycache__/test_calc.cpython-312.pyc"
   ],
-  "diff_lines": 8,
-  "duration_s": 0.548,
+  "diff_lines": 24,
+  "duration_s": 0.154,
   "engine_exit_code": 0,
   "engine_mode": "stub",
   "errors": {

@@ -1,3 +1,11 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..360cc35
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/calc.cpython-312.pyc b/app/__pycache__/calc.cpython-312.pyc
+new file mode 100644
+index 0000000..c7109ef
+Binary files /dev/null and b/app/__pycache__/calc.cpython-312.pyc differ
 diff --git a/app/calc.py b/app/calc.py
 index 395cf42..d1035b4 100644
 --- a/app/calc.py
@@ -6,3 +14,11 @@ index 395cf42..d1035b4 100644
  def sum_values(values):
 -    return sum(values) - 1
 +    return sum(values)
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..cde2787
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_calc.cpython-312.pyc b/tests/__pycache__/test_calc.cpython-312.pyc
+new file mode 100644
+index 0000000..87c7689
+Binary files /dev/null and b/tests/__pycache__/test_calc.cpython-312.pyc differ

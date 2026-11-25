@@ -1,10 +1,14 @@
 {
   "backend": "opencode",
   "changed_files": [
-    "app/report.py"
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/report.cpython-312.pyc",
+    "app/report.py",
+    "tests/__pycache__/__init__.cpython-312.pyc",
+    "tests/__pycache__/test_report.cpython-312.pyc"
   ],
-  "diff_lines": 10,
-  "duration_s": 0.54,
+  "diff_lines": 26,
+  "duration_s": 0.155,
   "engine_exit_code": 0,
   "engine_mode": "stub",
   "errors": {

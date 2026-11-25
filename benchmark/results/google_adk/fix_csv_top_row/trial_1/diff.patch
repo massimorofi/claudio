@@ -1,3 +1,11 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..b0ecae4
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/report.cpython-312.pyc b/app/__pycache__/report.cpython-312.pyc
+new file mode 100644
+index 0000000..b3421ab
+Binary files /dev/null and b/app/__pycache__/report.cpython-312.pyc differ
 diff --git a/app/report.py b/app/report.py
 index 1e0cf60..dabc9b8 100644
 --- a/app/report.py
@@ -8,3 +16,11 @@ index 1e0cf60..dabc9b8 100644
      counts = Counter(r['seller'] for r in rows)
 -    return counts.most_common()[-1][0]
 +    return counts.most_common(1)[0][0]
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..38b74ff
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_report.cpython-312.pyc b/tests/__pycache__/test_report.cpython-312.pyc
+new file mode 100644
+index 0000000..034e4fa
+Binary files /dev/null and b/tests/__pycache__/test_report.cpython-312.pyc differ

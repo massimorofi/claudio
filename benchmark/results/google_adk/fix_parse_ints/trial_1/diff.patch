@@ -1,3 +1,11 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..a9d04af
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/parse.cpython-312.pyc b/app/__pycache__/parse.cpython-312.pyc
+new file mode 100644
+index 0000000..c26d763
+Binary files /dev/null and b/app/__pycache__/parse.cpython-312.pyc differ
 diff --git a/app/parse.py b/app/parse.py
 index fc38475..cdb808b 100644
 --- a/app/parse.py
@@ -12,3 +20,11 @@ index fc38475..cdb808b 100644
 +        except (TypeError, ValueError):
 +            continue
 +    return out
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..395019f
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_parse.cpython-312.pyc b/tests/__pycache__/test_parse.cpython-312.pyc
+new file mode 100644
+index 0000000..92e930e
+Binary files /dev/null and b/tests/__pycache__/test_parse.cpython-312.pyc differ

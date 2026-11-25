@@ -1,10 +1,14 @@
 {
   "backend": "google_adk",
   "changed_files": [
-    "app/text.py"
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/text.cpython-312.pyc",
+    "app/text.py",
+    "tests/__pycache__/__init__.cpython-312.pyc",
+    "tests/__pycache__/test_text.cpython-312.pyc"
   ],
-  "diff_lines": 12,
-  "duration_s": 0.542,
+  "diff_lines": 28,
+  "duration_s": 0.16,
   "engine_exit_code": 0,
   "engine_mode": "stub",
   "errors": {

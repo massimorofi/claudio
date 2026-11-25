@@ -1,10 +1,14 @@
 {
   "backend": "opencode",
   "changed_files": [
-    "app/parse.py"
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/parse.cpython-312.pyc",
+    "app/parse.py",
+    "tests/__pycache__/__init__.cpython-312.pyc",
+    "tests/__pycache__/test_parse.cpython-312.pyc"
   ],
-  "diff_lines": 14,
-  "duration_s": 0.528,
+  "diff_lines": 30,
+  "duration_s": 0.172,
   "engine_exit_code": 0,
   "engine_mode": "stub",
   "errors": {

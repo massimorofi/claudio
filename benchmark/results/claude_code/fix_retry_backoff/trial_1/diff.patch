@@ -1,3 +1,11 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..01469b7
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/retry.cpython-312.pyc b/app/__pycache__/retry.cpython-312.pyc
+new file mode 100644
+index 0000000..64e6868
+Binary files /dev/null and b/app/__pycache__/retry.cpython-312.pyc differ
 diff --git a/app/retry.py b/app/retry.py
 index ed22e9d..fc638cc 100644
 --- a/app/retry.py
@@ -12,3 +20,11 @@ index ed22e9d..fc638cc 100644
 +        except Exception as exc:  # noqa: BLE001
 +            last = exc
 +    raise last
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..81d8c1e
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_retry.cpython-312.pyc b/tests/__pycache__/test_retry.cpython-312.pyc
+new file mode 100644
+index 0000000..dcba710
+Binary files /dev/null and b/tests/__pycache__/test_retry.cpython-312.pyc differ
