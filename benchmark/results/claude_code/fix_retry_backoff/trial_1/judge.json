@@ -1,0 +1,15 @@
+{
+  "backend_anon": "A",
+  "evidence_sha": "b590357b2e8dd2154b927be97d60f566fb7804c6b36b88d82d028daa3a4732fd",
+  "justifications": {
+    "coding": "Verification passed (exit 0) so the code demonstrably works; docked for 1 tool/command error(s).",
+    "intelligence": "Intelligence 2: 1 tool/command error(s) recovered from, 1 retried action(s), scope discipline: 4 stray path(s).",
+    "quality": "Quality 4: 4 non-source artifact(s) committed."
+  },
+  "mode": "heuristic",
+  "scores": {
+    "coding": 4,
+    "intelligence": 2,
+    "quality": 4
+  }
+}

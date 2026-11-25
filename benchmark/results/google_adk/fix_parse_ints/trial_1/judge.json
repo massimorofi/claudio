@@ -1,0 +1,15 @@
+{
+  "backend_anon": "B",
+  "evidence_sha": "fa6788ca2e752d49521fb82f30b5e8763ef7a503b4aefc116054a3888a7a9060",
+  "justifications": {
+    "coding": "Verification passed (exit 0) so the code demonstrably works; no defects visible.",
+    "intelligence": "Intelligence 4: scope discipline: 4 stray path(s).",
+    "quality": "Quality 4: 4 non-source artifact(s) committed."
+  },
+  "mode": "heuristic",
+  "scores": {
+    "coding": 5,
+    "intelligence": 4,
+    "quality": 4
+  }
+}
