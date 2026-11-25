@@ -11,4 +11,4 @@
 {"input":{"path":"app/legacy_report.py"},"name":"write_file","seq":7,"type":"tool_call"}
 {"chars":339,"is_error":false,"name":"write_file","seq":8,"type":"tool_result"}
 {"cache_creation_input_tokens":184,"cache_read_input_tokens":553,"input_tokens":1393,"output_tokens":366,"type":"usage"}
-{"duration_ms":0,"is_error":false,"num_turns":6,"result":"stub solution applied for split-legacy-report","session_id":"stub-c198a74a7429e2f8","subtype":"success","type":"result"}
+{"duration_ms":1,"is_error":false,"num_turns":6,"result":"stub solution applied for split-legacy-report","session_id":"stub-c198a74a7429e2f8","subtype":"success","type":"result"}

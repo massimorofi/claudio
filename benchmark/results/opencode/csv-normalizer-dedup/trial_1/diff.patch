@@ -43,7 +43,7 @@ index e54f0fd..62cc837 100644
  def total_amount(rows):
 diff --git a/session.jsonl b/session.jsonl
 new file mode 100644
-index 0000000..9d60b1f
+index 0000000..7490830
 --- /dev/null
 +++ b/session.jsonl
 @@ -0,0 +1,14 @@
@@ -60,4 +60,4 @@ index 0000000..9d60b1f
 +{"input":{"path":"app/csvnorm.py"},"name":"edit_file","seq":7,"type":"tool_call"}
 +{"chars":80,"is_error":false,"name":"edit_file","seq":8,"type":"tool_result"}
 +{"cache_creation_input_tokens":98,"cache_read_input_tokens":1042,"input_tokens":1260,"output_tokens":255,"type":"usage"}
-+{"duration_ms":0,"is_error":false,"num_turns":6,"result":"stub solution applied for csv-normalizer-dedup","session_id":"stub-8f36045b1e122d22","subtype":"success","type":"result"}
++{"duration_ms":1,"is_error":false,"num_turns":6,"result":"stub solution applied for csv-normalizer-dedup","session_id":"stub-8f36045b1e122d22","subtype":"success","type":"result"}

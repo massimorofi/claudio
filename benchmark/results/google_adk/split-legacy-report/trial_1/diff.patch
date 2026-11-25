@@ -144,7 +144,7 @@ index 0000000..cf55f53
 +    return "\n".join(out) + "\n"
 diff --git a/session.jsonl b/session.jsonl
 new file mode 100644
-index 0000000..04759f8
+index 0000000..eba684a
 --- /dev/null
 +++ b/session.jsonl
 @@ -0,0 +1,14 @@
@@ -161,4 +161,4 @@ index 0000000..04759f8
 +{"input":{"path":"app/legacy_report.py"},"name":"write_file","seq":7,"type":"tool_call"}
 +{"chars":339,"is_error":false,"name":"write_file","seq":8,"type":"tool_result"}
 +{"cache_creation_input_tokens":87,"cache_read_input_tokens":614,"input_tokens":1250,"output_tokens":389,"type":"usage"}
-+{"duration_ms":0,"is_error":false,"num_turns":6,"result":"stub solution applied for split-legacy-report","session_id":"stub-7609cefddc666f97","subtype":"success","type":"result"}
++{"duration_ms":1,"is_error":false,"num_turns":6,"result":"stub solution applied for split-legacy-report","session_id":"stub-7609cefddc666f97","subtype":"success","type":"result"}

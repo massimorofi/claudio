@@ -1,6 +1,6 @@
 {
   "backend": "google_adk",
-  "duration_s": 0.016,
+  "duration_s": 0.027,
   "engine_mode": "stub",
   "errors": {
     "command_errors": 1,
@@ -9,12 +9,12 @@
     "tool_errors": 1
   },
   "exit_status": "ok",
-  "sandbox": "/tmp/claudio-bench-google_adk-log-triage-t1-qzlhtysu",
+  "sandbox": "/tmp/claudio-bench-google_adk-log-triage-t1-g8uba9ed",
   "schema_keys_ok": true,
   "session_lines": 8,
   "task_id": "log-triage",
   "timed_out": false,
-  "timeout_s": 30.0,
+  "timeout_s": 420.0,
   "tokens": {
     "cache_read": 560,
     "cache_write": 64,

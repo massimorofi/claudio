@@ -1,6 +1,6 @@
 {
   "backend": "google_adk",
-  "duration_s": 0.39,
+  "duration_s": 0.473,
   "engine_mode": "stub",
   "errors": {
     "command_errors": 1,
@@ -9,7 +9,7 @@
     "tool_errors": 1
   },
   "exit_status": "ok",
-  "sandbox": "/tmp/claudio-bench-google_adk-rate-limiter-offbyone-t1-kr67oau7",
+  "sandbox": "/tmp/claudio-bench-google_adk-rate-limiter-offbyone-t1-loxhjnav",
   "schema_keys_ok": true,
   "session_lines": 10,
   "task_id": "rate-limiter-offbyone",

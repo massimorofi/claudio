@@ -11,4 +11,4 @@
 {"input":{"path":"app/csvnorm.py"},"name":"edit_file","seq":7,"type":"tool_call"}
 {"chars":80,"is_error":false,"name":"edit_file","seq":8,"type":"tool_result"}
 {"cache_creation_input_tokens":179,"cache_read_input_tokens":703,"input_tokens":1090,"output_tokens":370,"type":"usage"}
-{"duration_ms":0,"is_error":false,"num_turns":6,"result":"stub solution applied for csv-normalizer-dedup","session_id":"stub-e92c04ce64bf65f3","subtype":"success","type":"result"}
+{"duration_ms":1,"is_error":false,"num_turns":6,"result":"stub solution applied for csv-normalizer-dedup","session_id":"stub-e92c04ce64bf65f3","subtype":"success","type":"result"}
