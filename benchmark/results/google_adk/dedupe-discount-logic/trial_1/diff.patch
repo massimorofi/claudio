@@ -1,0 +1,56 @@
+diff --git a/app/pricing.py b/app/pricing.py
+index 487ab9b..2c048c0 100644
+--- a/app/pricing.py
++++ b/app/pricing.py
+@@ -17,27 +17,22 @@ def _tier_rate(qty):
+     return rate
+ 
+ 
+-def line_total(qty, unit_price):
+-    """Net price of ``qty`` units at ``unit_price`` after the tier discount."""
++def _apply_tier(qty, unit_price):
++    """Single source of truth for the tier discount on one line."""
+     rate = _tier_rate(qty)
+     if rate > MAX_DISCOUNT_PCT:
+         rate = MAX_DISCOUNT_PCT
+     return round(qty * unit_price * (1.0 - rate), 2)
+ 
+ 
++def line_total(qty, unit_price):
++    """Net price of ``qty`` units at ``unit_price`` after the tier discount."""
++    return _apply_tier(qty, unit_price)
++
++
+ def bulk_quote(items):
+     """Total for an order of ``(qty, unit_price)`` pairs."""
+     total = 0.0
+     for qty, unit_price in items:
+-        # STALE COPY of the tier logic: the 15% cap is missing and the top
+-        # tier wrongly discounts 25%.
+-        if qty >= 100:
+-            rate = 0.25
+-        elif qty >= 50:
+-            rate = 0.10
+-        elif qty >= 10:
+-            rate = 0.05
+-        else:
+-            rate = 0.0
+-        total += qty * unit_price * (1.0 - rate)
++        total += _apply_tier(qty, unit_price)
+     return round(total, 2)
+diff --git a/session.jsonl b/session.jsonl
+new file mode 100644
+index 0000000..007188c
+--- /dev/null
++++ b/session.jsonl
+@@ -0,0 +1,10 @@
++{"backend":"google_adk","engine_mode":"stub","model":"claudio-stub-1","session_id":"stub-f583718ded29791d","task_id":"dedupe-discount-logic","trial":1,"type":"init"}
++{"input":{"command":"python3 -m pytest -q -p no:cacheprovider tests/test_pricing.py && grep -q \"def _apply_tier\" app/pricing.py && test \"$(grep -c '_apply_tier' app/pricing.py)\" -ge 3 && ! grep -q \"elif qty >= 50\" app/pricing.py"},"name":"run_command","type":"tool_call"}
++{"chars":0,"exit_code":1,"is_error":true,"name":"run_command","type":"tool_result"}
++{"attempt":1,"reason":"verification failed on the seed","type":"retry"}
++{"input":{"path":"app/pricing.py"},"name":"edit_file","seq":1,"type":"tool_call"}
++{"chars":400,"is_error":false,"name":"edit_file","seq":2,"type":"tool_result"}
++{"input":{"path":"app/pricing.py"},"name":"edit_file","seq":3,"type":"tool_call"}
++{"chars":122,"is_error":false,"name":"edit_file","seq":4,"type":"tool_result"}
++{"cache_creation_input_tokens":93,"cache_read_input_tokens":809,"input_tokens":1063,"output_tokens":389,"type":"usage"}
++{"duration_ms":0,"is_error":false,"num_turns":4,"result":"stub solution applied for dedupe-discount-logic","session_id":"stub-f583718ded29791d","subtype":"success","type":"result"}

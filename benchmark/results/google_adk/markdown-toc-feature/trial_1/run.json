@@ -1,0 +1,28 @@
+{
+  "backend": "google_adk",
+  "duration_s": 0.389,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 1,
+    "retries": 1,
+    "timeouts": 0,
+    "tool_errors": 1
+  },
+  "exit_status": "ok",
+  "sandbox": "/tmp/claudio-bench-google_adk-markdown-toc-feature-t1-h302bl0o",
+  "schema_keys_ok": true,
+  "session_lines": 8,
+  "task_id": "markdown-toc-feature",
+  "timed_out": false,
+  "timeout_s": 600.0,
+  "tokens": {
+    "cache_read": 1168,
+    "cache_write": 156,
+    "input": 1156,
+    "output": 393,
+    "total": 2873
+  },
+  "trial": 1,
+  "verification_command": "python3 -m pytest -q -p no:cacheprovider tests/test_toc.py",
+  "verification_passed": true
+}

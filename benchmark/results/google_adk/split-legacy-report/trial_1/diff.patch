@@ -1,0 +1,164 @@
+diff --git a/app/legacy_report.py b/app/legacy_report.py
+index 96264a7..88455be 100644
+--- a/app/legacy_report.py
++++ b/app/legacy_report.py
+@@ -1,56 +1,9 @@
+-"""Legacy monolithic sales report module.
++"""Deprecated shim: the report module was split into ``app.report``.
+ 
+-Everything (model, totals, rendering) lives in this one file and it has grown
+-unwieldy. It also crashes on an empty report. See README.md for the refactor
+-that is required.
++Kept so old imports keep working; the implementation now lives in
++``app/report/model.py`` and ``app/report/render.py``.
+ """
+ 
+-from dataclasses import dataclass, field
++from app.report import Line, Report, line_net, render_report, summarize
+ 
+-
+-@dataclass
+-class Line:
+-    sku: str
+-    qty: int
+-    unit_price: float
+-    discount_pct: float = 0.0
+-
+-
+-@dataclass
+-class Report:
+-    title: str
+-    lines: list = field(default_factory=list)
+-
+-
+-def line_net(line):
+-    gross = line.qty * line.unit_price
+-    return gross - gross * line.discount_pct / 100.0
+-
+-
+-def summarize(report):
+-    total = 0.0
+-    for ln in report.lines:
+-        total += line_net(ln)
+-    # BUG: divides by len(lines) unconditionally -> ZeroDivisionError on empty.
+-    average = total / len(report.lines)
+-    return {
+-        "title": report.title,
+-        "count": len(report.lines),
+-        "total": round(total, 2),
+-        "average": round(average, 2),
+-    }
+-
+-
+-def render_report(report):
+-    data = summarize(report)
+-    out = [
+-        "# " + data["title"],
+-        "",
+-        "- lines: %d" % data["count"],
+-        "- total: %.2f" % data["total"],
+-        "- average: %.2f" % data["average"],
+-        "",
+-    ]
+-    for ln in report.lines:
+-        out.append("| %s | %d | %.2f |" % (ln.sku, ln.qty, line_net(ln)))
+-    return "\n".join(out) + "\n"
++__all__ = ["Line", "Report", "line_net", "render_report", "summarize"]
+diff --git a/app/report/__init__.py b/app/report/__init__.py
+new file mode 100644
+index 0000000..b3a821a
+--- /dev/null
++++ b/app/report/__init__.py
+@@ -0,0 +1,6 @@
++"""Refactored sales report: ``model`` holds data + maths, ``render`` text."""
++
++from app.report.model import Line, Report, line_net, summarize
++from app.report.render import render_report
++
++__all__ = ["Line", "Report", "line_net", "summarize", "render_report"]
+diff --git a/app/report/model.py b/app/report/model.py
+new file mode 100644
+index 0000000..3afc87e
+--- /dev/null
++++ b/app/report/model.py
+@@ -0,0 +1,36 @@
++"""Data model and totals for a sales report."""
++
++from dataclasses import dataclass, field
++
++
++@dataclass
++class Line:
++    sku: str
++    qty: int
++    unit_price: float
++    discount_pct: float = 0.0
++
++
++@dataclass
++class Report:
++    title: str
++    lines: list = field(default_factory=list)
++
++
++def line_net(line):
++    gross = line.qty * line.unit_price
++    return gross - gross * line.discount_pct / 100.0
++
++
++def summarize(report):
++    total = 0.0
++    for ln in report.lines:
++        total += line_net(ln)
++    count = len(report.lines)
++    average = total / count if count else 0.0
++    return {
++        "title": report.title,
++        "count": count,
++        "total": round(total, 2),
++        "average": round(average, 2),
++    }
+diff --git a/app/report/render.py b/app/report/render.py
+new file mode 100644
+index 0000000..cf55f53
+--- /dev/null
++++ b/app/report/render.py
+@@ -0,0 +1,18 @@
++"""Markdown rendering for a sales report."""
++
++from app.report.model import line_net, summarize
++
++
++def render_report(report):
++    data = summarize(report)
++    out = [
++        "# " + data["title"],
++        "",
++        "- lines: %d" % data["count"],
++        "- total: %.2f" % data["total"],
++        "- average: %.2f" % data["average"],
++        "",
++    ]
++    for ln in report.lines:
++        out.append("| %s | %d | %.2f" % (ln.sku, ln.qty, line_net(ln)) + " |")
++    return "\n".join(out) + "\n"
+diff --git a/session.jsonl b/session.jsonl
+new file mode 100644
+index 0000000..04759f8
+--- /dev/null
++++ b/session.jsonl
+@@ -0,0 +1,14 @@
++{"backend":"google_adk","engine_mode":"stub","model":"claudio-stub-1","session_id":"stub-7609cefddc666f97","task_id":"split-legacy-report","trial":1,"type":"init"}
++{"input":{"command":"python3 -m pytest -q -p no:cacheprovider tests/test_report.py && test -f app/report/model.py && test -f app/report/render.py && grep -Eq \"from (\\.model|app\\.report\\.model) import\" app/report/render.py && ! grep -q \"def render_report\" app/legacy_report.py"},"name":"run_command","type":"tool_call"}
++{"chars":0,"exit_code":1,"is_error":true,"name":"run_command","type":"tool_result"}
++{"attempt":1,"reason":"verification failed on the seed","type":"retry"}
++{"input":{"path":"app/report/__init__.py"},"name":"write_file","seq":1,"type":"tool_call"}
++{"chars":258,"is_error":false,"name":"write_file","seq":2,"type":"tool_result"}
++{"input":{"path":"app/report/model.py"},"name":"write_file","seq":3,"type":"tool_call"}
++{"chars":716,"is_error":false,"name":"write_file","seq":4,"type":"tool_result"}
++{"input":{"path":"app/report/render.py"},"name":"write_file","seq":5,"type":"tool_call"}
++{"chars":490,"is_error":false,"name":"write_file","seq":6,"type":"tool_result"}
++{"input":{"path":"app/legacy_report.py"},"name":"write_file","seq":7,"type":"tool_call"}
++{"chars":339,"is_error":false,"name":"write_file","seq":8,"type":"tool_result"}
++{"cache_creation_input_tokens":87,"cache_read_input_tokens":614,"input_tokens":1250,"output_tokens":389,"type":"usage"}
++{"duration_ms":0,"is_error":false,"num_turns":6,"result":"stub solution applied for split-legacy-report","session_id":"stub-7609cefddc666f97","subtype":"success","type":"result"}

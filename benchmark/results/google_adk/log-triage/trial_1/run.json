@@ -1,0 +1,28 @@
+{
+  "backend": "google_adk",
+  "duration_s": 0.013,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 1,
+    "retries": 1,
+    "timeouts": 0,
+    "tool_errors": 1
+  },
+  "exit_status": "ok",
+  "sandbox": "/tmp/claudio-bench-google_adk-log-triage-t1-rmbq3l_j",
+  "schema_keys_ok": true,
+  "session_lines": 8,
+  "task_id": "log-triage",
+  "timed_out": false,
+  "timeout_s": 420.0,
+  "tokens": {
+    "cache_read": 560,
+    "cache_write": 64,
+    "input": 1124,
+    "output": 246,
+    "total": 1994
+  },
+  "trial": 1,
+  "verification_command": "test -f findings.txt && grep -qx \"root_cause: db-pool-exhausted\" findings.txt && grep -qx \"error_count: 5\" findings.txt && grep -qx \"first_warning_component: db\" findings.txt && grep -qx \"last_error_line: 10\" findings.txt",
+  "verification_passed": true
+}
