@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "locked": true,
+  "generated_by": "claudio",
+  "notes": "rubric[0] is the 5-point anchor, rubric[-1] the 1-point anchor. verification runs with the sandbox root as cwd; fixtures are copied to the sandbox root from fixture_dir.",
+  "tasks": [
+    {
+      "id": "rate-limiter-offbyone",
+      "category": "bug_fix",
+      "difficulty": "easy",
+      "prompt": "Fix the token-bucket rate limiter in app/rate_limiter.py. Two defects are reported in README.md: allow() rejects a request whose cost equals the tokens available (a capacity-3 bucket only serves 2 requests), and wait_seconds() divides by the bucket size instead of the refill rate. Repair app/rate_limiter.py only; tests/test_rate_limiter.py is the contract and must not be edited.",
+      "fixture_dir": "benchmark/fixtures/rate-limiter-offbyone",
+      "setup": "",
+      "verification": "python3 -m pytest -q -p no:cacheprovider tests/test_rate_limiter.py",
+      "seed_must_fail": true,
+      "max_seconds": 420,
+      "rubric": [
+        "5: both defects fixed with minimal diff, allow() uses >= and wait_seconds() uses the refill rate, all tests pass, no test edits.",
+        "4: all tests pass but the diff also touches the tests or adds unused helpers.",
+        "3: the off-by-one is fixed but wait_seconds() is still wrong (or vice versa).",
+        "2: partial change that leaves at least two tests failing.",
+        "1: no useful change, or the public API was changed to dodge the tests."
+      ]
+    },
+    {
+      "id": "csv-normalizer-dedup",
+      "category": "bug_fix",
+      "difficulty": "medium",
+      "prompt": "Fix app/csvnorm.py: (1) blank filler rows from the exporter must be dropped by parse_rows, (2) dedupe must treat order ids case- and whitespace-insensitively and keep the last row per id, (3) round_money must round half up (2.665 -> 2.67) instead of banker's rounding, and total_amount must use it per row. Only app/csvnorm.py may change; tests/test_csvnorm.py defines the required behaviour.",
+      "fixture_dir": "benchmark/fixtures/csv-normalizer-dedup",
+      "setup": "",
+      "verification": "python3 -m pytest -q -p no:cacheprovider tests/test_csvnorm.py",
+      "seed_must_fail": true,
+      "max_seconds": 600,
+      "rubric": [
+        "5: all three defects fixed, Decimal rounding explicit (ROUND_HALF_UP), blank-row rule handles whitespace-only rows, tests pass untouched.",
+        "4: all tests pass with a slightly brittle blank-row or key-normalisation rule.",
+        "3: two of the three defects fixed.",
+        "2: one defect fixed, or floats used where Decimal is required.",
+        "1: tests still failing or the tests were edited to pass."
+      ]
+    },
+    {
+      "id": "retry-helper-skeleton",
+      "category": "feature",
+      "difficulty": "medium",
+      "prompt": "Implement retry_call in app/retry.py exactly as specified in SPEC.md: bounded attempts, injected sleep callable, delay list whose last entry is reused, immediate propagation of exceptions outside the exceptions tuple, RetryExhausted with the attempt count in its message and the last error as __cause__. Standard library only; do not edit tests/test_retry.py.",
+      "fixture_dir": "benchmark/fixtures/retry-helper-skeleton",
+      "setup": "",
+      "verification": "python3 -m pytest -q -p no:cacheprovider tests/test_retry.py",
+      "seed_must_fail": true,
+      "max_seconds": 600,
+      "rubric": [
+        "5: SPEC implemented exactly (attempts validation, delay reuse, __cause__ chaining, no sleep on success), tests pass untouched.",
+        "4: behaviour correct but edge cases such as attempts=1 or attempts<1 handled loosely.",
+        "3: happy path works, RetryExhausted semantics or delay reuse wrong.",
+        "2: only some tests pass and real sleeps are introduced.",
+        "1: NotImplementedError left, or the tests were edited."
+      ]
+    },
+    {
+      "id": "markdown-toc-feature",
+      "category": "feature",
+      "difficulty": "medium",
+      "prompt": "Implement slugify and build_toc in app/toc.py following SPEC.md: GitHub-style anchors (lower-case, strip punctuation other than space/hyphen, spaces to hyphens), ATX headings with 1-6 hashes and at most three leading spaces, headings inside ``` or ~~~ fenced blocks ignored, duplicate anchors suffixed -1, -2. Standard library only; tests/test_toc.py is the contract.",
+      "fixture_dir": "benchmark/fixtures/markdown-toc-feature",
+      "setup": "",
+      "verification": "python3 -m pytest -q -p no:cacheprovider tests/test_toc.py",
+      "seed_must_fail": true,
+      "max_seconds": 600,
+      "rubric": [
+        "5: both functions implemented per spec, fence tracking correct, dedupe suffixes correct, tests pass untouched.",
+        "4: correct output but the fence rule or the anchor dedupe is implemented fragilely.",
+        "3: anchors right but headings/levels mis-parsed (or vice versa).",
+        "2: only the slugify tests pass.",
+        "1: stub left in place or the tests were edited."
+      ]
+    },
+    {
+      "id": "split-legacy-report",
+      "category": "refactor_debug",
+      "difficulty": "hard",
+      "prompt": "Refactor app/legacy_report.py into the package layout demanded by README.md: app/report/model.py (Line, Report, line_net, summarize), app/report/render.py (render_report importing from .model) and app/report/__init__.py re-exporting all five names. While splitting, fix the ZeroDivisionError that summarize raises on a report with no lines (average must be 0.0) and delete the moved code from app/legacy_report.py so it no longer defines render_report. Behaviour of the public API is unchanged; tests/test_report.py must not be edited.",
+      "fixture_dir": "benchmark/fixtures/split-legacy-report",
+      "setup": "",
+      "verification": "python3 -m pytest -q -p no:cacheprovider tests/test_report.py && test -f app/report/model.py && test -f app/report/render.py && grep -Eq \"from (\\.model|app\\.report\\.model) import\" app/report/render.py && ! grep -q \"def render_report\" app/legacy_report.py",
+      "seed_must_fail": true,
+      "max_seconds": 900,
+      "rubric": [
+        "5: clean model/render split, no import cycle, empty-report bug fixed, monolith no longer defines render_report, tests pass.",
+        "4: split and bug fix correct but the legacy file still carries dead duplicated logic.",
+        "3: package created but rendering still duplicated in two places, or one test fails.",
+        "2: files created but the public API is incomplete (import errors).",
+        "1: no split performed; only the ZeroDivisionError patched, or tests edited."
+      ]
+    },
+    {
+      "id": "dedupe-discount-logic",
+      "category": "refactor_debug",
+      "difficulty": "medium",
+      "prompt": "app/pricing.py has a stale copy-paste of the tier logic: bulk_quote inlines its own ladder, lost the MAX_DISCOUNT_PCT cap and gives the top tier 25% instead of 15%. Extract one shared helper named _apply_tier(qty, unit_price) that both line_total and bulk_quote call, delete the inlined ladder from bulk_quote so no tier table is duplicated, and keep the rounding behaviour. tests/test_pricing.py defines the required behaviour and must not be edited.",
+      "fixture_dir": "benchmark/fixtures/dedupe-discount-logic",
+      "setup": "",
+      "verification": "python3 -m pytest -q -p no:cacheprovider tests/test_pricing.py && grep -q \"def _apply_tier\" app/pricing.py && test \"$(grep -c '_apply_tier' app/pricing.py)\" -ge 3 && ! grep -q \"elif qty >= 50\" app/pricing.py",
+      "seed_must_fail": true,
+      "max_seconds": 600,
+      "rubric": [
+        "5: single _apply_tier helper is the only tier path, cap respected, ladder deleted, tests pass untouched.",
+        "4: helper extracted and tests pass but a redundant tier check remains in a public function.",
+        "3: helper added yet bulk_quote still disagrees with line_total in some case.",
+        "2: duplication removed but the discount bug remains (or the reverse).",
+        "1: no refactor, or the tests were edited to pass."
+      ]
+    },
+    {
+      "id": "inventory-qa",
+      "category": "codebase_qa",
+      "difficulty": "easy",
+      "prompt": "Read-only audit. Read QUESTION.md, pkg/__init__.py, pkg/core.py and pkg/util.py, then write findings.txt in the sandbox root with exactly the three lines QUESTION.md specifies: dead_code (the pkg/util.py function no other file references), util_functions (count of top-level functions in pkg/util.py) and public_api (the __all__ names of pkg/__init__.py, sorted, comma-separated, no spaces). Do not modify anything under pkg/.",
+      "fixture_dir": "benchmark/fixtures/inventory-qa",
+      "setup": "",
+      "verification": "test -f findings.txt && grep -qx \"dead_code: titleize\" findings.txt && grep -qx \"util_functions: 4\" findings.txt && grep -qx \"public_api: format_size,humanize_bytes,make_slug,pipeline\" findings.txt",
+      "seed_must_fail": true,
+      "max_seconds": 300,
+      "rubric": [
+        "5: findings.txt has exactly the three required lines, all values correct and in the requested format.",
+        "4: values correct but one formatting slip (extra blank line, spaces after commas).",
+        "3: two of the three answers correct.",
+        "2: only the trivially visible answer (public_api) correct.",
+        "1: findings.txt missing, empty, or the package was edited instead of audited."
+      ]
+    },
+    {
+      "id": "log-triage",
+      "category": "codebase_qa",
+      "difficulty": "medium",
+      "prompt": "Read-only root-cause analysis. Read QUESTION.md, logs/service.txt, notes/context.md and app/worker.py, then write findings.txt in the sandbox root with exactly the four lines QUESTION.md specifies: root_cause (one of db-pool-exhausted, api-timeout, disk-full), error_count (lines whose level is ERROR), first_warning_component (component of the earliest WARN or ERROR line) and last_error_line (1-based line number of the last ERROR line). Do not modify the log, the notes or the code.",
+      "fixture_dir": "benchmark/fixtures/log-triage",
+      "setup": "python3 -c \"import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)\"",
+      "verification": "test -f findings.txt && grep -qx \"root_cause: db-pool-exhausted\" findings.txt && grep -qx \"error_count: 5\" findings.txt && grep -qx \"first_warning_component: db\" findings.txt && grep -qx \"last_error_line: 10\" findings.txt",
+      "seed_must_fail": true,
+      "max_seconds": 420,
+      "rubric": [
+        "5: findings.txt has the four lines exactly, root cause correctly attributed to the drained connection pool rather than the api symptoms.",
+        "4: root cause right, one counted field off by one.",
+        "3: two fields correct, root cause guessed as api-timeout.",
+        "2: only the mechanical counts correct.",
+        "1: findings.txt missing or the answers were guessed without reading the log."
+      ]
+    }
+  ]
+}
