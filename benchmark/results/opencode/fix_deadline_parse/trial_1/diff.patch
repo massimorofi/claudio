@@ -1,0 +1,13 @@
+diff --git a/app/timeutil.py b/app/timeutil.py
+index 14104b1..2601b6a 100644
+--- a/app/timeutil.py
++++ b/app/timeutil.py
+@@ -2,4 +2,7 @@ from datetime import datetime
+ 
+ 
+ def parse_deadline(value):
+-    return datetime.strptime(value, '%Y-%m-%d %H:%M')
++    text = value.strip().replace("T", " ")
++    if text.endswith('Z'):
++        text = text[:-1]
++    return datetime.strptime(text, '%Y-%m-%d %H:%M')

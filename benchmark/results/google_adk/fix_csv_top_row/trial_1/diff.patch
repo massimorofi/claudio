@@ -1,0 +1,10 @@
+diff --git a/app/report.py b/app/report.py
+index 1e0cf60..dabc9b8 100644
+--- a/app/report.py
++++ b/app/report.py
+@@ -6,4 +6,4 @@ def top_seller(path):
+     with open(path, encoding="utf-8") as fh:
+         rows = list(csv.DictReader(fh))
+     counts = Counter(r['seller'] for r in rows)
+-    return counts.most_common()[-1][0]
++    return counts.most_common(1)[0][0]

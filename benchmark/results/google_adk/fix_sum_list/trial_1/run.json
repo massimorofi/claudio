@@ -1,0 +1,35 @@
+{
+  "backend": "google_adk",
+  "changed_files": [
+    "app/calc.py"
+  ],
+  "diff_lines": 8,
+  "duration_s": 0.547,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 0,
+    "retries": 0,
+    "timeouts": 0,
+    "tool_errors": 0
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "inline_seed",
+  "session_events": 9,
+  "task_id": "fix_sum_list",
+  "timed_out": false,
+  "timeout_s": 30.0,
+  "tokens": {
+    "cache_read": 765,
+    "cache_write": 0,
+    "input": 1611,
+    "output": 191,
+    "total": 2567
+  },
+  "trial": 1,
+  "verification_passed": true,
+  "verify_command": "python3 -m unittest discover -s tests -t . -q",
+  "verify_exit_code": 0
+}

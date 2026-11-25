@@ -1,0 +1,35 @@
+{
+  "backend": "opencode",
+  "changed_files": [
+    "app/timeutil.py"
+  ],
+  "diff_lines": 13,
+  "duration_s": 0.578,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 0,
+    "retries": 1,
+    "timeouts": 0,
+    "tool_errors": 1
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "inline_seed",
+  "session_events": 13,
+  "task_id": "fix_deadline_parse",
+  "timed_out": false,
+  "timeout_s": 30.0,
+  "tokens": {
+    "cache_read": 1065,
+    "cache_write": 0,
+    "input": 2539,
+    "output": 932,
+    "total": 4536
+  },
+  "trial": 1,
+  "verification_passed": true,
+  "verify_command": "python3 -m unittest discover -s tests -t . -q",
+  "verify_exit_code": 0
+}

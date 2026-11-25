@@ -1,0 +1,14 @@
+diff --git a/app/parse.py b/app/parse.py
+index fc38475..cdb808b 100644
+--- a/app/parse.py
++++ b/app/parse.py
+@@ -1,2 +1,8 @@
+ def parse_ints(items):
+-    return [int(i) for i in items]
++    out = []
++    for item in items:
++        try:
++            out.append(int(item))
++        except (TypeError, ValueError):
++            continue
++    return out

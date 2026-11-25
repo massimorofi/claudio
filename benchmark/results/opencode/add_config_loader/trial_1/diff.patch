@@ -1,0 +1,11 @@
+diff --git a/app/settings.py b/app/settings.py
+index 6772b03..d97c389 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -2,4 +2,5 @@ import json
+ 
+ 
+ def load_config(path):
+-    raise NotImplementedError
++    with open(path, encoding="utf-8") as fh:
++        return json.load(fh)

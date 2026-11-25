@@ -1,0 +1,1 @@
+app/settings.py is missing load_config(); add it so the tests pass.

@@ -1,0 +1,14 @@
+diff --git a/app/retry.py b/app/retry.py
+index ed22e9d..fc638cc 100644
+--- a/app/retry.py
++++ b/app/retry.py
+@@ -1,2 +1,8 @@
+ def retry_call(fn, attempts=3):
+-    return fn()
++    last = None
++    for _ in range(max(1, attempts)):
++        try:
++            return fn()
++        except Exception as exc:  # noqa: BLE001
++            last = exc
++    raise last
