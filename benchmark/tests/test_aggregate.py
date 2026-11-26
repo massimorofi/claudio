@@ -363,3 +363,81 @@ def test_committed_results_tree_satisfies_the_contract(tmp_path: Path) -> None:
         assert {"input", "output", "total"} <= set(block["tokens"])
     assert set(summary["categories"]) >= set(A.CATEGORY_ORDER)
     assert set(summary["winners"]) == {"tokens", "quality", "errors", "intelligence", "coding"}
+
+
+# --------------------------------------------------------------------------
+# schema contract (mirrors the acceptance criteria for summary.json)
+# --------------------------------------------------------------------------
+BACKEND_KEYS = {"available", "engine_mode", "n_runs", "pass_rate",
+                "tokens", "errors", "wall_clock", "rubric"}
+ERROR_KEYS = {"command_errors", "tool_errors", "retries", "timeouts",
+              "total", "mean_per_run"}
+MEAN_MEDIAN = {"mean", "median"}
+CATEGORY_KEYS = {"n_runs", "pass_rate", "tokens_total_median", "rubric_mean"}
+WINNER_KEYS = {"tokens", "quality", "errors", "intelligence", "coding"}
+
+
+def assert_backend_shape(block: dict) -> None:
+    assert set(block) == BACKEND_KEYS
+    assert isinstance(block["available"], bool)
+    assert isinstance(block["n_runs"], int) and block["n_runs"] >= 1
+    assert isinstance(block["pass_rate"], float)
+    assert 0.0 <= block["pass_rate"] <= 1.0
+    assert set(block["tokens"]) == {"input", "output", "total"}
+    for stat in block["tokens"].values():
+        assert set(stat) == MEAN_MEDIAN
+    assert set(block["errors"]) == ERROR_KEYS
+    assert set(block["wall_clock"]) == MEAN_MEDIAN
+    assert set(block["rubric"]) == {"quality", "intelligence", "coding"}
+    for stat in block["rubric"].values():
+        assert set(stat) == MEAN_MEDIAN
+
+
+def test_summary_top_level_schema(summary: dict) -> None:
+    assert set(summary) == {"generated_at", "n_runs", "backends", "categories", "winners"}
+    assert summary["generated_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_backend_blocks_match_the_schema(summary: dict) -> None:
+    for block in summary["backends"].values():
+        assert_backend_shape(block)
+
+
+def test_category_blocks_match_the_schema(summary: dict) -> None:
+    assert set(summary["categories"]) >= set(A.CATEGORY_ORDER)
+    for per_backend in summary["categories"].values():
+        for entry in per_backend.values():
+            assert set(entry) == CATEGORY_KEYS
+            assert 0.0 <= entry["pass_rate"] <= 1.0
+
+
+def test_winners_block_matches_the_schema(summary: dict) -> None:
+    assert set(summary["winners"]) == WINNER_KEYS
+
+
+def test_category_map_file_is_honoured(tmp_path: Path) -> None:
+    add_run(tmp_path, "alpha", "mystery_task", 1, total=100, rubric=(3, 3, 3))
+    mapping = tmp_path / "categories.json"
+    write_json(mapping, {"mystery_task": "codebase_qa"})
+    out = tmp_path / "summary.json"
+    assert A.main(["--results", str(tmp_path), "--out", str(out),
+                   "--category-map", str(mapping), "--quiet"]) == 0
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    assert summary["categories"]["codebase_qa"]["alpha"]["n_runs"] == 1
+    assert summary["categories"]["bug_fix"] == {}
+
+
+# --------------------------------------------------------------------------
+# rubric sampling
+# --------------------------------------------------------------------------
+def test_unjudged_runs_do_not_dilute_rubric_means(tmp_path: Path) -> None:
+    """A run without ``judge.json`` counts as a run but contributes no rubric sample."""
+    add_run(tmp_path, "mix", "fix_a", 1, total=100, rubric=(4, 4, 4))
+    add_run(tmp_path, "mix", "fix_a", 2, total=200)          # no judge.json
+    summary = A.build_summary(A.discover_runs(tmp_path, A.load_capability(tmp_path)))
+    block = summary["backends"]["mix"]
+    assert block["n_runs"] == 2
+    assert block["tokens"]["total"] == {"mean": 150.0, "median": 150.0}
+    # mean over the judged run only, not (4 + 0) / 2
+    assert block["rubric"]["quality"] == {"mean": 4.0, "median": 4.0}
+    assert summary["categories"]["bug_fix"]["mix"]["rubric_mean"] == 4.0

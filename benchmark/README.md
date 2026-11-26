@@ -69,6 +69,15 @@ runs maps to `{}`. In the committed tree the stub task set covers `bug_fix`
 (6 tasks × 3 backends) and `feature` (1 task × 3 backends); `refactor_debug` and
 `codebase_qa` are reported empty until such tasks are run.
 
+## Rubric sampling
+
+`rubric.{quality,intelligence,coding}` (and `categories[...]["rubric_mean"]`)
+average **judged runs only**. A run without a `judge.json` still counts towards
+`n_runs`, `pass_rate`, `tokens`, `errors` and `wall_clock`, but contributes no
+rubric sample, so an unjudged run cannot pull a backend's quality down towards
+zero. A backend with no judged run at all reports `0.0` and is ineligible to win
+that dimension.
+
 ## Running
 
 ```bash

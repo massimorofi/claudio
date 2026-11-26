@@ -28,7 +28,10 @@ wins over the harness-wide one.
     duration_s                    (aliases: wall_clock_seconds, wall_clock)
 
 ``judge.json``: ``scores.{quality,intelligence,coding}`` (``rubric.{...}`` and a
-flat ``{quality: ...}`` are accepted too).
+flat ``{quality: ...}`` are accepted too). A run without a ``judge.json`` (or
+without any of the three dimensions) still counts towards ``n_runs``,
+``pass_rate``, tokens, errors and wall-clock, but contributes **no sample** to
+the rubric means/medians, so unjudged runs cannot drag a rubric down.
 
 Categories
 ----------
