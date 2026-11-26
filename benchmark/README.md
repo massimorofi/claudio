@@ -152,5 +152,6 @@ The judge tests cover evidence packing and anonymization (no backend name ever
 leaks, the diff respects its budget), determinism (same evidence in, same scores
 out, and a whole re-judge reproduces every `judge.json`), anonymization stability
 across calls and input orders, score bounds (always ints 1-5 across six run
-shapes), the verification anchor, the auditable `judge_key.json`, and both judge
-modes including the fallback when `BENCHMARK_JUDGE_CMD` is broken. No network.
+shapes), that the heuristic actually discriminates clean from noisy runs, the
+verification anchor, the auditable `judge_key.json`, and both judge modes
+including the fallback when `BENCHMARK_JUDGE_CMD` is broken. No network.

@@ -358,9 +358,9 @@ def heuristic_scores(evidence: str) -> dict:
     (verification pass/fail, error and retry counts, diff size, scope discipline
     i.e. stray non-source paths and file count, TODO/hack markers), with one
     extra point off when three or more blemish categories stack. A run that
-    verified never falls below 3 unless the work is left as TODO/placeholder
-    (2), and :func:`_anchor` then caps every axis for a failed verification, so
-    the same evidence always produces the same integers.
+    verified stays in the 3-5 band unless the work is hacky or several blemishes
+    stack (2), and :func:`_anchor` then caps every axis at 1-2 for a failed
+    verification -- so the same evidence always produces the same integers.
     """
     f = parse_evidence(evidence)
     errors = f["errors"]
