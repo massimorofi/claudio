@@ -97,7 +97,7 @@ Rendered for the committed tree:
 
 | backend | mode | avail | n | pass rate | tokens total mean/median | errors total/mean | wall clock s mean/median | rubric Q/I/C mean |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| google_adk | stub | no | 7 | 100.0% | 3165.43 / 2951 | 4 / 0.57 | 0.16 / 0.16 | 2.71 / 2.71 / 3 |
+| google_adk | stub | no | 7 | 100.0% | 3165.43 / 2951 | 4 / 0.57 | 0.160 / 0.160 | 2.71 / 2.71 / 3 |
 | claude_code | stub | no | 7 | 100.0% | 3755.43 / 3983 | 4 / 0.57 | 0.149 / 0.154 | 2.71 / 2.71 / 3 |
 | opencode | stub | no | 7 | 100.0% | 3551.29 / 3773 | 4 / 0.57 | 0.159 / 0.157 | 2.71 / 2.71 / 3 |
 
@@ -162,7 +162,9 @@ PYTHONPATH=benchmark python3 -m pytest benchmark/tests/test_aggregate.py -q
 
 The tests build a tiny synthetic tree in `tmp_path` with hand-computed
 means/medians (chosen so median ≠ mean) and assert the full `backends`,
-`categories` and `winners` blocks, the availability filter and alphabetical
-tie-breaking, fallbacks for missing `judge.json` / `capability.json` /
-`tokens.total`, the markdown table, the CLI exit codes, and — as an
-end-to-end check — that the committed tree satisfies the summary contract.
+`categories` and `winners` blocks **key-for-key against the schema above**, the
+availability filter and alphabetical tie-breaking, fallbacks for missing
+`judge.json` / `capability.json` / `tokens.total`, that unjudged runs are
+excluded from rubric means, `--category-map`, the markdown table, the CLI exit
+codes, and — as an end-to-end check — that the committed tree satisfies the
+summary contract.
