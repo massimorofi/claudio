@@ -1,0 +1,195 @@
+{
+  "generated_at": "2026-11-26T02:38:06Z",
+  "n_runs": 21,
+  "backends": {
+    "google_adk": {
+      "available": false,
+      "engine_mode": "stub",
+      "n_runs": 7,
+      "pass_rate": 1.0,
+      "tokens": {
+        "input": {
+          "mean": 1906.8571,
+          "median": 1790.0
+        },
+        "output": {
+          "mean": 604.7143,
+          "median": 560.0
+        },
+        "total": {
+          "mean": 3165.4286,
+          "median": 2951.0
+        }
+      },
+      "errors": {
+        "command_errors": 1,
+        "tool_errors": 1,
+        "retries": 2,
+        "timeouts": 0,
+        "total": 4,
+        "mean_per_run": 0.5714
+      },
+      "wall_clock": {
+        "mean": 0.1601,
+        "median": 0.16
+      },
+      "rubric": {
+        "quality": {
+          "mean": 2.7143,
+          "median": 3.0
+        },
+        "intelligence": {
+          "mean": 2.7143,
+          "median": 3.0
+        },
+        "coding": {
+          "mean": 3.0,
+          "median": 3.0
+        }
+      }
+    },
+    "claude_code": {
+      "available": false,
+      "engine_mode": "stub",
+      "n_runs": 7,
+      "pass_rate": 1.0,
+      "tokens": {
+        "input": {
+          "mean": 2281.4286,
+          "median": 2381.0
+        },
+        "output": {
+          "mean": 698.2857,
+          "median": 820.0
+        },
+        "total": {
+          "mean": 3755.4286,
+          "median": 3983.0
+        }
+      },
+      "errors": {
+        "command_errors": 1,
+        "tool_errors": 1,
+        "retries": 2,
+        "timeouts": 0,
+        "total": 4,
+        "mean_per_run": 0.5714
+      },
+      "wall_clock": {
+        "mean": 0.1486,
+        "median": 0.154
+      },
+      "rubric": {
+        "quality": {
+          "mean": 2.7143,
+          "median": 3.0
+        },
+        "intelligence": {
+          "mean": 2.7143,
+          "median": 3.0
+        },
+        "coding": {
+          "mean": 3.0,
+          "median": 3.0
+        }
+      }
+    },
+    "opencode": {
+      "available": false,
+      "engine_mode": "stub",
+      "n_runs": 7,
+      "pass_rate": 1.0,
+      "tokens": {
+        "input": {
+          "mean": 2224.8571,
+          "median": 2539.0
+        },
+        "output": {
+          "mean": 702.2857,
+          "median": 804.0
+        },
+        "total": {
+          "mean": 3551.2857,
+          "median": 3773.0
+        }
+      },
+      "errors": {
+        "command_errors": 1,
+        "tool_errors": 1,
+        "retries": 2,
+        "timeouts": 0,
+        "total": 4,
+        "mean_per_run": 0.5714
+      },
+      "wall_clock": {
+        "mean": 0.1591,
+        "median": 0.157
+      },
+      "rubric": {
+        "quality": {
+          "mean": 2.7143,
+          "median": 3.0
+        },
+        "intelligence": {
+          "mean": 2.7143,
+          "median": 3.0
+        },
+        "coding": {
+          "mean": 3.0,
+          "median": 3.0
+        }
+      }
+    }
+  },
+  "categories": {
+    "bug_fix": {
+      "google_adk": {
+        "n_runs": 6,
+        "pass_rate": 1.0,
+        "tokens_total_median": 3101.5,
+        "rubric_mean": 2.7778
+      },
+      "claude_code": {
+        "n_runs": 6,
+        "pass_rate": 1.0,
+        "tokens_total_median": 4184.0,
+        "rubric_mean": 2.7778
+      },
+      "opencode": {
+        "n_runs": 6,
+        "pass_rate": 1.0,
+        "tokens_total_median": 3987.5,
+        "rubric_mean": 2.7778
+      }
+    },
+    "feature": {
+      "google_adk": {
+        "n_runs": 1,
+        "pass_rate": 1.0,
+        "tokens_total_median": 2439.0,
+        "rubric_mean": 3.0
+      },
+      "claude_code": {
+        "n_runs": 1,
+        "pass_rate": 1.0,
+        "tokens_total_median": 3118.0,
+        "rubric_mean": 3.0
+      },
+      "opencode": {
+        "n_runs": 1,
+        "pass_rate": 1.0,
+        "tokens_total_median": 2421.0,
+        "rubric_mean": 3.0
+      }
+    },
+    "refactor_debug": {},
+    "codebase_qa": {}
+  },
+  "winners": {
+    "tokens": "google_adk",
+    "quality": "claude_code",
+    "errors": "claude_code",
+    "intelligence": "claude_code",
+    "coding": "claude_code"
+  }
+}
