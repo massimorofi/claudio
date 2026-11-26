@@ -93,13 +93,22 @@ when no `run.json` exists under `--results`. `--out` defaults to
 Rendered for the committed tree:
 
 ```markdown
-## Benchmark summary - 21 runs (generated 2026-11-26T01:35:50Z)
+## Benchmark summary - 21 runs (generated 2026-11-26T02:24:21Z)
 
 | backend | mode | avail | n | pass rate | tokens total mean/median | errors total/mean | wall clock s mean/median | rubric Q/I/C mean |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | google_adk | stub | no | 7 | 100.0% | 3165.43 / 2951 | 4 / 0.57 | 0.160 / 0.160 | 2.71 / 2.71 / 3 |
 | claude_code | stub | no | 7 | 100.0% | 3755.43 / 3983 | 4 / 0.57 | 0.149 / 0.154 | 2.71 / 2.71 / 3 |
 | opencode | stub | no | 7 | 100.0% | 3551.29 / 3773 | 4 / 0.57 | 0.159 / 0.157 | 2.71 / 2.71 / 3 |
+
+### By category - n runs, pass rate, tokens total median, rubric mean
+
+| category | google_adk | claude_code | opencode |
+| --- | --- | --- | --- |
+| bug_fix | 6 / 100.0% / 3101.50 / 2.78 | 6 / 100.0% / 4184 / 2.78 | 6 / 100.0% / 3987.50 / 2.78 |
+| feature | 1 / 100.0% / 2439 / 3 | 1 / 100.0% / 3118 / 3 | 1 / 100.0% / 2421 / 3 |
+| refactor_debug | - | - | - |
+| codebase_qa | - | - | - |
 
 **Winners** tokens: `google_adk` - quality: `claude_code` - errors: `claude_code` - intelligence: `claude_code` - coding: `claude_code`
 ```
@@ -108,7 +117,7 @@ Rendered for the committed tree:
 
 ```jsonc
 {
-  "generated_at": "2026-11-26T01:35:50Z",
+  "generated_at": "2026-11-26T02:24:21Z",
   "n_runs": 21,
   "backends": {
     "google_adk": {
@@ -129,10 +138,16 @@ Rendered for the committed tree:
   },
   "categories": {
     "bug_fix": {
-      "google_adk": {"n_runs": 6, "pass_rate": 1.0,
-                     "tokens_total_median": 3101.5, "rubric_mean": 2.7778}
+      "google_adk":  {"n_runs": 6, "pass_rate": 1.0, "tokens_total_median": 3101.5, "rubric_mean": 2.7778},
+      "claude_code": {"n_runs": 6, "pass_rate": 1.0, "tokens_total_median": 4184.0, "rubric_mean": 2.7778},
+      "opencode":    {"n_runs": 6, "pass_rate": 1.0, "tokens_total_median": 3987.5, "rubric_mean": 2.7778}
     },
-    "feature": { }, "refactor_debug": { }, "codebase_qa": { }
+    "feature": {
+      "google_adk":  {"n_runs": 1, "pass_rate": 1.0, "tokens_total_median": 2439.0, "rubric_mean": 3.0},
+      "claude_code": {"n_runs": 1, "pass_rate": 1.0, "tokens_total_median": 3118.0, "rubric_mean": 3.0},
+      "opencode":    {"n_runs": 1, "pass_rate": 1.0, "tokens_total_median": 2421.0, "rubric_mean": 3.0}
+    },
+    "refactor_debug": {}, "codebase_qa": {}
   },
   "winners": {"tokens": "google_adk", "quality": "claude_code", "errors": "claude_code",
               "intelligence": "claude_code", "coding": "claude_code"}
