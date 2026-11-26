@@ -406,6 +406,24 @@ def _clamp(value: int) -> int:
     return max(1, min(5, int(value)))
 
 
+def scope_penalty(n_stray: int, n_files: int = 0) -> int:
+    """Docking for poor scope discipline, matching the rubric anchors.
+
+    The rubric reserves 5 for "only relevant files touched", 4 for "one blemish
+    (a stray artifact ...)" and 3 for "several out-of-scope files", so the
+    penalty scales with the number of non-source artifacts and only mildly with
+    how many files were touched overall.
+    """
+    penalty = 0
+    if n_stray >= 3:
+        penalty += 2
+    elif n_stray >= 1:
+        penalty += 1
+    if n_files > 8:
+        penalty += 1
+    return penalty
+
+
 def anchor_to_verification(scores: dict[str, int], facts: dict[str, Any]) -> dict[str, int]:
     """Cap scores when verification failed -- broken code cannot be scored as work."""
     if not facts["verification_passed"]:
@@ -450,6 +468,12 @@ def heuristic_scores(evidence: str) -> dict[str, Any]:
         if markers:
             coding -= 1
             notes.append("{0} TODO/hack marker(s)".format(markers))
+        sp = scope_penalty(f["suspicious_paths"])
+        if sp:
+            coding -= sp
+            notes.append(
+                "{0} out-of-scope artifact(s) in the change set".format(f["suspicious_paths"])
+            )
         if f["diff_lines"] > 400:
             coding -= 1
             notes.append("diff of {0} lines is oversized".format(f["diff_lines"]))
@@ -468,15 +492,16 @@ def heuristic_scores(evidence: str) -> dict[str, Any]:
     if f["timed_out"]:
         quality -= 1
         qnotes.append("run timed out")
-    if f["suspicious_paths"]:
-        quality -= 1
-        qnotes.append("{0} non-source artifact(s) committed".format(f["suspicious_paths"]))
+    sp = scope_penalty(f["suspicious_paths"], f["files_changed"])
+    if sp:
+        quality -= sp
+        if f["suspicious_paths"]:
+            qnotes.append("{0} non-source artifact(s) committed".format(f["suspicious_paths"]))
+        if f["files_changed"] > 8:
+            qnotes.append("{0} files touched".format(f["files_changed"]))
     if markers:
         quality -= 1
         qnotes.append("{0} TODO/hack marker(s)".format(markers))
-    if f["files_changed"] > 8:
-        quality -= 1
-        qnotes.append("{0} files touched".format(f["files_changed"]))
     if not passed:
         qnotes.insert(0, "verification failed")
     elif not qnotes:
@@ -496,9 +521,17 @@ def heuristic_scores(evidence: str) -> dict[str, Any]:
     if f["timed_out"]:
         intelligence -= 1
         inotes.append("timeout")
-    if f["suspicious_paths"]:
-        intelligence -= 1
-        inotes.append("scope discipline: {0} stray path(s)".format(f["suspicious_paths"]))
+    sp = scope_penalty(f["suspicious_paths"], f["files_changed"])
+    if sp:
+        intelligence -= sp
+        if f["suspicious_paths"]:
+            inotes.append(
+                "scope discipline: {0} stray path(s)".format(f["suspicious_paths"])
+            )
+        else:
+            inotes.append(
+                "scope discipline: {0} files touched".format(f["files_changed"])
+            )
     if markers:
         intelligence -= 1
         inotes.append("left {0} marker(s) behind".format(markers))

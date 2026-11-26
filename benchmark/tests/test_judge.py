@@ -295,6 +295,56 @@ def test_passing_run_scores_higher_than_failing_one(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# scope discipline
+# --------------------------------------------------------------------------- #
+
+
+def test_scope_penalty_is_monotonic():
+    assert J.scope_penalty(0) == 0
+    assert J.scope_penalty(1) == 1
+    assert J.scope_penalty(2) == 1
+    assert J.scope_penalty(3) == 2
+    assert J.scope_penalty(0, n_files=9) == 1
+    assert J.scope_penalty(3, n_files=9) == 3
+
+
+def test_stray_artifacts_score_below_a_clean_run(tmp_path):
+    """Scope discipline is a real signal: committed junk must cost points."""
+    clean = J.heuristic_scores(
+        J.build_evidence(make_run(tmp_path, "claude_code", "fix_slugify"), "Engine A")
+    )
+    sloppy = J.heuristic_scores(
+        J.build_evidence(
+            make_run(
+                tmp_path,
+                "google_adk",
+                "fix_slugify",
+                changed_files=[
+                    "app/text.py",
+                    "app/__pycache__/text.cpython-312.pyc",
+                    "tests/__pycache__/test_text.cpython-312.pyc",
+                    "leftover.pyc",
+                ],
+            ),
+            "Engine A",
+        )
+    )
+    for axis in AXES:
+        assert sloppy["scores"][axis] <= clean["scores"][axis]
+    assert sloppy["scores"]["coding"] < clean["scores"]["coding"]
+    assert "scope discipline" in sloppy["justifications"]["intelligence"]
+
+
+def test_scope_penalty_never_breaks_bounds(tmp_path):
+    run_dir = make_run(
+        tmp_path,
+        changed_files=["a.pyc"] * 5 + ["b.log"] * 5 + ["c.py"],
+    )
+    record = J.judge(run_dir, results_root=tmp_path, mapping={"claude_code": "A"}, write=False)
+    assert all(1 <= v <= 5 for v in record["scores"].values())
+
+
+# --------------------------------------------------------------------------- #
 # rubric
 # --------------------------------------------------------------------------- #
 

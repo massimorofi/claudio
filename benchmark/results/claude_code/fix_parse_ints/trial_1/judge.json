@@ -2,14 +2,14 @@
   "backend_anon": "A",
   "evidence_sha": "f7481e881c0b934b228efef39fa0af6e2e2bd37820eee138d71dac2e7afc45c4",
   "justifications": {
-    "coding": "Verification passed (exit 0) so the code demonstrably works; no defects visible.",
-    "intelligence": "Intelligence 4: scope discipline: 4 stray path(s).",
-    "quality": "Quality 4: 4 non-source artifact(s) committed."
+    "coding": "Verification passed (exit 0) so the code demonstrably works; docked for 4 out-of-scope artifact(s) in the change set.",
+    "intelligence": "Intelligence 3: scope discipline: 4 stray path(s).",
+    "quality": "Quality 3: 4 non-source artifact(s) committed."
   },
   "mode": "heuristic",
   "scores": {
-    "coding": 5,
-    "intelligence": 4,
-    "quality": 4
+    "coding": 3,
+    "intelligence": 3,
+    "quality": 3
   }
 }

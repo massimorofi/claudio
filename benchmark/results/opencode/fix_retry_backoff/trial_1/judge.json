@@ -2,14 +2,14 @@
   "backend_anon": "C",
   "evidence_sha": "18db3e599b26ee66db000f36f5b0ff8886efc0f5a95269b99d6c574ee7e60560",
   "justifications": {
-    "coding": "Verification passed (exit 0) so the code demonstrably works; docked for 1 tool/command error(s).",
-    "intelligence": "Intelligence 2: 1 tool/command error(s) recovered from, 1 retried action(s), scope discipline: 4 stray path(s).",
-    "quality": "Quality 4: 4 non-source artifact(s) committed."
+    "coding": "Verification passed (exit 0) so the code demonstrably works; docked for 1 tool/command error(s), 4 out-of-scope artifact(s) in the change set.",
+    "intelligence": "Intelligence 1: 1 tool/command error(s) recovered from, 1 retried action(s), scope discipline: 4 stray path(s).",
+    "quality": "Quality 3: 4 non-source artifact(s) committed."
   },
   "mode": "heuristic",
   "scores": {
-    "coding": 4,
-    "intelligence": 2,
-    "quality": 4
+    "coding": 2,
+    "intelligence": 1,
+    "quality": 3
   }
 }
