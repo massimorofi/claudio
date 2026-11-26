@@ -8,7 +8,7 @@ description: Summary of all skills for proving software actually works — end-t
   shipping.
 license: mixed — see Credits
 metadata:
-  last_reviewed: '2026-10-25'
+  last_reviewed: '2026-11-26'
   sources:
   - owner: built-in
     name: verify
@@ -82,6 +82,17 @@ until it has been exercised, not merely type-checked.**
 8. **Fix the test or the code, explicitly.** A test that is wrong is a
    defect. Say which one you are changing and why; never delete a test to
    get green.
+9. **Minimal-environment tests still need an interpreter on PATH.**
+   `env -i PATH=/nonexistent python3 …` fails with "No such file or
+   directory" because `env -i` clears everything and the supplied PATH has
+   no interpreter. Create a temp dir holding a symlink to the real
+   `python3` and run `env -i PATH="$D" HOME=/tmp python3 …`.
+10. **Derive expected values from the implementation, don't hand-estimate
+    them.** A telemetry test that asserted a rounded cache ratio
+    (650/1200 = 0.541666…) failed against the exact value the code
+    computes. Compute the ratio the implementation actually produces and
+    assert with `pytest.approx(value, abs=1e-4)` — or derive the
+    expectation from the same inputs the code uses.
 
 ## When to use this skill
 

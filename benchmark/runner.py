@@ -396,6 +396,12 @@ def seed_sandbox(sandbox: Path, task: Task) -> str:
 def commit_seed(sandbox: Path) -> bool:
     if git(["init", "-q"], sandbox).returncode != 0:
         return False
+    # Repo-local identity so ANY process committing inside the sandbox — the
+    # engine under test included — has a usable user.name/user.email, even
+    # when HOME/global config is unavailable. This lives in .git/config, so
+    # it never shows up in the measured worktree diff.
+    git(["config", "user.name", "claudio-bench"], sandbox)
+    git(["config", "user.email", "claudio-bench@local"], sandbox)
     git(["add", "-A"], sandbox)
     res = git(["commit", "-q", "--allow-empty", "-m", "benchmark seed"], sandbox)
     return res.returncode == 0

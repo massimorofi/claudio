@@ -7,7 +7,7 @@ description: 'Practical coding craft: writing clear, correct, maintainable code;
   Gortex code discovery first for symbols, callers, dependencies and change impact.'
 license: mixed — see Credits
 metadata:
-  last_reviewed: '2026-10-25'
+  last_reviewed: '2026-11-26'
   sources:
   - owner: dokhacgiakhoa
     name: clean-code
@@ -89,6 +89,7 @@ metadata:
 | Deep nesting | Guard clauses |
 | Magic numbers | Named constants |
 | God functions | Split by responsibility |
+| Rewriting a working file for a small change | Patch the exact lines (targeted replacement) |
 
 ---
 
@@ -112,6 +113,12 @@ File to edit: UserService.ts
 
 > 🔴 **Rule:** Edit the file + all dependent files in the SAME task.
 > 🔴 **Never leave broken imports or missing updates.**
+
+> 🔴 **Rule:** When an already-working file needs a small change (e.g. one
+> tuple in a seed generator), patch it surgically — targeted string
+> replacement of the exact lines, then rerun the checks. Never regenerate or
+> rewrite the whole file: full rewrites risk unrelated regressions and are
+> slower to verify than the change itself.
 
 ---
 
