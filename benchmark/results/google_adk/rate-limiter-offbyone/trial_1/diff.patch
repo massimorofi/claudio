@@ -1,0 +1,37 @@
+diff --git a/app/rate_limiter.py b/app/rate_limiter.py
+index 2f28724..1c3d5d6 100644
+--- a/app/rate_limiter.py
++++ b/app/rate_limiter.py
+@@ -34,8 +34,7 @@ class RateLimiter:
+         self._refill()
+         if cost > self.capacity:
+             return False
+-        # BUG (off-by-one): a bucket holding exactly ``cost`` tokens is rejected.
+-        if self.tokens > cost:
++        if self.tokens >= cost:
+             self.tokens -= cost
+             return True
+         return False
+@@ -46,5 +45,4 @@ class RateLimiter:
+         missing = cost - self.tokens
+         if missing <= 0:
+             return 0.0
+-        # BUG: divides by the bucket size instead of the refill rate.
+-        return missing / self.capacity
++        return missing / self.refill_per_sec
+diff --git a/session.jsonl b/session.jsonl
+new file mode 100644
+index 0000000..085896b
+--- /dev/null
++++ b/session.jsonl
+@@ -0,0 +1,10 @@
++{"backend":"google_adk","engine_mode":"stub","model":"claudio-stub-1","session_id":"stub-98d3cfa45f915687","task_id":"rate-limiter-offbyone","trial":1,"type":"init"}
++{"input":{"command":"python3 -m pytest -q -p no:cacheprovider tests/test_rate_limiter.py"},"name":"run_command","type":"tool_call"}
++{"chars":0,"exit_code":1,"is_error":true,"name":"run_command","type":"tool_result"}
++{"attempt":1,"reason":"verification failed on the seed","type":"retry"}
++{"input":{"path":"app/rate_limiter.py"},"name":"edit_file","seq":1,"type":"tool_call"}
++{"chars":31,"is_error":false,"name":"edit_file","seq":2,"type":"tool_result"}
++{"input":{"path":"app/rate_limiter.py"},"name":"edit_file","seq":3,"type":"tool_call"}
++{"chars":44,"is_error":false,"name":"edit_file","seq":4,"type":"tool_result"}
++{"cache_creation_input_tokens":71,"cache_read_input_tokens":1425,"input_tokens":1318,"output_tokens":296,"type":"usage"}
++{"duration_ms":0,"is_error":false,"num_turns":4,"result":"stub solution applied for rate-limiter-offbyone","session_id":"stub-98d3cfa45f915687","subtype":"success","type":"result"}

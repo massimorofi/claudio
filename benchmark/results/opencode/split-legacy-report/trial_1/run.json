@@ -1,0 +1,28 @@
+{
+  "backend": "opencode",
+  "duration_s": 0.502,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 1,
+    "retries": 1,
+    "timeouts": 0,
+    "tool_errors": 1
+  },
+  "exit_status": "ok",
+  "sandbox": "/tmp/claudio-bench-opencode-split-legacy-report-t1-_msjutyv",
+  "schema_keys_ok": true,
+  "session_lines": 14,
+  "task_id": "split-legacy-report",
+  "timed_out": false,
+  "timeout_s": 900.0,
+  "tokens": {
+    "cache_read": 553,
+    "cache_write": 184,
+    "input": 1393,
+    "output": 366,
+    "total": 2496
+  },
+  "trial": 1,
+  "verification_command": "python3 -m pytest -q -p no:cacheprovider tests/test_report.py && test -f app/report/model.py && test -f app/report/render.py && grep -Eq \"from (\\.model|app\\.report\\.model) import\" app/report/render.py && ! grep -q \"def render_report\" app/legacy_report.py",
+  "verification_passed": true
+}

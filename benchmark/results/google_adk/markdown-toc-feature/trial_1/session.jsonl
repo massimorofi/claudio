@@ -1,0 +1,8 @@
+{"backend":"google_adk","engine_mode":"stub","model":"claudio-stub-1","session_id":"stub-2ad5fdb93e90ccdc","task_id":"markdown-toc-feature","trial":1,"type":"init"}
+{"input":{"command":"python3 -m pytest -q -p no:cacheprovider tests/test_toc.py"},"name":"run_command","type":"tool_call"}
+{"chars":0,"exit_code":1,"is_error":true,"name":"run_command","type":"tool_result"}
+{"attempt":1,"reason":"verification failed on the seed","type":"retry"}
+{"input":{"path":"app/toc.py"},"name":"write_file","seq":1,"type":"tool_call"}
+{"chars":1047,"is_error":false,"name":"write_file","seq":2,"type":"tool_result"}
+{"cache_creation_input_tokens":156,"cache_read_input_tokens":1168,"input_tokens":1156,"output_tokens":393,"type":"usage"}
+{"duration_ms":0,"is_error":false,"num_turns":3,"result":"stub solution applied for markdown-toc-feature","session_id":"stub-2ad5fdb93e90ccdc","subtype":"success","type":"result"}

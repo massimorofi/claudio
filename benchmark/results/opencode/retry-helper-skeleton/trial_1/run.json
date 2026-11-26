@@ -1,0 +1,28 @@
+{
+  "backend": "opencode",
+  "duration_s": 0.467,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 1,
+    "retries": 1,
+    "timeouts": 0,
+    "tool_errors": 1
+  },
+  "exit_status": "ok",
+  "sandbox": "/tmp/claudio-bench-opencode-retry-helper-skeleton-t1-2r4c9ua6",
+  "schema_keys_ok": true,
+  "session_lines": 8,
+  "task_id": "retry-helper-skeleton",
+  "timed_out": false,
+  "timeout_s": 600.0,
+  "tokens": {
+    "cache_read": 1103,
+    "cache_write": 89,
+    "input": 1068,
+    "output": 245,
+    "total": 2505
+  },
+  "trial": 1,
+  "verification_command": "python3 -m pytest -q -p no:cacheprovider tests/test_retry.py",
+  "verification_passed": true
+}

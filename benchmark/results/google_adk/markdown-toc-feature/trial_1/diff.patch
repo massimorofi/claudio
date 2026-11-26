@@ -1,0 +1,57 @@
+diff --git a/app/toc.py b/app/toc.py
+index 77e9a54..3a50c5a 100644
+--- a/app/toc.py
++++ b/app/toc.py
+@@ -1,11 +1,36 @@
+ """GitHub-style table of contents for markdown documents. See SPEC.md."""
+ 
++import re
++
++_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
++_STRIP = re.compile(r"[^a-z0-9 -]")
++
+ 
+ def slugify(title):
+     """Turn a heading title into a URL anchor."""
+-    raise NotImplementedError("slugify is not implemented yet")
++    text = title.strip().lower()
++    text = _STRIP.sub("", text)
++    return text.replace(" ", "-")
+ 
+ 
+ def build_toc(markdown_text):
+     """Return ``[(level, title, anchor), ...]`` for every heading."""
+-    raise NotImplementedError("build_toc is not implemented yet")
++    entries = []
++    seen = {}
++    in_fence = False
++    for line in markdown_text.splitlines():
++        if line.strip().startswith("```"):
++            in_fence = not in_fence
++            continue
++        if in_fence:
++            continue
++        match = _HEADING.match(line)
++        if not match:
++            continue
++        level = len(match.group(1))
++        title = match.group(2).strip()
++        anchor = slugify(title)
++        count = seen.get(anchor, 0)
++        seen[anchor] = count + 1
++        entries.append((level, title, anchor if not count else "%s-%d" % (anchor, count)))
++    return entries
+diff --git a/session.jsonl b/session.jsonl
+new file mode 100644
+index 0000000..d90184b
+--- /dev/null
++++ b/session.jsonl
+@@ -0,0 +1,8 @@
++{"backend":"google_adk","engine_mode":"stub","model":"claudio-stub-1","session_id":"stub-2ad5fdb93e90ccdc","task_id":"markdown-toc-feature","trial":1,"type":"init"}
++{"input":{"command":"python3 -m pytest -q -p no:cacheprovider tests/test_toc.py"},"name":"run_command","type":"tool_call"}
++{"chars":0,"exit_code":1,"is_error":true,"name":"run_command","type":"tool_result"}
++{"attempt":1,"reason":"verification failed on the seed","type":"retry"}
++{"input":{"path":"app/toc.py"},"name":"write_file","seq":1,"type":"tool_call"}
++{"chars":1047,"is_error":false,"name":"write_file","seq":2,"type":"tool_result"}
++{"cache_creation_input_tokens":156,"cache_read_input_tokens":1168,"input_tokens":1156,"output_tokens":393,"type":"usage"}
++{"duration_ms":0,"is_error":false,"num_turns":3,"result":"stub solution applied for markdown-toc-feature","session_id":"stub-2ad5fdb93e90ccdc","subtype":"success","type":"result"}

@@ -1,65 +1,94 @@
-# Benchmark task suite
+# Engine benchmark harness
 
-`tasks.json` is the **locked** manifest of benchmark tasks. Each entry describes
-one self-contained coding task, the fixture that seeds it, and the shell command
-that decides whether the agent solved it.
-
-## Layout
+Offline, stdlib-only harness that runs the same locked task suite through each
+Claudio engine backend and records a comparable artifact per run.
 
 ```
-benchmark/
-  tasks.json                      # the manifest (locked; bump "version" to change)
-  tests/test_tasks_manifest.py    # schema + coverage + "seed really fails" checks
-  fixtures/<task-id>/             # 2-4 tiny python/markdown/text files, copied
-                                  # verbatim into the sandbox root
+python3 benchmark/runner.py \
+    --tasks benchmark/tasks.json \
+    --capability benchmark/results/capability.json \
+    --backends google_adk,claude_code,opencode \
+    --trials 1 \
+    --out benchmark/results
 ```
 
-## Manifest schema
+3 backends x 8 tasks x 1 trial = 24 runs in about 8 s on this machine (the
+stub path never calls a model), well inside the 3-minute budget.
 
-| key | meaning |
+## Files
+
+| path | owner | what it is |
+| --- | --- | --- |
+| `tasks.json` | T3 | the locked task manifest (prompts, fixtures, verification) |
+| `fixtures/<id>/` | T3 | the seed tree each run starts from |
+| `capability.json` | T2 | which backends are actually usable on this box |
+| `runner.py` | T4 | the driver described here |
+| `stub_engine.py` | T4 | deterministic offline engine + canned solutions |
+| `tests/test_runner.py` | T4 | sandbox-isolation and timeout proofs |
+
+## How one run works
+
+For every `(backend, task, trial)` triple `runner.py`:
+
+1. `tempfile.mkdtemp()` a sandbox **outside the worktree** (`make_sandbox`
+   raises if the directory lands inside the repo, so the gate tree can never
+   be dirtied by a run).
+2. Copies `benchmark/fixtures/<id>/` into it. If that directory is missing the
+   runner falls back to the embedded copy in `stub_engine.SEEDS`.
+3. `git init` + one seed commit (fixed author/committer identity and dates, so
+   `diff.patch` is reproducible).
+4. Runs an engine:
+   * **real** when `capability.json` marks the backend available *and* the
+     binary resolves: `claude -p <prompt> --output-format stream-json
+     --verbose`, `opencode run <prompt> --format json`, or google-adk
+     in-process. `subprocess.run(..., timeout=task.max_seconds)` enforces the
+     task timeout; a `TimeoutExpired` becomes `exit_status="timeout"`.
+   * **stub** otherwise (and whenever a "real" backend turns out to be
+     unrunnable). `stub_engine.run_stub` applies the canned solution for that
+     task and writes a deterministic JSONL session log with `init`,
+     `tool_call`, `tool_result`, `retry`, `usage` and `result` events. Token
+     counts are a SHA-256 of `(backend, task_id, trial)` plus the prompt
+     length, so artifacts are byte-stable across machines and Python hash
+     seeds.
+5. Runs the task's verification command in the sandbox.
+6. `git add -A && git diff --cached` -> `diff.patch` (after pruning
+   `__pycache__`/`.pytest_cache`, which are ignored by the repo anyway).
+7. Writes the artifacts and removes the sandbox.
+
+## Artifacts
+
+`benchmark/results/<backend>/<task_id>/trial_<k>/`
+
+| file | contents |
 | --- | --- |
-| `id` | unique kebab-case id, also the fixture folder name |
-| `category` | `bug_fix` \| `feature` \| `refactor_debug` \| `codebase_qa` |
-| `difficulty` | `easy` \| `medium` \| `hard` |
-| `prompt` | the instruction handed to the agent |
-| `fixture_dir` | always `benchmark/fixtures/<id>` |
-| `setup` | shell run before the agent starts (may be `''`) |
-| `verification` | shell run with the **sandbox root** as cwd; exits 0 only when solved |
-| `seed_must_fail` | `true` = the untouched fixture must fail `verification` |
-| `max_seconds` | wall-clock budget for the task |
-| `rubric` | 1-5 anchor strings; `rubric[0]` is the 5-point anchor |
+| `run.json` | summary: `backend`, `task_id`, `trial`, `engine_mode`, `duration_s`, `exit_status`, `timed_out`, `tokens{input,output,cache_read,cache_write,total}`, `errors{command_errors,tool_errors,retries,timeouts}`, `verification_passed` |
+| `session.jsonl` | engine session log (JSONL) |
+| `stdout.txt` / `stderr.txt` | raw engine output (`.txt`, not `.log` - `.gitignore` hides `*.log`) |
+| `verification.txt` | output of the verification command |
+| `diff.patch` | the change the engine made to the sandbox |
 
-## Tasks (8)
+The runner commits its own output directory at the end (`--no-commit` turns
+that off) so the tree is clean when it exits.
 
-| id | category | difficulty | what it exercises |
-| --- | --- | --- | --- |
-| `rate-limiter-offbyone` | bug_fix | easy | off-by-one in a token bucket + wrong rate maths |
-| `csv-normalizer-dedup` | bug_fix | medium | blank rows, key normalisation, `Decimal` half-up rounding |
-| `retry-helper-skeleton` | feature | medium | implement a spec'd retry helper (DI'd `sleep`) |
-| `markdown-toc-feature` | feature | medium | markdown parsing, anchors, fence handling, dedupe |
-| `split-legacy-report` | refactor_debug | hard | split a monolith into a package **and** fix `ZeroDivisionError` |
-| `dedupe-discount-logic` | refactor_debug | medium | collapse a stale copy-paste tier ladder (lost discount cap) |
-| `inventory-qa` | codebase_qa | easy | read-only package audit -> `findings.txt` |
-| `log-triage` | codebase_qa | medium | read-only log root-cause read -> `findings.txt` |
+## Useful flags
 
-## Constraints honoured by every verification
+| flag | meaning |
+| --- | --- |
+| `--trials N` | repeat every task N times (`trial_1..N`) |
+| `--only a,b` | run a subset of task ids |
+| `--timeout-cap S` | clamp every per-run timeout, for a fast smoke run |
+| `--sandbox-dir D` | put sandboxes somewhere other than `$TMPDIR` |
+| `--keep-sandbox` | leave the sandbox on disk (path is in `run.json`) |
+| `--no-commit` | write artifacts without committing them |
 
-- Only `python3`, `pytest`, `git` and `grep`/`test` shell builtins.
-- No network, no package installs, no repository dependencies, no absolute paths.
-- Relative paths only, resolved from the sandbox root (the fixture contents are
-  copied to the root, so `app/...`, `pkg/...`, `tests/...`, `logs/...` are the
-  roots the prompts refer to).
-- `codebase_qa` tasks are read-only: verification greps an answer file
-  (`findings.txt`) that the agent must write.
+## Tests
 
-## Running the checks
-
-```bash
-PYTHONPATH=benchmark python3 -m pytest benchmark/tests/test_tasks_manifest.py -q
-python3 -c "import json;t=json.load(open('benchmark/tasks.json'));ts=t['tasks'] if isinstance(t,dict) else t;assert len(ts)>=6;cats={x['category'] for x in ts};assert {'bug_fix','feature','refactor_debug','codebase_qa'}<=cats;assert len({x['id'] for x in ts})==len(ts);assert sum(1 for x in ts if x.get('seed_must_fail'))>=4;print('SUITE_OK',len(ts))"
+```
+PYTHONPATH=benchmark python3 -m pytest benchmark/tests/test_runner.py -q
 ```
 
-The manifest test copies every `seed_must_fail` fixture into a `tmp_path` and
-asserts the verification command exits **non-zero** there, which proves the
-tasks are real rather than trivially passing. All 8 tasks are flagged
-`seed_must_fail`.
+Hermetic (`tmp_path` only, no network): one test proves the repo tree is
+byte-identical and git-clean after a run and that the sandbox lived outside it;
+one proves a real engine that overruns `max_seconds` is killed and reported as
+`timed_out`; one proves `make_sandbox` refuses to create a sandbox inside the
+repo.
