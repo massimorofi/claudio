@@ -4,8 +4,9 @@ Run from the repo root::
 
     PYTHONPATH=benchmark python3 -m pytest benchmark/tests/test_aggregate.py -q
 
-Every expected number below is hand-computed from the tiny tree built in
-``make_tree`` so a regression in the mean/median/winners logic fails loudly.
+Every expected number below is hand-computed from the tiny synthetic tree built
+by ``make_tree`` (see ``TREE`` for the inputs), so a regression in the
+mean/median/pass-rate/winners logic fails loudly instead of drifting.
 """
 from __future__ import annotations
 
@@ -19,241 +20,346 @@ BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 if str(BENCHMARK_DIR) not in sys.path:  # works with or without PYTHONPATH=benchmark
     sys.path.insert(0, str(BENCHMARK_DIR))
 
-import aggregate  # noqa: E402
+import aggregate as A  # noqa: E402
+
+REAL_RESULTS = BENCHMARK_DIR / "results"
 
 
 # --------------------------------------------------------------------------
-# fixture helpers
+# helpers
 # --------------------------------------------------------------------------
-def write_run(
+def write_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def add_run(
     root: Path,
-    category: str,
     backend: str,
-    run_id: str,
+    task: str,
+    trial: int = 1,
     *,
-    tokens_in: float,
-    tokens_out: float,
-    wall: float,
+    used_input: float = 0,
+    output: float = 0,
+    total: float | None = None,
     errors: dict | None = None,
+    wall: float = 0.0,
     passed: bool = True,
-    rubric: dict | None = None,
-    engine_mode: str = "native",
-    available: bool = True,
-    write_judge: bool = True,
-    write_capability: bool = True,
+    rubric: tuple[float, float, float] | None = None,
+    engine_mode: str | None = None,
+    category: str | None = None,
 ) -> Path:
-    """Create ``<root>/<category>/<backend>/<run_id>/`` with its artifacts."""
-    d = root / category / backend / run_id
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "run.json").write_text(json.dumps({
-        "run_id": run_id,
+    """Write one ``<backend>/<task>/trial_<n>/`` run directory; returns its path."""
+    directory = root / backend / task / f"trial_{trial}"
+    run: dict = {
         "backend": backend,
-        "category": category,
-        "engine_mode": engine_mode,
-        "available": available,
+        "task_id": task,
+        "trial": trial,
         "verification_passed": passed,
-        "tokens": {"input": tokens_in, "output": tokens_out,
-                   "total": tokens_in + tokens_out},
-        "errors": errors or {},
-        "wall_clock_seconds": wall,
-    }))
-    if write_judge:
-        (d / "judge.json").write_text(json.dumps({"rubric": rubric or {}}))
-    if write_capability:
-        (d / "capability.json").write_text(
-            json.dumps({"available": available, "engine_mode": engine_mode})
+        "tokens": {"input": used_input, "output": output, "total": total},
+        "errors": {
+            "command_errors": 0,
+            "tool_errors": 0,
+            "retries": 0,
+            "timeouts": 0,
+            **(errors or {}),
+        },
+        "duration_s": wall,
+    }
+    if engine_mode is not None:
+        run["engine_mode"] = engine_mode
+    if category is not None:
+        run["category"] = category
+    write_json(directory / "run.json", run)
+    if rubric is not None:
+        quality, intelligence, coding = rubric
+        write_json(
+            directory / "judge.json",
+            {"mode": "heuristic", "scores": {
+                "quality": quality, "intelligence": intelligence, "coding": coding}},
         )
-    return d
+    return directory
+
+
+# The synthetic tree: 6 runs over 3 backends and 5 tasks.
+#
+#   alpha (available, native)      fix_login t1, fix_login t2, add_report t1
+#   beta  (available, cli_bridge)  refactor_parser t1, qa_overview t1
+#   gamma (UNavailable, stub)      fix_gamma t1
+#
+# gamma is deliberately the cheapest on tokens so the tests prove that an
+# unavailable backend cannot win.
+TREE = {
+    "alpha": {"available": True, "engine_mode": "native"},
+    "beta": {"available": True, "engine_mode": "cli_bridge"},
+    "gamma": {"available": False, "engine_mode": "stub"},
+}
+
+
+def make_tree(root: Path) -> Path:
+    write_json(root / "capability.json", {"backends": TREE})
+    add_run(root, "alpha", "fix_login", 1, used_input=60, output=40, wall=1.0,
+            errors={"command_errors": 1}, rubric=(5, 5, 5))
+    add_run(root, "alpha", "fix_login", 2, used_input=120, output=80, wall=2.0,
+            errors={"tool_errors": 2, "retries": 1}, rubric=(3, 3, 3))
+    add_run(root, "alpha", "add_report", 1, used_input=400, output=200, wall=6.0,
+            passed=False, errors={"timeouts": 1}, rubric=(1, 1, 1))
+    add_run(root, "beta", "refactor_parser", 1, total=500, wall=3.0, rubric=(4, 2, 4))
+    add_run(root, "beta", "qa_overview", 1, total=700, wall=5.0, rubric=(4, 2, 4))
+    add_run(root, "gamma", "fix_gamma", 1, total=10, wall=0.5, rubric=(5, 5, 5))
+    return root
 
 
 @pytest.fixture
 def tree(tmp_path: Path) -> Path:
-    """Three backends, two categories, deliberately asymmetric numbers.
-
-    claude_code / bug_fix (3 runs)
-        in   = 1000, 2000, 9000   -> mean 4000.0, median 2000.0
-        out  =  100,  200,  900   -> mean  400.0, median  200.0
-        tot  = 1100, 2200, 9900   -> mean 4400.0, median 2200.0
-        wall =   10,   20,   60   -> mean   30.0, median   20.0
-        errors total = 6          -> mean_per_run 2.0
-        pass = T, T, F            -> pass_rate 2/3 = 0.6667
-        quality      = 4, 4, 7    -> mean 5.0, median 4.0
-        intelligence = 2, 6, 7    -> mean 5.0, median 6.0
-        coding       = 6, 9, 9    -> mean 8.0, median 9.0
-    google_adk / feature (2 runs)
-        in = 2000, 4000 -> mean/median 3000.0 ; out = 500, 1000 -> 750.0
-        total = 2500, 5000 -> 3750.0 ; wall = 40, 20 -> 30.0
-        errors total 2 -> mean_per_run 1.0 ; pass_rate 1.0
-        rubric all dims mean 4.0
-    opencode / bug_fix (1 run)
-        total 600 ; wall 5 ; errors total 5 ; pass_rate 1.0
-        rubric q=9, i=2, c=2 -> rubric_mean (9+2+2)/3 = 4.3333
-    """
-    for i, (tin, tout, wall, cmd_err, ok, q, iq, cg) in enumerate(
-        [(1000, 100, 10, 0, True, 4, 2, 6),
-         (2000, 200, 20, 0, True, 4, 6, 9),
-         (9000, 900, 60, 6, False, 7, 7, 9)]
-    ):
-        write_run(tree_root(tmp_path), "bug_fix", "claude_code", f"cc-run{i + 1}",
-                  tokens_in=tin, tokens_out=tout, wall=wall,
-                  errors={"command_errors": cmd_err, "tool_errors": 0,
-                          "retries": 0, "timeouts": 0},
-                  passed=ok,
-                  rubric={"quality": q, "intelligence": iq, "coding": cg},
-                  engine_mode="cli_bridge")
-    write_run(tree_root(tmp_path), "feature", "google_adk", "adk-run1",
-              tokens_in=2000, tokens_out=500, wall=40,
-              errors={"command_errors": 1, "tool_errors": 1},
-              rubric={"quality": 3, "intelligence": 3, "coding": 3})
-    write_run(tree_root(tmp_path), "feature", "google_adk", "adk-run2",
-              tokens_in=4000, tokens_out=1000, wall=20,
-              rubric={"quality": 5, "intelligence": 5, "coding": 5})
-    write_run(tree_root(tmp_path), "bug_fix", "opencode", "oc-run1",
-              tokens_in=500, tokens_out=100, wall=5,
-              errors={"tool_errors": 5},
-              rubric={"quality": 9, "intelligence": 2, "coding": 2},
-              engine_mode="cli_bridge")
-    return tree_root(tmp_path)
+    return make_tree(tmp_path / "results")
 
 
-def tree_root(tmp_path: Path) -> Path:
-    return tmp_path / "results"
+@pytest.fixture
+def summary(tree: Path) -> dict:
+    runs = A.discover_runs(tree, A.load_capability(tree))
+    return A.build_summary(runs, generated_at="2026-01-01T00:00:00Z")
 
 
 # --------------------------------------------------------------------------
-# backends block
+# discovery / normalisation
 # --------------------------------------------------------------------------
-def test_backend_keys_and_shape(tree: Path) -> None:
-    summary = aggregate.build_summary(aggregate.discover_runs(tree))
-    assert set(summary["backends"]) == {"claude_code", "google_adk", "opencode"}
-    for backend in summary["backends"].values():
-        assert set(backend) >= {"available", "engine_mode", "n_runs", "pass_rate",
-                                "tokens", "errors", "wall_clock", "rubric"}
-        assert set(backend["tokens"]) == {"input", "output", "total"}
-        assert set(backend["tokens"]["total"]) == {"mean", "median"}
-        assert set(backend["errors"]) == {"command_errors", "tool_errors", "retries",
-                                          "timeouts", "total", "mean_per_run"}
-        assert set(backend["rubric"]) == {"quality", "intelligence", "coding"}
-        assert 0.0 <= backend["pass_rate"] <= 1.0
+def test_discovers_every_run_directory(tree: Path) -> None:
+    runs = A.discover_runs(tree, A.load_capability(tree))
+    assert len(runs) == 6
+    assert {(r["backend"], r["task_id"], r["run_id"]) for r in runs} == {
+        ("alpha", "fix_login", "trial_1"),
+        ("alpha", "fix_login", "trial_2"),
+        ("alpha", "add_report", "trial_1"),
+        ("beta", "refactor_parser", "trial_1"),
+        ("beta", "qa_overview", "trial_1"),
+        ("gamma", "fix_gamma", "trial_1"),
+    }
 
 
-def test_claude_code_means_medians_and_pass_rate(tree: Path) -> None:
-    b = aggregate.build_summary(aggregate.discover_runs(tree))["backends"]["claude_code"]
-    assert b["n_runs"] == 3
-    assert b["available"] is True
-    assert b["engine_mode"] == "cli_bridge"
-    assert b["pass_rate"] == 0.6667
-    assert b["tokens"]["input"] == {"mean": 4000.0, "median": 2000.0}
-    assert b["tokens"]["output"] == {"mean": 400.0, "median": 200.0}
-    assert b["tokens"]["total"] == {"mean": 4400.0, "median": 2200.0}
-    assert b["wall_clock"] == {"mean": 30.0, "median": 20.0}
-    assert b["errors"] == {"command_errors": 6, "tool_errors": 0, "retries": 0,
-                           "timeouts": 0, "total": 6, "mean_per_run": 2.0}
-    assert b["rubric"]["quality"] == {"mean": 5.0, "median": 4.0}
-    assert b["rubric"]["intelligence"] == {"mean": 5.0, "median": 6.0}
-    assert b["rubric"]["coding"] == {"mean": 8.0, "median": 9.0}
+def test_capability_report_drives_availability_and_mode(tree: Path) -> None:
+    capability = A.load_capability(tree)
+    runs = {r["backend"]: r for r in A.discover_runs(tree, capability)}
+    assert runs["alpha"]["available"] is True
+    assert runs["alpha"]["engine_mode"] == "native"
+    assert runs["gamma"]["available"] is False
+    assert runs["gamma"]["engine_mode"] == "stub"
 
 
-def test_google_adk_and_opencode(tree: Path) -> None:
-    backends = aggregate.build_summary(aggregate.discover_runs(tree))["backends"]
-    adk = backends["google_adk"]
-    assert adk["n_runs"] == 2 and adk["pass_rate"] == 1.0
-    assert adk["tokens"]["total"] == {"mean": 3750.0, "median": 3750.0}
-    assert adk["errors"]["total"] == 2 and adk["errors"]["mean_per_run"] == 1.0
-    assert adk["rubric"]["quality"] == {"mean": 4.0, "median": 4.0}
-
-    oc = backends["opencode"]
-    assert oc["n_runs"] == 1 and oc["pass_rate"] == 1.0
-    assert oc["tokens"]["total"] == {"mean": 600.0, "median": 600.0}
-    assert oc["errors"] == {"command_errors": 0, "tool_errors": 5, "retries": 0,
-                            "timeouts": 0, "total": 5, "mean_per_run": 5.0}
+def test_total_tokens_default_to_input_plus_output(tree: Path) -> None:
+    runs = {(r["task_id"], r["run_id"]): r
+            for r in A.discover_runs(tree, A.load_capability(tree))}
+    assert runs[("fix_login", "trial_1")]["tokens"] == {
+        "input": 60.0, "output": 40.0, "total": 100.0}
+    assert runs[("refactor_parser", "trial_1")]["tokens"]["total"] == 500.0
 
 
-# --------------------------------------------------------------------------
-# categories block
-# --------------------------------------------------------------------------
-def test_categories_block(tree: Path) -> None:
-    cats = aggregate.build_summary(aggregate.discover_runs(tree))["categories"]
-    assert set(cats) == {"bug_fix", "feature"}
-    assert set(cats["bug_fix"]) == {"claude_code", "opencode"}
-    assert cats["bug_fix"]["claude_code"] == {
-        "n_runs": 3, "pass_rate": 0.6667, "tokens_total_median": 2200.0, "rubric_mean": 6.0}
-    assert cats["bug_fix"]["opencode"] == {
-        "n_runs": 1, "pass_rate": 1.0, "tokens_total_median": 600.0, "rubric_mean": 4.3333}
-    assert cats["feature"]["google_adk"] == {
-        "n_runs": 2, "pass_rate": 1.0, "tokens_total_median": 3750.0, "rubric_mean": 4.0}
+def test_category_is_inferred_from_task_id() -> None:
+    assert A.infer_category("fix_login") == "bug_fix"
+    assert A.infer_category("add_report") == "feature"
+    assert A.infer_category("refactor_parser") == "refactor_debug"
+    assert A.infer_category("qa_overview") == "codebase_qa"
+    assert A.infer_category("mystery_task") == A.FALLBACK_CATEGORY
+    assert A.infer_category("mystery_task", "feature") == "feature"
+    assert A.infer_category("mystery_task", None, {"mystery_task": "codebase_qa"}) == "codebase_qa"
+
+
+def test_run_json_category_wins_over_inference(tmp_path: Path) -> None:
+    add_run(tmp_path, "alpha", "fix_login", 1, total=10, category="codebase_qa")
+    runs = A.discover_runs(tmp_path, A.load_capability(tmp_path))
+    assert runs[0]["category"] == "codebase_qa"
+
+
+def test_missing_judge_file_means_no_rubric_signal(tmp_path: Path) -> None:
+    add_run(tmp_path, "solo", "fix_solo", 1, total=42, wall=1.0)
+    summary = A.build_summary(A.discover_runs(tmp_path, A.load_capability(tmp_path)))
+    block = summary["backends"]["solo"]
+    assert block["rubric"]["quality"] == {"mean": 0.0, "median": 0.0}
+    assert block["n_runs"] == 1 and block["pass_rate"] == 1.0
+    assert summary["winners"]["quality"] == ""  # nothing judged, nobody wins
 
 
 # --------------------------------------------------------------------------
-# winners block
+# exact backend statistics
 # --------------------------------------------------------------------------
-def test_winners_block(tree: Path) -> None:
-    summary = aggregate.build_summary(aggregate.discover_runs(tree))
-    assert set(summary["winners"]) == {"tokens", "quality", "errors", "intelligence", "coding"}
-    # cheapest tokens -> opencode (600); best quality -> opencode (9.0);
-    # fewest errors/run -> google_adk (1.0); best intelligence & coding -> claude_code.
+def test_backend_pass_rate_and_run_counts(summary: dict) -> None:
+    assert summary["n_runs"] == 6
+    assert summary["backends"]["alpha"]["n_runs"] == 3
+    assert summary["backends"]["alpha"]["pass_rate"] == pytest.approx(2 / 3, abs=1e-4)
+    assert summary["backends"]["beta"]["pass_rate"] == 1.0
+    assert summary["backends"]["gamma"]["pass_rate"] == 1.0
+    assert summary["backends"]["beta"]["engine_mode"] == "cli_bridge"
+
+
+def test_backend_token_means_and_medians(summary: dict) -> None:
+    tokens = summary["backends"]["alpha"]["tokens"]
+    # totals 100, 200, 600
+    assert tokens["total"]["mean"] == 300.0
+    assert tokens["total"]["median"] == 200.0
+    # inputs 60, 120, 400 -> mean 193.3333, median 120
+    assert tokens["input"]["mean"] == pytest.approx(580 / 3, abs=1e-4)
+    assert tokens["input"]["median"] == 120.0
+    # outputs 40, 80, 200 -> mean 106.6667, median 80
+    assert tokens["output"]["mean"] == pytest.approx(320 / 3, abs=1e-4)
+    assert tokens["output"]["median"] == 80.0
+    # beta totals 500, 700 -> mean == median == 600
+    assert summary["backends"]["beta"]["tokens"]["total"] == {"mean": 600.0, "median": 600.0}
+
+
+def test_backend_error_block_is_exact(summary: dict) -> None:
+    errors = summary["backends"]["alpha"]["errors"]
+    assert errors == {
+        "command_errors": 1,
+        "tool_errors": 2,
+        "retries": 1,
+        "timeouts": 1,
+        "total": 5,
+        "mean_per_run": pytest.approx(5 / 3, abs=1e-4),
+    }
+    assert summary["backends"]["beta"]["errors"]["total"] == 0
+    assert summary["backends"]["beta"]["errors"]["mean_per_run"] == 0.0
+
+
+def test_backend_wall_clock_is_exact(summary: dict) -> None:
+    # alpha walls 1.0, 2.0, 6.0
+    assert summary["backends"]["alpha"]["wall_clock"] == {"mean": 3.0, "median": 2.0}
+    # beta walls 3.0, 5.0
+    assert summary["backends"]["beta"]["wall_clock"] == {"mean": 4.0, "median": 4.0}
+
+
+def test_backend_rubric_means_and_medians(summary: dict) -> None:
+    alpha = summary["backends"]["alpha"]["rubric"]
+    # quality 5, 3, 1 -> mean 3, median 3 (same for intelligence and coding)
+    assert alpha["quality"] == {"mean": 3.0, "median": 3.0}
+    assert alpha["intelligence"] == {"mean": 3.0, "median": 3.0}
+    assert alpha["coding"] == {"mean": 3.0, "median": 3.0}
+    beta = summary["backends"]["beta"]["rubric"]
+    assert beta["quality"] == {"mean": 4.0, "median": 4.0}
+    assert beta["intelligence"] == {"mean": 2.0, "median": 2.0}
+    assert beta["coding"] == {"mean": 4.0, "median": 4.0}
+
+
+# --------------------------------------------------------------------------
+# categories
+# --------------------------------------------------------------------------
+def test_categories_block_is_exact(summary: dict) -> None:
+    categories = summary["categories"]
+    assert set(categories) >= set(A.CATEGORY_ORDER)
+    # alpha bug_fix: totals 100 + 200 -> median 150, both passed, rubric 5,5,5,3,3,3 -> 4
+    assert categories["bug_fix"]["alpha"] == {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 150.0,
+        "rubric_mean": 4.0,
+    }
+    # gamma bug_fix: single run, total 10, rubric all 5
+    assert categories["bug_fix"]["gamma"] == {
+        "n_runs": 1,
+        "pass_rate": 1.0,
+        "tokens_total_median": 10.0,
+        "rubric_mean": 5.0,
+    }
+    # alpha feature: the only failing run, total 600, rubric all 1
+    assert categories["feature"]["alpha"] == {
+        "n_runs": 1,
+        "pass_rate": 0.0,
+        "tokens_total_median": 600.0,
+        "rubric_mean": 1.0,
+    }
+    # beta refactor_debug / codebase_qa: rubric 4,2,4 -> mean 10/3
+    assert categories["refactor_debug"]["beta"] == {
+        "n_runs": 1,
+        "pass_rate": 1.0,
+        "tokens_total_median": 500.0,
+        "rubric_mean": pytest.approx(10 / 3, abs=1e-4),
+    }
+    assert categories["codebase_qa"]["beta"]["tokens_total_median"] == 700.0
+    # beta has no feature runs, so the backend is simply absent from that category
+    assert "beta" not in categories["feature"]
+
+
+def test_canonical_categories_are_always_present(tmp_path: Path) -> None:
+    add_run(tmp_path, "alpha", "fix_login", 1, total=10, rubric=(4, 4, 4))
+    categories = A.build_summary(A.discover_runs(tmp_path, A.load_capability(tmp_path)))["categories"]
+    assert set(categories) == set(A.CATEGORY_ORDER)
+    assert categories["refactor_debug"] == {}
+    assert categories["codebase_qa"] == {}
+    assert list(categories)[0] == "bug_fix"  # canonical order first
+
+
+# --------------------------------------------------------------------------
+# winners
+# --------------------------------------------------------------------------
+def test_winners_block_is_exact(summary: dict) -> None:
     assert summary["winners"] == {
-        "tokens": "opencode",
-        "quality": "opencode",
-        "errors": "google_adk",
-        "intelligence": "claude_code",
-        "coding": "claude_code",
+        "tokens": "alpha",        # lowest mean total tokens among available backends
+        "quality": "beta",        # 4.0 beats alpha's 3.0
+        "errors": "beta",         # 0.0 errors per run
+        "intelligence": "alpha",  # 3.0 beats beta's 2.0
+        "coding": "beta",         # 4.0 beats alpha's 3.0
     }
 
 
 def test_unavailable_backend_cannot_win(tmp_path: Path) -> None:
-    root = tree_root(tmp_path)
-    write_run(root, "bug_fix", "opencode", "oc", tokens_in=1, tokens_out=1, wall=1,
-              rubric={"quality": 10, "intelligence": 10, "coding": 10}, available=False)
-    write_run(root, "bug_fix", "claude_code", "cc", tokens_in=5000, tokens_out=500,
-              wall=9, rubric={"quality": 1, "intelligence": 1, "coding": 1})
-    summary = aggregate.build_summary(aggregate.discover_runs(root))
-    assert summary["backends"]["opencode"]["available"] is False
-    assert set(summary["winners"].values()) == {"claude_code"}
+    write_json(tmp_path / "capability.json", {"backends": {
+        "cheap_but_offline": {"available": False, "engine_mode": "stub"},
+        "online": {"available": True, "engine_mode": "native"},
+    }})
+    add_run(tmp_path, "cheap_but_offline", "fix_a", 1, total=1, rubric=(5, 5, 5))
+    add_run(tmp_path, "online", "fix_a", 1, total=999, rubric=(1, 1, 1))
+    winners = A.build_summary(
+        A.discover_runs(tmp_path, A.load_capability(tmp_path)))["winners"]
+    assert set(winners.values()) == {"online"}
+
+
+def test_winners_break_ties_alphabetically(tmp_path: Path) -> None:
+    for backend in ("zeta", "alpha"):
+        add_run(tmp_path, backend, "fix_a", 1, total=100, rubric=(4, 4, 4))
+    winners = A.build_summary(
+        A.discover_runs(tmp_path, A.load_capability(tmp_path)))["winners"]
+    assert set(winners) == {"tokens", "quality", "errors", "intelligence", "coding"}
+    assert set(winners.values()) == {"alpha"}
 
 
 # --------------------------------------------------------------------------
-# robustness + CLI
+# markdown + CLI
 # --------------------------------------------------------------------------
-def test_missing_judge_and_capability_default_to_zero(tmp_path: Path) -> None:
-    root = tree_root(tmp_path)
-    write_run(root, "bug_fix", "google_adk", "bare", tokens_in=100, tokens_out=50,
-              wall=3, write_judge=False, write_capability=False)
-    b = aggregate.build_summary(aggregate.discover_runs(root))["backends"]["google_adk"]
-    assert b["engine_mode"] == "native"          # from run.json
-    assert b["rubric"]["quality"] == {"mean": 0.0, "median": 0.0}
-    assert b["tokens"]["total"] == {"mean": 150.0, "median": 150.0}
+def test_markdown_contains_tables_and_winners(summary: dict) -> None:
+    text = A.render_markdown(summary)
+    assert "| backend |" in text and "| --- |" in text
+    for row in ("| alpha |", "| beta |", "| gamma |"):
+        assert row in text
+    assert "| bug_fix |" in text and "| codebase_qa |" in text
+    assert "**Winners**" in text and "tokens: `alpha`" in text
+    assert "66.7%" in text  # alpha pass rate rendered as a percentage
 
 
-def test_total_tokens_default_to_input_plus_output(tmp_path: Path) -> None:
-    root = tree_root(tmp_path)
-    d = write_run(root, "feature", "opencode", "no_total", tokens_in=700, tokens_out=300,
-                  wall=2, rubric={"quality": 3, "intelligence": 3, "coding": 3})
-    run = json.loads((d / "run.json").read_text())
-    del run["tokens"]["total"]
-    (d / "run.json").write_text(json.dumps(run))
-    b = aggregate.build_summary(aggregate.discover_runs(root))["backends"]["opencode"]
-    assert b["tokens"]["total"] == {"mean": 1000.0, "median": 1000.0}
-
-
-def test_markdown_table_lists_backends_and_winners(tree: Path) -> None:
-    summary = aggregate.build_summary(aggregate.discover_runs(tree))
-    md = aggregate.render_markdown(summary)
-    assert "| backend |" in md and "| metric | backend |" in md
-    for name in summary["backends"]:
-        assert f"| {name} " in md
-    assert "| tokens | opencode |" in md
-
-
-def test_cli_writes_summary_and_prints_table(tree: Path, capsys) -> None:
-    out = tree / "summary.json"
-    assert aggregate.main(["--results", str(tree), "--out", str(out)]) == 0
-    payload = json.loads(out.read_text())
-    assert payload["backends"].keys() == {"claude_code", "google_adk", "opencode"}
-    assert payload["generated_at"]
+def test_main_writes_summary_and_prints_table(tmp_path: Path, capsys) -> None:
+    tree = make_tree(tmp_path / "results")
+    out = tmp_path / "nested" / "summary.json"
+    assert A.main(["--results", str(tree), "--out", str(out)]) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["n_runs"] == 6
+    assert set(payload["backends"]) == {"alpha", "beta", "gamma"}
     stdout = capsys.readouterr().out
-    assert "| backend |" in stdout and "pass rate" in stdout
+    assert "| backend |" in stdout and "Winners" in stdout
 
 
-def test_cli_fails_on_empty_results(tmp_path: Path, capsys) -> None:
-    assert aggregate.main(["--results", str(tmp_path / "nope")]) == 1
+def test_main_fails_without_any_run(tmp_path: Path) -> None:
+    assert A.main(["--results", str(tmp_path), "--out", str(tmp_path / "s.json")]) == 1
+
+
+@pytest.mark.skipif(not REAL_RESULTS.is_dir(), reason="committed results tree is absent")
+def test_committed_results_tree_satisfies_the_contract(tmp_path: Path) -> None:
+    out = tmp_path / "summary.json"
+    assert A.main(["--results", str(REAL_RESULTS), "--out", str(out), "--quiet"]) == 0
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    backends = summary["backends"]
+    assert set(backends) == {"google_adk", "claude_code", "opencode"}
+    for block in backends.values():
+        assert 0.0 <= block["pass_rate"] <= 1.0
+        assert block["n_runs"] >= 1
+        assert {"input", "output", "total"} <= set(block["tokens"])
+    assert set(summary["categories"]) >= set(A.CATEGORY_ORDER)
+    assert set(summary["winners"]) == {"tokens", "quality", "errors", "intelligence", "coding"}

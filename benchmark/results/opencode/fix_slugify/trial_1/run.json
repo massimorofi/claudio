@@ -1,0 +1,39 @@
+{
+  "backend": "opencode",
+  "changed_files": [
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/text.cpython-312.pyc",
+    "app/text.py",
+    "tests/__pycache__/__init__.cpython-312.pyc",
+    "tests/__pycache__/test_text.cpython-312.pyc"
+  ],
+  "diff_lines": 28,
+  "duration_s": 0.157,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 0,
+    "retries": 0,
+    "timeouts": 0,
+    "tool_errors": 0
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "inline_seed",
+  "session_events": 9,
+  "task_id": "fix_slugify",
+  "timed_out": false,
+  "timeout_s": 30.0,
+  "tokens": {
+    "cache_read": 70,
+    "cache_write": 0,
+    "input": 2601,
+    "output": 804,
+    "total": 3475
+  },
+  "trial": 1,
+  "verification_passed": true,
+  "verify_command": "python3 -m unittest discover -s tests -t . -q",
+  "verify_exit_code": 0
+}

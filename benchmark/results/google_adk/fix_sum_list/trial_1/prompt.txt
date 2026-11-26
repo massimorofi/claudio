@@ -1,0 +1,1 @@
+sum_values() in app/calc.py returns the wrong result; fix it so the tests pass.

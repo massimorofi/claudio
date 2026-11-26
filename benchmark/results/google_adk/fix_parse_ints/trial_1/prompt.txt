@@ -1,0 +1,1 @@
+parse_ints() crashes on non-numeric input; skip junk instead and pass the tests.

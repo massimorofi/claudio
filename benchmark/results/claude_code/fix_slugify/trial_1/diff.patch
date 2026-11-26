@@ -1,0 +1,28 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..d8033fe
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/text.cpython-312.pyc b/app/__pycache__/text.cpython-312.pyc
+new file mode 100644
+index 0000000..888aa8e
+Binary files /dev/null and b/app/__pycache__/text.cpython-312.pyc differ
+diff --git a/app/text.py b/app/text.py
+index 8931ec0..d4461de 100644
+--- a/app/text.py
++++ b/app/text.py
+@@ -1,2 +1,6 @@
++import re
++
++
+ def slugify(text):
+-    return text.lower().replace(' ', '-')
++    text = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower())
++    return text.strip("-")
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..008206b
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_text.cpython-312.pyc b/tests/__pycache__/test_text.cpython-312.pyc
+new file mode 100644
+index 0000000..1e38287
+Binary files /dev/null and b/tests/__pycache__/test_text.cpython-312.pyc differ

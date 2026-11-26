@@ -5,35 +5,52 @@ Stdlib only (``json``, ``statistics``, ``argparse``, ``pathlib``).
 
 Inputs
 ------
-The aggregator walks ``--results`` and treats *any* directory that contains a
-``run.json`` as one benchmark run. Siblings ``judge.json`` and
-``capability.json`` in the same directory are optional:
+The aggregator walks ``--results`` and treats *every* directory that contains a
+``run.json`` as one measured run. ``judge.json`` next to it and the capability
+report are optional. The layout written by ``benchmark/runner.py`` is::
 
-    benchmark/results/<category>/<backend>/<run_id>/run.json         required
-    benchmark/results/<category>/<backend>/<run_id>/judge.json       optional
-    benchmark/results/<category>/<backend>/<run_id>/capability.json  optional
+    benchmark/results/<backend>/<task_id>/trial_<k>/run.json       required
+    benchmark/results/<backend>/<task_id>/trial_<k>/judge.json     optional
+    benchmark/results/capability.json                              optional
+    benchmark/results/<backend>/capability.json                    optional
 
-``run.json`` keys read (missing keys fall back to 0 / False / "unknown")::
+``capability.json`` is either the harness-wide report
+(``{"backends": {"<backend>": {"available": ..., "engine_mode": ...}}}``) or a
+single-run report (``{"available": ..., "engine_mode": ...}``); a per-run file
+wins over the harness-wide one.
 
-    backend, category, engine_mode, verification_passed,
-    tokens.{input,output,total}   (aliases: input_tokens / output_tokens /
+``run.json`` keys read (missing keys fall back to ``0`` / ``False``)::
+
+    backend, task_id, category, engine_mode, verification_passed,
+    tokens.{input,output,total}   (aliases: input_tokens/output_tokens/
                                    total_tokens; total defaults to in+out),
     errors.{command_errors,tool_errors,retries,timeouts},
-    wall_clock_seconds            (alias: wall_clock)
+    duration_s                    (aliases: wall_clock_seconds, wall_clock)
 
-``judge.json``: ``rubric.{quality,intelligence,coding}`` (also accepted flat).
-``capability.json``: ``available`` (bool) and ``engine_mode``; they win over
-the values in ``run.json`` when present.
+``judge.json``: ``scores.{quality,intelligence,coding}`` (``rubric.{...}`` and a
+flat ``{quality: ...}`` are accepted too).
 
-Output
-------
-``summary.json`` with ``generated_at``, ``backends``, ``categories`` and
-``winners`` (see ``README.md``), plus a compact markdown table on stdout.
+Categories
+----------
+``run.json`` carries a ``task_id``, not a category, so the category is resolved
+as: explicit ``category`` in ``run.json`` -> ``--category-map`` JSON file
+(``{"<task_id>": "<category>"}``) -> prefix rule on the task id:
+
+    fix_* / *_bug / bug_*            -> bug_fix
+    add_* / implement_* / feature_*  -> feature
+    refactor_* / *_debug / debug_*   -> refactor_debug
+    qa_* / explain_* / describe_*    -> codebase_qa
+
+The four canonical categories are always present in ``categories``; one with no
+runs maps to an empty object.
 
 Usage::
 
     python3 benchmark/aggregate.py --results benchmark/results \
         --out benchmark/results/summary.json
+
+Exit ``0`` with a compact markdown table on stdout (progress on stderr), or
+exit ``1`` when no ``run.json`` is found.
 """
 from __future__ import annotations
 
@@ -50,7 +67,26 @@ BACKEND_ORDER = ("google_adk", "claude_code", "opencode")
 CATEGORY_ORDER = ("bug_fix", "feature", "refactor_debug", "codebase_qa")
 RUBRIC_DIMENSIONS = ("quality", "intelligence", "coding")
 ERROR_FIELDS = ("command_errors", "tool_errors", "retries", "timeouts")
+TOKEN_FIELDS = ("input", "output", "total")
 ROUND_TO = 4
+
+# task_id prefix/infix -> category, first match wins.
+CATEGORY_RULES: tuple[tuple[str, str], ...] = (
+    ("refactor_", "refactor_debug"),
+    ("_debug", "refactor_debug"),
+    ("debug_", "refactor_debug"),
+    ("fix_", "bug_fix"),
+    ("bug_", "bug_fix"),
+    ("_bug", "bug_fix"),
+    ("add_", "feature"),
+    ("implement_", "feature"),
+    ("feature_", "feature"),
+    ("qa_", "codebase_qa"),
+    ("explain_", "codebase_qa"),
+    ("describe_", "codebase_qa"),
+    ("where_", "codebase_qa"),
+)
+FALLBACK_CATEGORY = "uncategorized"
 
 
 # --------------------------------------------------------------------------
@@ -80,8 +116,8 @@ def _round(value: float) -> float:
     return round(float(value), ROUND_TO)
 
 
-def _count(value: float) -> int:
-    """Whole-number counts stay ints in the JSON; fractions keep their decimals."""
+def _count(value: float) -> Any:
+    """Whole-number counts stay ints in the JSON; fractions keep decimals."""
     out = _round(value)
     return int(out) if float(out).is_integer() else out
 
@@ -103,18 +139,79 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in {"true", "yes", "1", "pass", "passed"}
+        return value.strip().lower() in {"true", "yes", "1", "pass", "passed", "ok"}
     return bool(value)
+
+
+# --------------------------------------------------------------------------
+# capability report
+# --------------------------------------------------------------------------
+def load_capability(results_dir: Path) -> dict[str, dict[str, Any]]:
+    """``{backend: {"available": bool, "engine_mode": str}}`` from capability files.
+
+    Reads ``<results>/capability.json`` and ``<results>/<backend>/capability.json``.
+    Both the harness-wide (``{"backends": {...}}``) and the flat single-backend
+    shape are accepted.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    candidates = [results_dir / "capability.json", *sorted(results_dir.glob("*/capability.json"))]
+    for path in candidates:
+        data = _load_json(path)
+        if not data:
+            continue
+        entries = data.get("backends")
+        if isinstance(entries, dict) and entries:
+            for name, info in entries.items():
+                if isinstance(info, dict):
+                    out[str(name)] = _capability_entry(info)
+        else:
+            name = str(data.get("backend") or path.parent.name)
+            out.setdefault(name, _capability_entry(data))
+    return out
+
+
+def _capability_entry(info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "available": _as_bool(info.get("available", True)),
+        "engine_mode": str(info.get("engine_mode") or "") or None,
+    }
+
+
+# --------------------------------------------------------------------------
+# categories
+# --------------------------------------------------------------------------
+def infer_category(task_id: str, explicit: Any = None,
+                   category_map: dict[str, str] | None = None) -> str:
+    """Explicit value wins, then the ``--category-map`` file, then the prefix rule."""
+    if explicit:
+        return str(explicit)
+    if category_map and task_id in category_map:
+        return str(category_map[task_id])
+    lowered = task_id.strip().lower()
+    for needle, category in CATEGORY_RULES:
+        if needle in lowered:
+            return category
+    return FALLBACK_CATEGORY
+
+
+def load_category_map(path: Path | None) -> dict[str, str]:
+    """Optional ``{task_id: category}`` override file; absent/invalid -> ``{}``."""
+    if not path:
+        return {}
+    data = _load_json(path) or {}
+    return {str(k): str(v) for k, v in data.items()}
 
 
 # --------------------------------------------------------------------------
 # reading one run directory
 # --------------------------------------------------------------------------
-def read_run(directory: Path) -> dict[str, Any]:
-    """Normalise one run directory into a flat record."""
+def read_run(directory: Path, results_dir: Path,
+             capability: dict[str, dict[str, Any]] | None = None,
+             category_map: dict[str, str] | None = None) -> dict[str, Any]:
+    """Normalise one run directory (the one holding ``run.json``) into a record."""
     run = _load_json(directory / "run.json") or {}
     judge = _load_json(directory / "judge.json") or {}
-    capability = _load_json(directory / "capability.json") or {}
+    local_capability = _load_json(directory / "capability.json")
 
     tokens = run.get("tokens") if isinstance(run.get("tokens"), dict) else {}
 
@@ -130,31 +227,34 @@ def read_run(directory: Path) -> dict[str, Any]:
     total = token_value("total", "total_tokens") or (used_input + used_output)
 
     raw_errors = run.get("errors") if isinstance(run.get("errors"), dict) else {}
-    errors = {f: _num(raw_errors.get(f, run.get(f, 0))) for f in ERROR_FIELDS}
+    errors = {field: _num(raw_errors.get(field, run.get(field, 0))) for field in ERROR_FIELDS}
 
-    wall = _num(run.get("wall_clock_seconds", run.get("wall_clock", 0)))
+    wall = _num(run.get("duration_s", run.get("wall_clock_seconds", run.get("wall_clock", 0))))
 
-    rubric_src = judge.get("rubric") if isinstance(judge.get("rubric"), dict) else judge
-    rubric = {d: _num(rubric_src.get(d)) for d in RUBRIC_DIMENSIONS}
-    has_rubric = any(d in rubric_src for d in RUBRIC_DIMENSIONS)
+    rubric_src = judge.get("scores")
+    if not isinstance(rubric_src, dict):
+        rubric_src = judge.get("rubric")
+    if not isinstance(rubric_src, dict):
+        rubric_src = judge
+    rubric = {dim: _num(rubric_src.get(dim)) for dim in RUBRIC_DIMENSIONS}
+    has_rubric = any(dim in rubric_src for dim in RUBRIC_DIMENSIONS)
 
-    backend = str(run.get("backend") or directory.parent.name)
-    category = str(run.get("category") or _category_from_path(directory))
+    backend = str(run.get("backend") or _backend_from_path(directory, results_dir))
+    task_id = str(run.get("task_id") or run.get("task") or _task_from_path(directory))
+
+    cap: dict[str, Any] = dict((capability or {}).get(backend, {}))
+    if local_capability:
+        cap.update(_capability_entry(local_capability))
 
     return {
         "directory": directory,
-        "run_id": str(run.get("run_id") or directory.name),
         "backend": backend,
-        "category": category,
-        "engine_mode": str(
-            capability.get("engine_mode") or run.get("engine_mode") or "unknown"
-        ),
-        "available": _as_bool(
-            capability.get("available", run.get("available", True))
-        ),
-        "verification_passed": _as_bool(
-            run.get("verification_passed", run.get("passed", False))
-        ),
+        "task_id": task_id,
+        "run_id": str(run.get("run_id") or _run_id_from_path(directory)),
+        "category": infer_category(task_id, run.get("category"), category_map),
+        "engine_mode": str(cap.get("engine_mode") or run.get("engine_mode") or "unknown"),
+        "available": _as_bool(cap.get("available", run.get("available", True))),
+        "verification_passed": _as_bool(run.get("verification_passed", run.get("passed", False))),
         "tokens": {"input": used_input, "output": used_output, "total": total},
         "errors": errors,
         "wall_clock_seconds": wall,
@@ -163,50 +263,98 @@ def read_run(directory: Path) -> dict[str, Any]:
     }
 
 
-def _category_from_path(directory: Path) -> str:
-    """Best-effort category when ``run.json`` omits it: first parent that is a
-    known category, else the grandparent directory name."""
-    for part in reversed(directory.parts[:-1]):
-        if part in CATEGORY_ORDER:
+def _relative_parts(directory: Path, results_dir: Path) -> list[str]:
+    try:
+        return list(directory.relative_to(results_dir).parts)
+    except ValueError:
+        return list(directory.parts)
+
+
+def _backend_from_path(directory: Path, results_dir: Path) -> str:
+    """Backend = first path component under ``results_dir`` that is not a run dir."""
+    parts = _relative_parts(directory, results_dir)[:-1]
+    for part in parts:
+        if part in BACKEND_ORDER:
             return part
-    return directory.parent.parent.name if directory.parent.parent else "unknown"
+    return parts[0] if parts else "unknown"
 
 
-def discover_runs(results_dir: Path) -> list[dict[str, Any]]:
-    """Every directory under ``results_dir`` holding a ``run.json``."""
+def _task_from_path(directory: Path) -> str:
+    """Task id = parent directory name, skipping a ``trial_N``/``run_N`` leaf."""
+    names = [p.name for p in directory.parents]
+    for name in names:
+        if not _is_trial_dir(name):
+            return name
+    return "unknown"
+
+
+def _run_id_from_path(directory: Path) -> str:
+    parent = "" if _is_trial_dir(directory.name) else f"{directory.name}/"
+    return f"{parent}{directory.name}"
+
+
+def _is_trial_dir(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.startswith("trial") or lowered.startswith("run_") or lowered == "runs"
+
+
+def discover_runs(results_dir: Path, capability: dict[str, dict[str, Any]] | None = None,
+                  category_map: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Every directory under ``results_dir`` that holds a ``run.json``."""
     if not results_dir.is_dir():
         return []
-    dirs = {p.parent for p in results_dir.rglob("run.json")}
-    return sorted((read_run(d) for d in dirs), key=lambda r: (r["backend"], r["category"], r["run_id"]))
+    dirs = {path.parent for path in results_dir.rglob("run.json")}
+    return sorted(
+        (read_run(d, results_dir, capability, category_map) for d in dirs),
+        key=lambda r: (r["backend"], r["category"], r["task_id"], r["run_id"]),
+    )
 
 
 # --------------------------------------------------------------------------
 # aggregation
 # --------------------------------------------------------------------------
+def _mode(rows: list[dict[str, Any]]) -> str:
+    """Most common ``engine_mode`` (ties break alphabetically)."""
+    modes: dict[str, int] = {}
+    for row in rows:
+        modes[row["engine_mode"]] = modes.get(row["engine_mode"], 0) + 1
+    if not modes:
+        return "unknown"
+    return sorted(modes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def _pass_rate(rows: list[dict[str, Any]]) -> float:
+    """Share of runs with ``verification_passed`` true, as a float in ``0..1``."""
+    if not rows:
+        return 0.0
+    return _round(sum(1 for r in rows if r["verification_passed"]) / len(rows))
+
+
 def aggregate_backends(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-backend KPI block (``summary.json`` -> ``backends``)."""
     out: dict[str, Any] = {}
     for backend in _ordered({r["backend"] for r in runs}, BACKEND_ORDER):
         rows = [r for r in runs if r["backend"] == backend]
-        n = len(rows)
+        judged = [r for r in rows if r["has_rubric"]]
         tokens = {
             kind: {
                 "mean": _mean([r["tokens"][kind] for r in rows]),
                 "median": _median([r["tokens"][kind] for r in rows]),
             }
-            for kind in ("input", "output", "total")
+            for kind in TOKEN_FIELDS
         }
         error_totals = {f: _count(sum(r["errors"][f] for r in rows)) for f in ERROR_FIELDS}
-        errors_total = _count(sum(_num(v) for v in error_totals.values()))
+        errors_total = _count(sum(_num(value) for value in error_totals.values()))
         out[backend] = {
             "available": any(r["available"] for r in rows),
             "engine_mode": _mode(rows),
-            "n_runs": n,
-            "pass_rate": _round(sum(1 for r in rows if r["verification_passed"]) / n) if n else 0.0,
+            "n_runs": len(rows),
+            "pass_rate": _pass_rate(rows),
             "tokens": tokens,
             "errors": {
                 **error_totals,
                 "total": errors_total,
-                "mean_per_run": _round(errors_total / n) if n else 0.0,
+                "mean_per_run": _round(errors_total / len(rows)) if rows else 0.0,
             },
             "wall_clock": {
                 "mean": _mean([r["wall_clock_seconds"] for r in rows]),
@@ -214,8 +362,8 @@ def aggregate_backends(runs: list[dict[str, Any]]) -> dict[str, Any]:
             },
             "rubric": {
                 dim: {
-                    "mean": _mean([r["rubric"][dim] for r in rows if r["has_rubric"]]),
-                    "median": _median([r["rubric"][dim] for r in rows if r["has_rubric"]]),
+                    "mean": _mean([r["rubric"][dim] for r in judged]),
+                    "median": _median([r["rubric"][dim] for r in judged]),
                 }
                 for dim in RUBRIC_DIMENSIONS
             },
@@ -223,19 +371,11 @@ def aggregate_backends(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _mode(rows: list[dict[str, Any]]) -> str:
-    """Most common engine_mode (ties -> alphabetical)."""
-    modes: dict[str, int] = {}
-    for r in rows:
-        modes[r["engine_mode"]] = modes.get(r["engine_mode"], 0) + 1
-    if not modes:
-        return "unknown"
-    return sorted(modes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-
-
 def aggregate_categories(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """``{category: {backend: {...}}}``. Canonical categories are always present."""
+    found = {r["category"] for r in runs} | set(CATEGORY_ORDER)
     out: dict[str, Any] = {}
-    for category in _ordered({r["category"] for r in runs}, CATEGORY_ORDER):
+    for category in _ordered(found, CATEGORY_ORDER):
         by_backend: dict[str, Any] = {}
         for backend in _ordered({r["backend"] for r in runs}, BACKEND_ORDER):
             rows = [r for r in runs if r["category"] == category and r["backend"] == backend]
@@ -246,9 +386,7 @@ def aggregate_categories(runs: list[dict[str, Any]]) -> dict[str, Any]:
             ]
             by_backend[backend] = {
                 "n_runs": len(rows),
-                "pass_rate": _round(
-                    sum(1 for r in rows if r["verification_passed"]) / len(rows)
-                ),
+                "pass_rate": _pass_rate(rows),
                 "tokens_total_median": _median([r["tokens"]["total"] for r in rows]),
                 "rubric_mean": _mean(rubric_values),
             }
@@ -257,33 +395,41 @@ def aggregate_categories(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def pick_winners(backends: dict[str, Any]) -> dict[str, str]:
-    """tokens/errors: lower is better, rubric dims: higher is better.
+    """Best backend per KPI: tokens/errors lower is better, rubric higher.
 
-    Only backends flagged ``available`` compete; if none is, every backend does.
-    Ties break alphabetically so the block is deterministic.
+    Only backends flagged ``available`` compete; when none is, every backend does.
+    A rubric mean of ``0`` means "nothing was judged" and is excluded, while a
+    zero error rate is a real (and winning) result. Ties break alphabetically so
+    the block is deterministic.
     """
-    pool = [name for name, b in backends.items() if b["available"]] or list(backends)
+    pool = [name for name, block in backends.items() if block["available"]] or list(backends)
 
-    def best(key, better):
-        candidates = [n for n in pool if key(n, backends[n]) is not None]
-        if not candidates:
+    def best(value_of, better: str, zero_means_missing: bool = False) -> str:
+        scored = []
+        for name in pool:
+            value = value_of(backends[name])
+            if value is None or (zero_means_missing and not value):
+                continue
+            scored.append((value, name))
+        if not scored:
             return ""
-        return sorted(candidates, key=lambda n: (key(n, backends[n]), n))[0] if better == "min" \
-            else sorted(candidates, key=lambda n: (-key(n, backends[n]), n))[0]
+        sign = -1 if better == "max" else 1
+        return sorted(scored, key=lambda vn: (vn[0] * sign, vn[1]))[0][1]
 
     return {
-        "tokens": best(lambda n, b: b["tokens"]["total"]["mean"], "min"),
-        "quality": best(lambda n, b: b["rubric"]["quality"]["mean"] or None, "max"),
-        "errors": best(lambda n, b: b["errors"]["mean_per_run"], "min"),
-        "intelligence": best(lambda n, b: b["rubric"]["intelligence"]["mean"] or None, "max"),
-        "coding": best(lambda n, b: b["rubric"]["coding"]["mean"] or None, "max"),
+        "tokens": best(lambda b: b["tokens"]["total"]["mean"], "min"),
+        "quality": best(lambda b: b["rubric"]["quality"]["mean"], "max", True),
+        "errors": best(lambda b: b["errors"]["mean_per_run"], "min"),
+        "intelligence": best(lambda b: b["rubric"]["intelligence"]["mean"], "max", True),
+        "coding": best(lambda b: b["rubric"]["coding"]["mean"], "max", True),
     }
 
 
 def build_summary(runs: list[dict[str, Any]], *, generated_at: str | None = None) -> dict[str, Any]:
     backends = aggregate_backends(runs)
     return {
-        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": generated_at
+        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "n_runs": len(runs),
         "backends": backends,
         "categories": aggregate_categories(runs),
@@ -294,71 +440,123 @@ def build_summary(runs: list[dict[str, Any]], *, generated_at: str | None = None
 # --------------------------------------------------------------------------
 # markdown
 # --------------------------------------------------------------------------
+def _fmt(value: Any, digits: int = 2) -> str:
+    """``3246`` for whole numbers, otherwise ``digits`` decimals."""
+    number = _num(value)
+    if abs(number - round(number)) < 1e-9:
+        return str(int(round(number)))
+    return f"{number:.{digits}f}"
+
+
+def _pct(value: Any) -> str:
+    return f"{_num(value) * 100:.1f}%"
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
+    """Compact markdown report (one table per backend, one per category)."""
     backends = summary["backends"]
+    categories = summary["categories"]
     winners = summary["winners"]
+    backend_names = list(backends)
+
     lines = [
-        "# Benchmark summary",
+        f"## Benchmark summary - {summary['n_runs']} runs "
+        f"(generated {summary['generated_at']})",
         "",
-        f"Generated: `{summary['generated_at']}` — {summary.get('n_runs', 0)} runs, "
-        f"{len(backends)} backend(s).",
-        "",
-        "| backend | mode | runs | pass rate | tokens total (mean / median) | "
-        "wall clock (mean / median) | quality | intelligence | coding | errors (total / per run) |",
-        "|---|---|---:|---:|---|---|---:|---:|---:|---|",
+        "| backend | mode | avail | n | pass rate | tokens total mean/median "
+        "| errors total/mean | wall clock s mean/median | rubric Q/I/C mean |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for name, b in backends.items():
-        flag = "" if b["available"] else " *(unavailable)*"
+    for name in backend_names:
+        block = backends[name]
+        rubric = " / ".join(_fmt(block["rubric"][dim]["mean"]) for dim in RUBRIC_DIMENSIONS)
         lines.append(
-            "| {name} | {mode} | {n} | {rate:.0%} | {tm:g} / {td:g} | "
-            "{wm:g}s / {wd:g}s | {q:g} | {i:g} | {c:g} | {et:g} / {ep:g} |".format(
-                name=name + flag,
-                mode=b["engine_mode"],
-                n=b["n_runs"],
-                rate=b["pass_rate"],
-                tm=b["tokens"]["total"]["mean"],
-                td=b["tokens"]["total"]["median"],
-                wm=b["wall_clock"]["mean"],
-                wd=b["wall_clock"]["median"],
-                q=b["rubric"]["quality"]["mean"],
-                i=b["rubric"]["intelligence"]["mean"],
-                c=b["rubric"]["coding"]["mean"],
-                et=b["errors"]["total"],
-                ep=b["errors"]["mean_per_run"],
+            "| {name} | {mode} | {avail} | {n} | {rate} | {tokens} | {errors} "
+            "| {wall} | {rubric} |".format(
+                name=name,
+                mode=block["engine_mode"],
+                avail="yes" if block["available"] else "no",
+                n=block["n_runs"],
+                rate=_pct(block["pass_rate"]),
+                tokens=f"{_fmt(block['tokens']['total']['mean'])} / "
+                       f"{_fmt(block['tokens']['total']['median'])}",
+                errors=f"{_fmt(block['errors']['total'])} / "
+                       f"{_fmt(block['errors']['mean_per_run'])}",
+                wall=f"{_fmt(block['wall_clock']['mean'], 3)} / "
+                     f"{_fmt(block['wall_clock']['median'], 3)}",
+                rubric=rubric,
             )
         )
-    lines += ["", "**Winners**", "", "| metric | backend |", "|---|---|"]
-    for metric in ("tokens", "quality", "errors", "intelligence", "coding"):
-        lines.append(f"| {metric} | {winners.get(metric) or '-'} |")
-    return "\n".join(lines) + "\n"
+
+    lines += [
+        "",
+        "### By category - n runs, pass rate, tokens total median, rubric mean",
+        "",
+        "| category | " + " | ".join(backend_names) + " |",
+        "| --- |" + " --- |" * len(backend_names),
+    ]
+    for category, by_backend in categories.items():
+        cells = []
+        for name in backend_names:
+            entry = by_backend.get(name)
+            if not entry:
+                cells.append("-")
+                continue
+            cells.append(
+                f"{entry['n_runs']} / {_pct(entry['pass_rate'])} / "
+                f"{_fmt(entry['tokens_total_median'])} / {_fmt(entry['rubric_mean'])}"
+            )
+        lines.append(f"| {category} | " + " | ".join(cells) + " |")
+
+    lines += [
+        "",
+        "**Winners** "
+        + " - ".join(f"{key}: `{value or 'n/a'}`" for key, value in winners.items()),
+    ]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
-# CLI
+# entry point
 # --------------------------------------------------------------------------
-def main(argv: list[str] | None = None) -> int:
+HERE = Path(__file__).resolve().parent
+
+
+def write_summary(summary: dict[str, Any], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    here = Path(__file__).resolve().parent
-    parser.add_argument("--results", default=str(here / "results"), help="results directory to scan")
-    parser.add_argument("--out", default=None, help="summary.json path (default: <results>/summary.json)")
+    parser.add_argument("--results", type=Path, default=HERE / "results",
+                        help="directory to scan for run.json (default: benchmark/results)")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="summary.json path (default: <results>/summary.json)")
+    parser.add_argument("--category-map", type=Path, default=None,
+                        help="JSON file mapping task_id -> category")
     parser.add_argument("--quiet", action="store_true", help="do not print the markdown table")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
-    results_dir = Path(args.results).resolve()
-    runs = discover_runs(results_dir)
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    results_dir: Path = args.results
+    out_path: Path = args.out or results_dir / "summary.json"
+
+    capability = load_capability(results_dir)
+    category_map = load_category_map(args.category_map)
+    runs = discover_runs(results_dir, capability, category_map)
     if not runs:
         print(f"aggregate: no run.json found under {results_dir}", file=sys.stderr)
         return 1
 
     summary = build_summary(runs)
-    out_path = Path(args.out).resolve() if args.out else results_dir / "summary.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-
+    write_summary(summary, out_path)
+    print(f"aggregate: wrote {out_path} ({len(runs)} runs, "
+          f"{len(summary['backends'])} backends)", file=sys.stderr)
     if not args.quiet:
-        sys.stdout.write(render_markdown(summary))
-    print(f"\nwrote {out_path} ({summary['n_runs']} runs, {len(summary['backends'])} backends)",
-          file=sys.stderr)
+        print(render_markdown(summary))
     return 0
 
 

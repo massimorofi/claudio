@@ -1,0 +1,39 @@
+{
+  "backend": "claude_code",
+  "changed_files": [
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/retry.cpython-312.pyc",
+    "app/retry.py",
+    "tests/__pycache__/__init__.cpython-312.pyc",
+    "tests/__pycache__/test_retry.cpython-312.pyc"
+  ],
+  "diff_lines": 30,
+  "duration_s": 0.152,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 1,
+    "retries": 1,
+    "timeouts": 0,
+    "tool_errors": 0
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "inline_seed",
+  "session_events": 13,
+  "task_id": "fix_retry_backoff",
+  "timed_out": false,
+  "timeout_s": 30.0,
+  "tokens": {
+    "cache_read": 446,
+    "cache_write": 0,
+    "input": 3061,
+    "output": 878,
+    "total": 4385
+  },
+  "trial": 1,
+  "verification_passed": true,
+  "verify_command": "python3 -m unittest discover -s tests -t . -q",
+  "verify_exit_code": 0
+}

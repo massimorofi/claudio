@@ -1,0 +1,26 @@
+{
+  "backends": {
+    "claude_code": {
+      "argv": "claude -p <prompt> --output-format stream-json",
+      "available": false,
+      "binary": "claude",
+      "engine_mode": "stub",
+      "reason": "claude binary not on PATH"
+    },
+    "google_adk": {
+      "argv": "in-process google.adk runner",
+      "available": false,
+      "binary": null,
+      "engine_mode": "stub",
+      "reason": "google-adk importable but in-process runs need a reachable model endpoint; set CLAUDIO_BENCH_ALLOW_REAL=1 to enable"
+    },
+    "opencode": {
+      "argv": "opencode run <prompt> --format json",
+      "available": false,
+      "binary": "opencode",
+      "engine_mode": "stub",
+      "reason": "opencode binary not on PATH"
+    }
+  },
+  "generated_by": "benchmark/runner.py --probe-capability"
+}
