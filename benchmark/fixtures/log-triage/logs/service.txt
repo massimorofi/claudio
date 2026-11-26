@@ -1,0 +1,10 @@
+2026-05-04T09:00:01Z INFO  worker pool_size=4
+2026-05-04T09:00:02Z INFO  db connected host=pg-primary
+2026-05-04T09:12:44Z WARN  db slow_query=1.9s stmt=orders_rollup
+2026-05-04T09:20:10Z ERROR api timeout upstream=worker req=8841
+2026-05-04T09:20:11Z ERROR worker task_failed task=8841 err="pool timeout after 5s"
+2026-05-04T09:21:02Z ERROR worker task_failed task=8842 err="pool timeout after 5s"
+2026-05-04T09:21:30Z WARN  api retry req=8842 attempt=1
+2026-05-04T09:22:05Z ERROR worker task_failed task=8843 err="pool timeout after 5s"
+2026-05-04T09:23:00Z INFO  worker recovered pool_size=4
+2026-05-04T09:24:12Z ERROR api timeout upstream=worker req=8850
