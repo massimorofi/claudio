@@ -1,15 +1,15 @@
 {
   "backend_anon": "B",
-  "evidence_sha": "05e77e52ffd1717bb0b7422e6e785ca6760321c705443714c4e7edb6e89581cc",
+  "evidence_sha": "ef748fd3a434cac0790910d4ddada562fcbe9b5516d7efd5e261fccf3c277772",
   "justifications": {
-    "coding": "Verification passed (exit 0) so the code demonstrably works; docked for 1 tool/command error(s), 4 out-of-scope artifact(s) in the change set.",
-    "intelligence": "Intelligence 1: 1 tool/command error(s) recovered from, 1 retried action(s), scope discipline: 4 stray path(s).",
-    "quality": "Quality 3: 4 non-source artifact(s) committed."
+    "coding": "Coding 3: 4 out-of-scope artifact(s); 1 command/tool error(s).",
+    "intelligence": "Intelligence 2: 1 command/tool error(s); 1 retries; 4 out-of-scope artifact(s).",
+    "quality": "Quality 2: 4 out-of-scope artifact(s); 1 command/tool error(s); 1 retries."
   },
   "mode": "heuristic",
   "scores": {
-    "coding": 2,
-    "intelligence": 1,
-    "quality": 3
+    "coding": 3,
+    "intelligence": 2,
+    "quality": 2
   }
 }

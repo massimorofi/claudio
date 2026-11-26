@@ -1,31 +1,22 @@
-"""Tests for the blind benchmark judge (stdlib-only, offline).
+"""Tests for benchmark/judge.py -- determinism, anonymization, score bounds.
 
-    PYTHONPATH=benchmark python3 -m pytest benchmark/tests/test_judge.py -q
+Everything runs offline in a tmp_path fixture: no network, no real results tree.
 """
 
 from __future__ import annotations
 
 import json
-import re
-import subprocess
+import random
 import sys
 from pathlib import Path
 
 import pytest
 
-HERE = Path(__file__).resolve().parent
-BENCH = HERE.parent
-if str(BENCH) not in sys.path:  # lets the file run without PYTHONPATH too
-    sys.path.insert(0, str(BENCH))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import judge as J  # noqa: E402
 
-AXES = ("quality", "intelligence", "coding")
-
-
-# --------------------------------------------------------------------------- #
-# fixtures / helpers
-# --------------------------------------------------------------------------- #
+BACKENDS = ["claude_code", "google_adk", "opencode"]
 
 
 def make_run(
@@ -34,68 +25,35 @@ def make_run(
     task: str = "fix_slugify",
     trial: int = 1,
     *,
-    verification_passed: bool = True,
-    diff: str | None = None,
-    verify: str | None = None,
-    errors: dict | None = None,
-    changed_files: list[str] | None = None,
-    timed_out: bool = False,
+    run: dict | None = None,
+    diff: str = "diff --git a/app/text.py b/app/text.py\n+def slugify(s):\n+    return s.lower()\n",
+    verify: str = "1 passed in 0.01s\n",
+    prompt: str = "Make slugify lowercase the input.",
 ) -> Path:
-    """Materialise a minimal but realistic ``<backend>/<task>/trial_<k>`` run dir."""
+    """Create ``root/<backend>/<task>/trial_<k>/`` with the runner's artifacts."""
     run_dir = root / backend / task / "trial_{0}".format(trial)
     run_dir.mkdir(parents=True, exist_ok=True)
-    diff_text = (
-        diff
-        if diff is not None
-        else (
-            "--- a/app/text.py\n+++ b/app/text.py\n"
-            "@@ -1,2 +1,2 @@\n-def slugify(s):\n-    return s\n"
-            "+def slugify(s):\n+    return '-'.join(s.lower().split())\n"
-        )
-    )
-    (run_dir / "prompt.txt").write_text("slugify() mishandles punctuation. Make tests pass.\n")
-    (run_dir / "diff.patch").write_text(diff_text)
-    (run_dir / "verify.txt").write_text(
-        verify
-        if verify is not None
-        else "command: python3 -m unittest discover -s tests -t . -q\nexit_status: 0\n\nOK\n"
-    )
-    (run_dir / "stdout.txt").write_text("")
-    (run_dir / "stderr.txt").write_text("")
-    (run_dir / "session.jsonl").write_text("")
-    (run_dir / "run.json").write_text(
-        json.dumps(
-            {
-                "backend": backend,
-                "task_id": task,
-                "trial": trial,
-                "engine_mode": "stub",
-                "exit_status": "timeout" if timed_out else "ok",
-                "timed_out": timed_out,
-                "engine_exit_code": 0,
-                "verify_exit_code": 0 if verification_passed else 1,
-                "verification_passed": verification_passed,
-                "diff_lines": len(diff_text.splitlines()),
-                "changed_files": changed_files
-                if changed_files is not None
-                else ["app/text.py"],
-                "errors": errors
-                or {"command_errors": 0, "tool_errors": 0, "retries": 0, "timeouts": 0},
-                "tokens": {"input": 10, "output": 5, "cache_read": 0, "cache_write": 0, "total": 15},
-            },
-            indent=2,
-        )
-    )
+    payload = {
+        "backend": backend,
+        "task_id": task,
+        "trial": trial,
+        "verification_passed": True,
+        "verify_exit_code": 0,
+        "engine_exit_code": 0,
+        "timed_out": False,
+        "diff_lines": 3,
+        "changed_files": ["app/text.py"],
+        "errors": {"command_errors": 0, "tool_errors": 0, "retries": 0, "timeouts": 0},
+    }
+    payload.update(run or {})
+    (run_dir / "run.json").write_text(json.dumps(payload), "utf-8")
+    if prompt is not None:
+        (run_dir / "prompt.txt").write_text(prompt, "utf-8")
+    if diff is not None:
+        (run_dir / "diff.patch").write_text(diff, "utf-8")
+    if verify is not None:
+        (run_dir / "verify.txt").write_text(verify, "utf-8")
     return run_dir
-
-
-@pytest.fixture
-def results_root(tmp_path: Path) -> Path:
-    """A three-backend results tree with one trial each."""
-    root = tmp_path / "results"
-    for backend in ("claude_code", "google_adk", "opencode"):
-        make_run(root, backend)
-    return root
 
 
 # --------------------------------------------------------------------------- #
@@ -103,92 +61,45 @@ def results_root(tmp_path: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def test_build_evidence_packs_all_four_sections(tmp_path):
-    run_dir = make_run(tmp_path)
-    ev = J.build_evidence(run_dir, label="Engine A")
+def test_evidence_packs_prompt_diff_verification_and_errors(tmp_path):
+    make_run(tmp_path)
+    ev = J.build_evidence(tmp_path / "claude_code" / "fix_slugify" / "trial_1", "A")
     assert isinstance(ev, str)
-    assert "TASK PROMPT" in ev and "DIFF.PATCH" in ev
-    assert "VERIFICATION OUTPUT" in ev and "ERROR SUMMARY" in ev
-    assert "slugify() mishandles punctuation" in ev
-    assert "verification_passed: yes" in ev
+    assert "Make slugify lowercase the input." in ev
+    assert "def slugify" in ev
+    assert "1 passed in 0.01s" in ev
+    for field in (
+        "verification_passed:",
+        "verify_exit_code:",
+        "errors:",
+        "files_changed:",
+        "suspicious_paths:",
+        "todo_markers:",
+    ):
+        assert field in ev
 
 
-def test_build_evidence_is_anonymized(tmp_path):
-    run_dir = make_run(tmp_path, backend="google_adk")
-    ev = J.build_evidence(run_dir, label="Engine B")
-    assert "google_adk" not in ev
-    assert "Engine B" in ev
+def test_diff_is_truncated_to_the_fixed_budget(tmp_path):
+    make_run(tmp_path, diff="diff --git a/x b/x\n" + "+line\n" * 4000)
+    ev = J.build_evidence(tmp_path / "claude_code" / "fix_slugify" / "trial_1", "A")
+    assert "[truncated" in ev
+    assert len(ev) < J.DIFF_BUDGET + 2000
 
 
-def test_build_evidence_respects_diff_budget(tmp_path):
-    huge = "+line\n" * 5000
-    run_dir = make_run(tmp_path, diff=huge)
-    ev = J.build_evidence(run_dir, label="Engine A")
-    assert "truncated" in ev
-    assert len(ev) < len(huge) + 2000
+def test_evidence_never_leaks_the_backend_name(tmp_path):
+    make_run(tmp_path)
+    ev = J.build_evidence(tmp_path / "claude_code" / "fix_slugify" / "trial_1", "A")
+    assert "claude_code" not in ev
+    assert "engine_label: A" in ev
 
 
-def test_evidence_sha_is_stable_and_64_hex(tmp_path):
-    run_dir = make_run(tmp_path)
-    a = J.build_evidence(run_dir, label="Engine A")
-    b = J.build_evidence(run_dir, label="Engine A")
-    assert a == b
-    assert re.fullmatch(r"[0-9a-f]{64}", a.sha256)
-    assert a.sha256 == J.evidence_sha(str(b))
-    # a different run must hash differently
-    other = J.build_evidence(make_run(tmp_path, task="fix_sum_list"), label="Engine A")
-    assert other.sha256 != a.sha256
-
-
-# --------------------------------------------------------------------------- #
-# anonymization
-# --------------------------------------------------------------------------- #
-
-
-def test_anonymize_is_stable_across_calls_and_orders():
-    backends = ["claude_code", "google_adk", "opencode"]
-    first = J.anonymize(backends)
-    assert first == J.anonymize(backends)
-    assert first == J.anonymize(list(reversed(backends)))
-    assert first == J.anonymize(tuple(sorted(backends, reverse=True)))
-
-
-def test_anonymize_gives_distinct_abc_labels():
-    mapping = J.anonymize(["claude_code", "google_adk", "opencode"])
-    assert sorted(mapping.values()) == ["A", "B", "C"]
-    assert len(mapping) == 3
-
-
-def test_anonymize_uses_the_documented_seed():
-    import random
-
-    order = sorted(["claude_code", "google_adk", "opencode"])
-    random.Random(J.ANON_SEED).shuffle(order)
-    assert J.anonymize(["opencode", "claude_code", "google_adk"]) == {
-        order[0]: "A",
-        order[1]: "B",
-        order[2]: "C",
-    }
-
-
-def test_judge_key_roundtrip_is_auditable(tmp_path, results_root):
-    mapping = J.anonymize(J.discover_backends(results_root))
-    key_path = J.write_judge_key(results_root, mapping)
-    assert key_path.is_file()
-    payload = json.loads(key_path.read_text())
-    assert payload["seed"] == "claudio-bench-2026"
-    assert payload["mapping"] == J.invert_anonymization(mapping)
-    assert J.read_judge_key(results_root) == mapping
-
-
-def test_judge_key_written_by_cli(tmp_path, results_root):
-    out = subprocess.run(
-        [sys.executable, str(BENCH / "judge.py"), "--results", str(results_root), "--quiet"],
-        capture_output=True,
-        text=True,
-    )
-    assert out.returncode == 0, out.stderr
-    assert (results_root / "judge_key.json").is_file()
+def test_evidence_sha_is_stable_and_matches_hashlib(tmp_path):
+    make_run(tmp_path)
+    run_dir = tmp_path / "claude_code" / "fix_slugify" / "trial_1"
+    ev1, ev2 = J.build_evidence(run_dir, "A"), J.build_evidence(run_dir, "A")
+    assert ev1 == ev2
+    assert J.evidence_sha(ev1) == J.evidence_sha(ev2)
+    assert len(J.evidence_sha(ev1)) == 64
 
 
 # --------------------------------------------------------------------------- #
@@ -196,167 +107,144 @@ def test_judge_key_written_by_cli(tmp_path, results_root):
 # --------------------------------------------------------------------------- #
 
 
-def test_heuristic_scores_are_deterministic(tmp_path):
-    ev = J.build_evidence(make_run(tmp_path), label="Engine A")
-    first = J.heuristic_scores(ev)
-    for _ in range(5):
-        assert J.heuristic_scores(ev) == first
+def test_same_evidence_gives_same_scores(tmp_path):
+    make_run(tmp_path)
+    ev = J.build_evidence(tmp_path / "claude_code" / "fix_slugify" / "trial_1", "A")
+    first, second = J.heuristic_scores(ev), J.heuristic_scores(ev)
+    assert first == second
+    assert first["scores"] == second["scores"]
+    assert first["justifications"] == second["justifications"]
 
 
-def test_same_evidence_gives_same_scores_across_dirs(tmp_path):
-    a = make_run(tmp_path, "claude_code", "fix_slugify")
-    b = make_run(tmp_path, "google_adk", "fix_slugify")
-    ev_a = J.build_evidence(a, label="Engine A")
-    ev_b = J.build_evidence(b, label="Engine A")
-    assert ev_a == ev_b  # identical inputs -> identical evidence
-    assert J.heuristic_scores(ev_a) == J.heuristic_scores(ev_b)
+def test_rejudging_a_run_reproduces_identical_artifacts(tmp_path):
+    run_dir = make_run(tmp_path)
+    first = J.judge(run_dir)
+    written = (run_dir / "judge.json").read_text("utf-8")
+    second = J.judge(run_dir)
+    assert first == second
+    assert written == (run_dir / "judge.json").read_text("utf-8")
+    assert first["evidence_sha"] == second["evidence_sha"]
 
 
-def test_full_run_is_reproducible(tmp_path, results_root):
-    def snapshot():
-        return {
-            str(p.relative_to(results_root)): p.read_text()
-            for p in sorted(results_root.glob("*/*/trial_*/judge.json"))
-        }
-
-    J.judge_results(results_root)
-    snap1 = snapshot()
-    J.judge_results(results_root)
-    assert snapshot() == snap1
+def test_rejudging_the_whole_matrix_is_reproducible(tmp_path):
+    for backend in BACKENDS:
+        make_run(tmp_path, backend=backend)
+    first = {p.name: payload for p, payload in J.judge_results(tmp_path)}
+    second = {p.name: payload for p, payload in J.judge_results(tmp_path)}
+    assert first == second
 
 
 # --------------------------------------------------------------------------- #
-# score bounds + anchoring
+# anonymization
 # --------------------------------------------------------------------------- #
 
-_VARIANTS = {
-    "clean": {},
-    "failing": {"verification_passed": False},
-    "timeout": {"verification_passed": False, "timed_out": True},
+
+def test_anonymize_is_stable_across_calls_and_input_order():
+    forward = J.anonymize(BACKENDS)
+    assert J.anonymize(BACKENDS) == forward
+    assert J.anonymize(list(reversed(BACKENDS))) == forward
+    assert J.anonymize(["opencode", "claude_code", "google_adk"]) == forward
+    assert sorted(forward.values()) == ["A", "B", "C"]
+    assert len(set(forward.values())) == len(forward)
+
+
+def test_anonymize_matches_the_documented_seeded_shuffle():
+    order = sorted(BACKENDS)
+    rng = random.Random("claudio-bench-2026")
+    rng.shuffle(order)
+    assert J.anonymize(BACKENDS) == {b: lbl for b, lbl in zip(order, "ABC")}
+
+
+def test_judge_key_is_written_and_decodes_the_labels(tmp_path):
+    for backend in BACKENDS:
+        make_run(tmp_path, backend=backend)
+    J.judge_results(tmp_path)
+    key = json.loads((tmp_path / "judge_key.json").read_text("utf-8"))
+    assert key["seed"] == "claudio-bench-2026"
+    assert key["reverse"] == {label: backend for backend, label in key["mapping"].items()}
+    for run_dir, payload in J.judge_results(tmp_path):
+        assert key["reverse"][payload["backend_anon"]] == run_dir.parent.parent.name
+
+
+# --------------------------------------------------------------------------- #
+# score bounds and the verification anchor
+# --------------------------------------------------------------------------- #
+
+RUN_SHAPES = {
+    "clean_pass": {},
+    "failed": {"verification_passed": False, "verify_exit_code": 1},
+    "timeout": {"timed_out": True, "verification_passed": False, "errors": {"timeouts": 1}},
     "noisy": {
-        "errors": {"command_errors": 3, "tool_errors": 4, "retries": 5, "timeouts": 0},
-        "changed_files": ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "g.py", "h.py", "i.py"],
+        "errors": {"command_errors": 3, "tool_errors": 2, "retries": 4, "timeouts": 0},
+        "changed_files": ["a.py"] + ["p{0}".format(i) for i in range(12)],
     },
-    "markers": {"diff": "+def f():\n+    # TODO finish this\n+    raise NotImplementedError\n"},
-    "stray_artifacts": {"changed_files": ["app/x.py", "__pycache__/x.pyc", "y.pyc"]},
-    "huge_diff": {"diff": "+x\n" * 2000},
-    "empty_diff": {"diff": ""},
+    "stray_artifacts": {
+        "changed_files": ["app/__pycache__/x.pyc", "app/__pycache__/y.pyc", "app/__pycache__/z.pyc"]
+    },
+    "huge_diff": {"diff_lines": 5000, "changed_files": ["a.py"] * 20},
 }
 
 
-@pytest.mark.parametrize("name", sorted(_VARIANTS))
-def test_scores_are_ints_within_1_and_5(tmp_path, name):
-    run_dir = make_run(tmp_path, **_VARIANTS[name])
-    record = J.judge(run_dir, results_root=tmp_path, mapping={"claude_code": "A"}, write=False)
-    assert set(record["scores"]) == set(AXES)
-    for axis in AXES:
-        value = record["scores"][axis]
-        assert isinstance(value, int) and not isinstance(value, bool)
-        assert 1 <= value <= 5
+@pytest.mark.parametrize("shape", sorted(RUN_SHAPES))
+def test_scores_are_always_ints_in_1_to_5(tmp_path, shape):
+    make_run(tmp_path, run=RUN_SHAPES[shape])
+    payload = J.judge(tmp_path / "claude_code" / "fix_slugify" / "trial_1")
+    assert set(payload["scores"]) == set(J.AXES)
+    for axis, value in payload["scores"].items():
+        assert isinstance(value, int) and not isinstance(value, bool), axis
+        assert 1 <= value <= 5, (axis, value)
+    assert payload["mode"] in ("llm", "heuristic")
+    assert set(payload["justifications"]) == set(J.AXES)
+    assert all(payload["justifications"].values())
+    assert len(payload["evidence_sha"]) == 64
 
 
-@pytest.mark.parametrize("name", sorted(_VARIANTS))
-def test_judge_json_schema(tmp_path, name):
-    run_dir = make_run(tmp_path, **_VARIANTS[name])
-    record = J.judge(run_dir, results_root=tmp_path, mapping={"claude_code": "A"})
-    assert set(record) == {"backend_anon", "mode", "scores", "justifications", "evidence_sha"}
-    assert record["backend_anon"] == "A"
-    assert record["mode"] in ("llm", "heuristic")
-    assert set(record["justifications"]) == set(AXES)
-    assert all(isinstance(v, str) and v for v in record["justifications"].values())
-    assert re.fullmatch(r"[0-9a-f]{64}", record["evidence_sha"])
-    on_disk = json.loads((run_dir / "judge.json").read_text())
-    assert on_disk == record
-
-
-def test_broken_code_cannot_be_scored_as_working(tmp_path):
-    """The verification anchor: a failed pytest run caps Coding/Quality at 2."""
-    run_dir = make_run(
-        tmp_path,
-        verification_passed=False,
-        diff="+def slugify(s):\n+    return s.strip()\n",
-        verify="FAILED tests/test_text.py::test_slugify\n\n1 failed, 0 passed\n",
+def fake_judge(tmp_path: Path, answer: str) -> str:
+    """Path to a tiny judge command that echoes ``answer`` on stdout."""
+    script = tmp_path / "fake_judge.py"
+    script.write_text(
+        "import sys\nsys.stdin.read()\nsys.stdout.write({0!r})\n".format(answer), "utf-8"
     )
-    ev = J.build_evidence(run_dir, label="Engine A")
-    scores = J.heuristic_scores(ev)["scores"]
+    return "{0} {1}".format(sys.executable, script)
+
+
+def test_broken_code_cannot_be_scored_as_working(tmp_path, monkeypatch):
+    make_run(tmp_path, run={"verification_passed": False, "verify_exit_code": 1})
+    run_dir = tmp_path / "claude_code" / "fix_slugify" / "trial_1"
+    scores = J.heuristic_scores(J.build_evidence(run_dir, "A"))["scores"]
     assert scores["coding"] <= 2 and scores["quality"] <= 2
-
-    # even a rogue external judge cannot promote broken code past the anchor
-    anchored = J.anchor_to_verification({"quality": 5, "intelligence": 5, "coding": 5}, J.parse_evidence(ev))
-    assert anchored["coding"] <= 2 and anchored["quality"] <= 2
-
-
-def test_passing_run_scores_higher_than_failing_one(tmp_path):
-    good = J.heuristic_scores(J.build_evidence(make_run(tmp_path, "claude_code"), "Engine A"))
-    bad = J.heuristic_scores(
-        J.build_evidence(make_run(tmp_path, "google_adk", verification_passed=False), "Engine A")
-    )
-    assert good["scores"]["coding"] > bad["scores"]["coding"]
+    # the same cap holds for an external judge that claims a perfect run
+    lying = '{"quality": 5, "intelligence": 5, "coding": 5, "justifications": {}}'
+    monkeypatch.setenv("BENCHMARK_JUDGE_CMD", fake_judge(tmp_path, lying))
+    capped = J.judge(run_dir)
+    assert capped["mode"] == "llm"
+    assert capped["scores"]["coding"] <= 2 and capped["scores"]["quality"] <= 2
 
 
-# --------------------------------------------------------------------------- #
-# scope discipline
-# --------------------------------------------------------------------------- #
-
-
-def test_scope_penalty_is_monotonic():
-    assert J.scope_penalty(0) == 0
-    assert J.scope_penalty(1) == 1
-    assert J.scope_penalty(2) == 1
-    assert J.scope_penalty(3) == 2
-    assert J.scope_penalty(0, n_files=9) == 1
-    assert J.scope_penalty(3, n_files=9) == 3
-
-
-def test_stray_artifacts_score_below_a_clean_run(tmp_path):
-    """Scope discipline is a real signal: committed junk must cost points."""
-    clean = J.heuristic_scores(
-        J.build_evidence(make_run(tmp_path, "claude_code", "fix_slugify"), "Engine A")
-    )
-    sloppy = J.heuristic_scores(
-        J.build_evidence(
-            make_run(
-                tmp_path,
-                "google_adk",
-                "fix_slugify",
-                changed_files=[
-                    "app/text.py",
-                    "app/__pycache__/text.cpython-312.pyc",
-                    "tests/__pycache__/test_text.cpython-312.pyc",
-                    "leftover.pyc",
-                ],
-            ),
-            "Engine A",
-        )
-    )
-    for axis in AXES:
-        assert sloppy["scores"][axis] <= clean["scores"][axis]
-    assert sloppy["scores"]["coding"] < clean["scores"]["coding"]
-    assert "scope discipline" in sloppy["justifications"]["intelligence"]
-
-
-def test_scope_penalty_never_breaks_bounds(tmp_path):
-    run_dir = make_run(
+def test_scores_discriminate_clean_from_noisy_runs(tmp_path):
+    clean = make_run(tmp_path, task="clean_task", run={"changed_files": ["app/text.py"]})
+    noisy = make_run(
         tmp_path,
-        changed_files=["a.pyc"] * 5 + ["b.log"] * 5 + ["c.py"],
+        task="noisy_task",
+        run={
+            "changed_files": ["app/text.py"] + ["app/__pycache__/p{0}.pyc".format(i) for i in range(4)],
+            "errors": {"command_errors": 2, "tool_errors": 2, "retries": 3, "timeouts": 0},
+        },
     )
-    record = J.judge(run_dir, results_root=tmp_path, mapping={"claude_code": "A"}, write=False)
-    assert all(1 <= v <= 5 for v in record["scores"].values())
+    good = J.heuristic_scores(J.build_evidence(clean, "A"))["scores"]
+    bad = J.heuristic_scores(J.build_evidence(noisy, "A"))["scores"]
+    assert good == {"quality": 5, "intelligence": 5, "coding": 5}
+    assert all(bad[axis] < good[axis] for axis in J.AXES)
 
 
-# --------------------------------------------------------------------------- #
-# rubric
-# --------------------------------------------------------------------------- #
-
-
-def test_rubric_is_fixed_and_anchored_on_verification():
-    first, second = J.rubric_prompt(), J.rubric_prompt()
-    assert first == second
-    for axis in ("Quality", "Intelligence", "Coding Ability"):
-        assert axis in first
-    assert "1-5" in first
-    assert "verification" in first.lower()
-    assert "MUST be 1 or 2" in first
+def test_rubric_prompt_has_all_three_anchored_axes():
+    rubric = J.rubric_prompt()
+    assert rubric == J.rubric_prompt()
+    for heading in ("Quality", "Intelligence", "Coding Ability"):
+        assert heading in rubric
+    for anchor in ("5 =", "1 ="):
+        assert anchor in rubric
+    assert "MUST be 1 or 2" in rubric
 
 
 # --------------------------------------------------------------------------- #
@@ -364,70 +252,41 @@ def test_rubric_is_fixed_and_anchored_on_verification():
 # --------------------------------------------------------------------------- #
 
 
-def test_default_mode_is_heuristic(tmp_path, results_root, monkeypatch):
-    monkeypatch.delenv("BENCHMARK_JUDGE_CMD", raising=False)
-    record = J.judge(results_root / "claude_code" / "fix_slugify" / "trial_1", results_root)
-    assert record["mode"] == "heuristic"
-
-
-def test_llm_mode_uses_external_command(tmp_path, results_root, monkeypatch):
-    fake = tmp_path / "fake_judge.py"
-    fake.write_text(
-        "import json,sys\n"
-        "d=json.load(sys.stdin)\n"
-        "assert 'BENCHMARK EVIDENCE' in d['evidence']\n"
-        "assert 'rubric' in d\n"
-        "print(json.dumps({'quality':4,'intelligence':3,'coding':5,"
-        "'justifications':{'quality':'q','intelligence':'i','coding':'c'}}))\n"
+def test_llm_mode_is_used_when_the_command_works(tmp_path, monkeypatch):
+    make_run(tmp_path)
+    answer = json.dumps(
+        {
+            "quality": 4,
+            "intelligence": 5,
+            "coding": 4,
+            "justifications": {"quality": "q", "intelligence": "i", "coding": "c"},
+        }
     )
-    monkeypatch.setenv("BENCHMARK_JUDGE_CMD", "{0} {1}".format(sys.executable, fake))
-    record = J.judge(results_root / "claude_code" / "fix_slugify" / "trial_1", results_root)
-    assert record["mode"] == "llm"
-    assert record["scores"] == {"quality": 4, "intelligence": 3, "coding": 5}
-    assert record["justifications"] == {"quality": "q", "intelligence": "i", "coding": "c"}
+    monkeypatch.setenv("BENCHMARK_JUDGE_CMD", fake_judge(tmp_path, answer))
+    payload = J.judge(tmp_path / "claude_code" / "fix_slugify" / "trial_1")
+    assert payload["mode"] == "llm"
+    assert payload["scores"] == {"quality": 4, "intelligence": 5, "coding": 4}
+    assert payload["justifications"] == {"quality": "q", "intelligence": "i", "coding": "c"}
 
 
-def test_broken_external_command_falls_back_to_heuristic(tmp_path, results_root, monkeypatch):
-    monkeypatch.setenv("BENCHMARK_JUDGE_CMD", "exit 3")
-    record = J.judge(results_root / "claude_code" / "fix_slugify" / "trial_1", results_root)
-    assert record["mode"] == "heuristic"
-    assert all(1 <= v <= 5 for v in record["scores"].values())
+@pytest.mark.parametrize("cmd", ["false", "exit 3", "printf 'not json'", "printf '{\"x\": 99}'"])
+def test_broken_judge_command_falls_back_to_the_heuristic(tmp_path, monkeypatch, cmd):
+    make_run(tmp_path)
+    monkeypatch.setenv("BENCHMARK_JUDGE_CMD", cmd)
+    run_dir = tmp_path / "claude_code" / "fix_slugify" / "trial_1"
+    payload = J.judge(run_dir)
+    assert payload["mode"] == "heuristic"
+    assert payload["scores"] == J.heuristic_scores(J.build_evidence(run_dir, "A"))["scores"]
 
 
-def test_nonsense_external_output_falls_back(tmp_path, results_root, monkeypatch):
-    monkeypatch.setenv("BENCHMARK_JUDGE_CMD", "echo 'not json at all'")
-    record = J.judge(results_root / "opencode" / "fix_slugify" / "trial_1", results_root)
-    assert record["mode"] == "heuristic"
+def test_cli_writes_judge_json_next_to_every_run_json(tmp_path, capsys):
+    for backend in BACKENDS:
+        make_run(tmp_path, backend=backend)
+    assert J.main(["--results", str(tmp_path)]) == 0
+    assert len(list(tmp_path.glob("*/*/trial_*/judge.json"))) == len(BACKENDS)
+    assert (tmp_path / "judge_key.json").is_file()
+    assert "SUMMARY judged={0}".format(len(BACKENDS)) in capsys.readouterr().out
 
 
-def test_out_of_range_external_scores_are_clamped(tmp_path, results_root, monkeypatch):
-    monkeypatch.setenv(
-        "BENCHMARK_JUDGE_CMD",
-        "echo '{\"quality\": 99, \"intelligence\": -4, \"coding\": 3.6}'",
-    )
-    record = J.judge(results_root / "google_adk" / "fix_slugify" / "trial_1", results_root)
-    assert record["mode"] == "llm"
-    assert record["scores"] == {"quality": 5, "intelligence": 1, "coding": 4}
-
-
-# --------------------------------------------------------------------------- #
-# CLI over the committed results tree
-# --------------------------------------------------------------------------- #
-
-
-def test_cli_scores_every_committed_run():
-    repo_results = BENCH / "results"
-    if not repo_results.is_dir():
-        pytest.skip("no committed results tree")
-    runs = sorted(repo_results.glob("*/*/trial_*/run.json"))
-    assert runs, "results tree has run.json but none matched the glob"
-    out = subprocess.run(
-        [sys.executable, str(BENCH / "judge.py"), "--results", str(repo_results), "--quiet"],
-        capture_output=True,
-        text=True,
-    )
-    assert out.returncode == 0, out.stderr
-    assert "judged={0}".format(len(runs)) in out.stdout
-    judges = sorted(repo_results.glob("*/*/trial_*/judge.json"))
-    assert len(judges) == len(runs)
-    assert (repo_results / "judge_key.json").is_file()
+def test_cli_reports_missing_results(tmp_path, capsys):
+    assert J.main(["--results", str(tmp_path / "nope")]) == 1

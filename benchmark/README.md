@@ -103,7 +103,8 @@ python3 benchmark/judge.py --results benchmark/results
 `random.Random('claudio-bench-2026')` over the *sorted* backend list, so the
 mapping is stable no matter what order things are discovered in. The real
 backend name is scrubbed out of the evidence, and the mapping is written to
-`benchmark/results/judge_key.json` so blind scoring stays auditable afterwards.
+`benchmark/results/judge_key.json` (both directions: `mapping` backend -> label
+and `reverse` label -> backend) so blind scoring stays auditable afterwards.
 
 **Two modes.** If `BENCHMARK_JUDGE_CMD` is set, the rubric + anonymized evidence
 are piped to that command on stdin as JSON and it answers with
@@ -119,7 +120,7 @@ offline run reproduces byte-for-byte.
 Intelligence and Coding Ability. It is anchored on the pytest/unittest result:
 if verification did not pass, Coding Ability and Quality **must** be 1 or 2 --
 neither the heuristic nor a rogue external judge can claim broken code works
-(`anchor_to_verification()` enforces the cap on every path).
+(`_anchor()` enforces the cap on every path).
 
 ### judge.json
 
@@ -150,6 +151,6 @@ killed and recorded), artifact completeness and stub determinism. No network.
 The judge tests cover evidence packing and anonymization (no backend name ever
 leaks, the diff respects its budget), determinism (same evidence in, same scores
 out, and a whole re-judge reproduces every `judge.json`), anonymization stability
-across calls and input orders, score bounds (always ints 1-5 across eight run
+across calls and input orders, score bounds (always ints 1-5 across six run
 shapes), the verification anchor, the auditable `judge_key.json`, and both judge
 modes including the fallback when `BENCHMARK_JUDGE_CMD` is broken. No network.

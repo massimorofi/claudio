@@ -6,6 +6,11 @@
     "opencode"
   ],
   "mapping": {
+    "claude_code": "A",
+    "google_adk": "B",
+    "opencode": "C"
+  },
+  "reverse": {
     "A": "claude_code",
     "B": "google_adk",
     "C": "opencode"
