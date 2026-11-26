@@ -1,0 +1,27 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..ccc8a0d
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/settings.cpython-312.pyc b/app/__pycache__/settings.cpython-312.pyc
+new file mode 100644
+index 0000000..efee65a
+Binary files /dev/null and b/app/__pycache__/settings.cpython-312.pyc differ
+diff --git a/app/settings.py b/app/settings.py
+index 6772b03..d97c389 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -2,4 +2,5 @@ import json
+ 
+ 
+ def load_config(path):
+-    raise NotImplementedError
++    with open(path, encoding="utf-8") as fh:
++        return json.load(fh)
+diff --git a/tests/__pycache__/__init__.cpython-312.pyc b/tests/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..72932fe
+Binary files /dev/null and b/tests/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/tests/__pycache__/test_settings.cpython-312.pyc b/tests/__pycache__/test_settings.cpython-312.pyc
+new file mode 100644
+index 0000000..0de9fdb
+Binary files /dev/null and b/tests/__pycache__/test_settings.cpython-312.pyc differ

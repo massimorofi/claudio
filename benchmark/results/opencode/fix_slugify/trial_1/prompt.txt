@@ -1,0 +1,1 @@
+slugify() mishandles punctuation and repeated spaces. Make the tests pass.

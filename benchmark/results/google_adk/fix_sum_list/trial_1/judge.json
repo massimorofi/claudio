@@ -1,0 +1,15 @@
+{
+  "backend_anon": "B",
+  "evidence_sha": "aea5ced067cc9d63084cee1af6948ef08ffccbdc2e4aa9392479934578f3776c",
+  "justifications": {
+    "coding": "Coding 3: 4 out-of-scope artifact(s).",
+    "intelligence": "Intelligence 3: 4 out-of-scope artifact(s).",
+    "quality": "Quality 3: 4 out-of-scope artifact(s)."
+  },
+  "mode": "heuristic",
+  "scores": {
+    "coding": 3,
+    "intelligence": 3,
+    "quality": 3
+  }
+}
