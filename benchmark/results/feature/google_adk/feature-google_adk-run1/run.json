@@ -1,0 +1,22 @@
+{
+  "run_id": "feature-google_adk-run1",
+  "backend": "google_adk",
+  "category": "feature",
+  "task_id": "feature_01",
+  "engine_mode": "native",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 7020,
+    "output": 1215,
+    "total": 8235
+  },
+  "errors": {
+    "command_errors": 0,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 57.4,
+  "started_at": "2026-11-25T09:20:00+00:00"
+}

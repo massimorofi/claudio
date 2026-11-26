@@ -1,0 +1,22 @@
+{
+  "run_id": "codebase_qa-google_adk-run2",
+  "backend": "google_adk",
+  "category": "codebase_qa",
+  "task_id": "codebase_qa_02",
+  "engine_mode": "native",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 4451,
+    "output": 770,
+    "total": 5221
+  },
+  "errors": {
+    "command_errors": 1,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 30.14,
+  "started_at": "2026-11-26T09:26:00+00:00"
+}

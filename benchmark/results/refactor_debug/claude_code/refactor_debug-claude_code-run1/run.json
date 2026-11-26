@@ -1,0 +1,22 @@
+{
+  "run_id": "refactor_debug-claude_code-run1",
+  "backend": "claude_code",
+  "category": "refactor_debug",
+  "task_id": "refactor_debug_01",
+  "engine_mode": "cli_bridge",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 4715,
+    "output": 804,
+    "total": 5519
+  },
+  "errors": {
+    "command_errors": 2,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 40.2,
+  "started_at": "2026-11-25T09:23:00+00:00"
+}

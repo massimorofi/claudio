@@ -1,0 +1,10 @@
+{
+  "backend": "google_adk",
+  "available": true,
+  "engine_mode": "native",
+  "capabilities": {
+    "file_edit": true,
+    "shell": true,
+    "subagents": true
+  }
+}

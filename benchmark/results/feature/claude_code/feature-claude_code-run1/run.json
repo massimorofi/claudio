@@ -1,0 +1,22 @@
+{
+  "run_id": "feature-claude_code-run1",
+  "backend": "claude_code",
+  "category": "feature",
+  "task_id": "feature_01",
+  "engine_mode": "cli_bridge",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 5535,
+    "output": 945,
+    "total": 6480
+  },
+  "errors": {
+    "command_errors": 2,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 46.9,
+  "started_at": "2026-11-25T09:11:00+00:00"
+}

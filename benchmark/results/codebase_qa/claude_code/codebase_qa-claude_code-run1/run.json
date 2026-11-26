@@ -1,0 +1,22 @@
+{
+  "run_id": "codebase_qa-claude_code-run1",
+  "backend": "claude_code",
+  "category": "codebase_qa",
+  "task_id": "codebase_qa_01",
+  "engine_mode": "cli_bridge",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 3280,
+    "output": 560,
+    "total": 3840
+  },
+  "errors": {
+    "command_errors": 2,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 23.45,
+  "started_at": "2026-11-25T09:08:00+00:00"
+}

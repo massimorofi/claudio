@@ -1,0 +1,10 @@
+{
+  "backend": "opencode",
+  "available": true,
+  "engine_mode": "cli_bridge",
+  "capabilities": {
+    "file_edit": true,
+    "shell": true,
+    "subagents": false
+  }
+}

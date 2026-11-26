@@ -1,0 +1,9 @@
+{
+  "judge_model": "rubric-v1",
+  "rubric": {
+    "quality": 4.0,
+    "intelligence": 4.3,
+    "coding": 3.8
+  },
+  "notes": "seed rubric score"
+}

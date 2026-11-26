@@ -1,0 +1,233 @@
+{
+  "generated_at": "2026-11-26T01:21:08+00:00",
+  "n_runs": 24,
+  "backends": {
+    "google_adk": {
+      "available": true,
+      "engine_mode": "native",
+      "n_runs": 8,
+      "pass_rate": 0.75,
+      "tokens": {
+        "input": {
+          "mean": 5785.375,
+          "median": 5771.5
+        },
+        "output": {
+          "mean": 1001.25,
+          "median": 999.0
+        },
+        "total": {
+          "mean": 6786.625,
+          "median": 6770.5
+        }
+      },
+      "errors": {
+        "command_errors": 4,
+        "tool_errors": 8,
+        "retries": 0,
+        "timeouts": 0,
+        "total": 12,
+        "mean_per_run": 1.5
+      },
+      "wall_clock": {
+        "mean": 45.1775,
+        "median": 46.125
+      },
+      "rubric": {
+        "quality": {
+          "mean": 3.65,
+          "median": 3.65
+        },
+        "intelligence": {
+          "mean": 3.425,
+          "median": 3.45
+        },
+        "coding": {
+          "mean": 3.5,
+          "median": 3.55
+        }
+      }
+    },
+    "claude_code": {
+      "available": true,
+      "engine_mode": "cli_bridge",
+      "n_runs": 8,
+      "pass_rate": 0.875,
+      "tokens": {
+        "input": {
+          "mean": 4561.625,
+          "median": 4551.0
+        },
+        "output": {
+          "mean": 778.625,
+          "median": 776.5
+        },
+        "total": {
+          "mean": 5340.25,
+          "median": 5327.5
+        }
+      },
+      "errors": {
+        "command_errors": 20,
+        "tool_errors": 8,
+        "retries": 0,
+        "timeouts": 0,
+        "total": 28,
+        "mean_per_run": 3.5
+      },
+      "wall_clock": {
+        "mean": 36.9125,
+        "median": 37.69
+      },
+      "rubric": {
+        "quality": {
+          "mean": 4.45,
+          "median": 4.45
+        },
+        "intelligence": {
+          "mean": 4.225,
+          "median": 4.25
+        },
+        "coding": {
+          "mean": 4.6,
+          "median": 4.65
+        }
+      }
+    },
+    "opencode": {
+      "available": true,
+      "engine_mode": "cli_bridge",
+      "n_runs": 8,
+      "pass_rate": 0.75,
+      "tokens": {
+        "input": {
+          "mean": 3671.25,
+          "median": 3662.5
+        },
+        "output": {
+          "mean": 689.5,
+          "median": 688.0
+        },
+        "total": {
+          "mean": 4360.75,
+          "median": 4350.5
+        }
+      },
+      "errors": {
+        "command_errors": 28,
+        "tool_errors": 24,
+        "retries": 16,
+        "timeouts": 8,
+        "total": 76,
+        "mean_per_run": 9.5
+      },
+      "wall_clock": {
+        "mean": 31.9537,
+        "median": 32.625
+      },
+      "rubric": {
+        "quality": {
+          "mean": 3.95,
+          "median": 3.95
+        },
+        "intelligence": {
+          "mean": 4.525,
+          "median": 4.55
+        },
+        "coding": {
+          "mean": 4.1,
+          "median": 4.15
+        }
+      }
+    }
+  },
+  "categories": {
+    "bug_fix": {
+      "google_adk": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 6313.5,
+        "rubric_mean": 3.5333
+      },
+      "claude_code": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 4968.0,
+        "rubric_mean": 4.4333
+      },
+      "opencode": {
+        "n_runs": 2,
+        "pass_rate": 0.5,
+        "tokens_total_median": 4057.0,
+        "rubric_mean": 4.2
+      }
+    },
+    "feature": {
+      "google_adk": {
+        "n_runs": 2,
+        "pass_rate": 0.5,
+        "tokens_total_median": 8523.0,
+        "rubric_mean": 3.6667
+      },
+      "claude_code": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 6706.5,
+        "rubric_mean": 4.5667
+      },
+      "opencode": {
+        "n_runs": 2,
+        "pass_rate": 0.5,
+        "tokens_total_median": 5476.5,
+        "rubric_mean": 4.3333
+      }
+    },
+    "refactor_debug": {
+      "google_adk": {
+        "n_runs": 2,
+        "pass_rate": 0.5,
+        "tokens_total_median": 7259.5,
+        "rubric_mean": 3.5333
+      },
+      "claude_code": {
+        "n_runs": 2,
+        "pass_rate": 0.5,
+        "tokens_total_median": 5712.5,
+        "rubric_mean": 4.4333
+      },
+      "opencode": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 4664.5,
+        "rubric_mean": 4.2
+      }
+    },
+    "codebase_qa": {
+      "google_adk": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 5050.5,
+        "rubric_mean": 3.3667
+      },
+      "claude_code": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 3974.0,
+        "rubric_mean": 4.2667
+      },
+      "opencode": {
+        "n_runs": 2,
+        "pass_rate": 1.0,
+        "tokens_total_median": 3245.0,
+        "rubric_mean": 4.0333
+      }
+    }
+  },
+  "winners": {
+    "tokens": "opencode",
+    "quality": "claude_code",
+    "errors": "google_adk",
+    "intelligence": "opencode",
+    "coding": "claude_code"
+  }
+}

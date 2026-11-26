@@ -1,0 +1,22 @@
+{
+  "run_id": "bug_fix-claude_code-run1",
+  "backend": "claude_code",
+  "category": "bug_fix",
+  "task_id": "bug_fix_01",
+  "engine_mode": "cli_bridge",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 4100,
+    "output": 700,
+    "total": 4800
+  },
+  "errors": {
+    "command_errors": 2,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 33.5,
+  "started_at": "2026-11-25T09:19:00+00:00"
+}

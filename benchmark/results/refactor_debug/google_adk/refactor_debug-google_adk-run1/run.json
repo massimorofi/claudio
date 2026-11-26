@@ -1,0 +1,22 @@
+{
+  "run_id": "refactor_debug-google_adk-run1",
+  "backend": "google_adk",
+  "category": "refactor_debug",
+  "task_id": "refactor_debug_01",
+  "engine_mode": "native",
+  "available": true,
+  "verification_passed": false,
+  "tokens": {
+    "input": 5979,
+    "output": 1035,
+    "total": 7014
+  },
+  "errors": {
+    "command_errors": 0,
+    "tool_errors": 1,
+    "retries": 0,
+    "timeouts": 0
+  },
+  "wall_clock_seconds": 49.2,
+  "started_at": "2026-11-25T09:24:00+00:00"
+}

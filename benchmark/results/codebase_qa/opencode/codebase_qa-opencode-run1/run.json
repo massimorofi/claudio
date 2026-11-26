@@ -1,0 +1,22 @@
+{
+  "run_id": "codebase_qa-opencode-run1",
+  "backend": "opencode",
+  "category": "codebase_qa",
+  "task_id": "codebase_qa_01",
+  "engine_mode": "cli_bridge",
+  "available": true,
+  "verification_passed": true,
+  "tokens": {
+    "input": 2640,
+    "output": 496,
+    "total": 3136
+  },
+  "errors": {
+    "command_errors": 3,
+    "tool_errors": 3,
+    "retries": 2,
+    "timeouts": 1
+  },
+  "wall_clock_seconds": 20.3,
+  "started_at": "2026-11-25T09:08:00+00:00"
+}
