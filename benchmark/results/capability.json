@@ -1,0 +1,113 @@
+{
+  "backends": {
+    "claude_code": {
+      "available": false,
+      "binary": "claude",
+      "binary_env": "CLAUDIO__ENGINE__CLAUDE_CODE__BINARY",
+      "binary_path": "/usr/local/bin/claude",
+      "config_field": "engine.claude_code.binary",
+      "driver": "CLI (claude -p --output-format stream-json)",
+      "env_vars": {
+        "optional": [
+          "ANTHROPIC_BASE_URL",
+          "CLAUDIO__ENGINE__CLAUDE_CODE__ALLOW_OPENAI_ENDPOINT",
+          "CLAUDIO_ENGINE"
+        ],
+        "present": [],
+        "required": [
+          "ANTHROPIC_API_KEY",
+          "ANTHROPIC_AUTH_TOKEN",
+          "CLAUDIO__LLM__API_KEY"
+        ],
+        "required_present": []
+      },
+      "fallback": "stub_driver",
+      "kind": "claude_code",
+      "missing": [
+        "no credential in ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDIO__LLM__API_KEY"
+      ],
+      "name": "claude_code",
+      "prerequisites": [
+        "binary 'claude' on PATH",
+        "one of ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDIO__LLM__API_KEY set to a non-empty value"
+      ],
+      "reason": "no credential in ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDIO__LLM__API_KEY"
+    },
+    "google_adk": {
+      "available": false,
+      "binary": null,
+      "binary_env": null,
+      "binary_path": null,
+      "config_field": "engine.kind (default)",
+      "driver": "library (google-adk)",
+      "env_vars": {
+        "optional": [
+          "OPENAI_BASE_URL",
+          "ANTHROPIC_BASE_URL",
+          "CLAUDIO_ENGINE"
+        ],
+        "present": [],
+        "required": [
+          "CLAUDIO__LLM__API_KEY",
+          "ANTHROPIC_API_KEY",
+          "OPENAI_API_KEY"
+        ],
+        "required_present": []
+      },
+      "fallback": "stub_driver",
+      "kind": "adk",
+      "missing": [
+        "no credential in CLAUDIO__LLM__API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY"
+      ],
+      "name": "google_adk",
+      "prerequisites": [
+        "python module 'google.adk' importable",
+        "one of CLAUDIO__LLM__API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY set to a non-empty value"
+      ],
+      "reason": "no credential in CLAUDIO__LLM__API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY"
+    },
+    "opencode": {
+      "available": false,
+      "binary": "opencode",
+      "binary_env": "CLAUDIO__ENGINE__OPENCODE__BINARY",
+      "binary_path": null,
+      "config_field": "engine.opencode.binary",
+      "driver": "CLI (opencode run -m <provider>/<model>)",
+      "env_vars": {
+        "optional": [
+          "OPENAI_BASE_URL",
+          "CLAUDIO_ENGINE"
+        ],
+        "present": [],
+        "required": [
+          "OPENAI_API_KEY",
+          "OPENAI_AUTH_TOKEN",
+          "CLAUDIO__LLM__API_KEY"
+        ],
+        "required_present": []
+      },
+      "fallback": "stub_driver",
+      "kind": "opencode",
+      "missing": [
+        "binary 'opencode' not found on PATH",
+        "no credential in OPENAI_API_KEY, OPENAI_AUTH_TOKEN, CLAUDIO__LLM__API_KEY"
+      ],
+      "name": "opencode",
+      "prerequisites": [
+        "binary 'opencode' on PATH",
+        "one of OPENAI_API_KEY, OPENAI_AUTH_TOKEN, CLAUDIO__LLM__API_KEY set to a non-empty value"
+      ],
+      "reason": "binary 'opencode' not found on PATH; no credential in OPENAI_API_KEY, OPENAI_AUTH_TOKEN, CLAUDIO__LLM__API_KEY"
+    }
+  },
+  "generated_at": "2026-11-25T00:31:46Z",
+  "notes": [
+    "Probes are offline: PATH lookups, importable-module lookups and environment variables only. No network call and no CLI subprocess.",
+    "A backend is 'available' only when its binary/module prerequisite and at least one credential env var are present; credentials are never validated against a live endpoint.",
+    "Values are read from the environment of this process unless an explicit environ mapping is passed to probe_all()/build_capability().",
+    "0 of 3 backends are runnable in this environment: none.",
+    "Unavailable backends fall back to 'stub_driver': the benchmark harness drives them with a deterministic stub instead of the real CLI/library, so their numbers measure harness overhead only and are not comparable to a real-engine run.",
+    "Regenerate with: python3 benchmark/capability.py (idempotent - only generated_at changes)."
+  ],
+  "python": "3.11.18"
+}
