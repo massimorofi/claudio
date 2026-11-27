@@ -100,6 +100,48 @@ def cache_hit_ratio(cached_input_tokens: int, input_tokens: int) -> float:
     return round(min(1.0, max(0.0, cached_input_tokens / input_tokens)), 4)
 
 
+def once_sink(
+    sink: Callable[[dict[str, Any]], None] | None,
+) -> Callable[[dict[str, Any]], None] | None:
+    """Wrap a usage sink so it forwards **at most one** payload.
+
+    Issue #58 (Increment 0a(b)-i): every logical model call must land in the
+    ledger exactly once. Call sites branch a lot -- success, transport error,
+    HTTP >= 400, unparseable body, missing text, cancellation, an unexpected
+    exception shape -- and any two of those firing on the same call would
+    double-count tokens. Wrapping the sink once at the call entry point makes a
+    second emission structurally impossible instead of relying on every branch
+    being mutually exclusive.
+
+    Semantics:
+
+    * the **first** payload is forwarded to ``sink`` verbatim and returned as-is;
+    * every later call is a no-op (idempotent -- the guard is set *before*
+      forwarding, so even a raising sink cannot let a second record through);
+    * ``sink is None`` returns ``None`` so callers keep their "no sink wired"
+      behaviour rather than inventing a recorder;
+    * the guard is lock-protected, so a call that finishes on one thread while
+      being cancelled on another still emits once.
+
+    Stdlib-only by design: this module is the ledger every provider path shares
+    and must stay importable without third-party or relative dependencies.
+    """
+    if sink is None:
+        return None
+
+    lock = threading.Lock()
+    state = {"sent": False}
+
+    def guarded(payload: dict[str, Any]) -> None:
+        with lock:
+            if state["sent"]:
+                return
+            state["sent"] = True
+        sink(payload)
+
+    return guarded
+
+
 @dataclass
 class LlmCallRecord:
     """One logical model call: primary turn, retry, router, compaction, ..."""
@@ -419,6 +461,7 @@ __all__ = [
     "LlmCallRecord",
     "ToolCallRecord",
     "CallAccountant",
+    "once_sink",
     "set_default_recorder",
     "get_default_recorder",
 ]

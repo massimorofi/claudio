@@ -12,13 +12,14 @@ points at a local server whose base URL the operator configured.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Callable
 
 import httpx
 
-from .accounting import get_default_recorder
+from .accounting import get_default_recorder, once_sink
 
 
 class LlmCallError(Exception):
@@ -44,10 +45,10 @@ async def openai_chat_completion(
     failure -- callers that treat the result as optional should catch it.
 
     ``usage_sink`` (issue #58, Increment 0) is called exactly once per logical
-    call -- on success *and* on failure -- with a plain dict::
+    call -- on success, on failure *and* on cancellation -- with a plain dict::
 
         {"purpose", "model", "started_at", "finished_at", "duration_ms",
-         "outcome": "ok"|"error", "error_code", "attempt",
+         "outcome": "ok"|"error"|"cancelled", "error_code", "attempt",
          "usage": {"input_tokens", "output_tokens", "cached_input_tokens",
                    "reasoning_tokens"} | None,
          "measured": bool}
@@ -57,7 +58,20 @@ async def openai_chat_completion(
     ``max_tokens`` rename retry is one logical call with ``attempt=2``, not two
     records. A sink that raises is swallowed: telemetry must never break a
     completion.
+
+    Exactly-once is enforced structurally (Increment 0a(b)-i): the sink is
+    wrapped in :func:`claudio_core.accounting.once_sink` at entry, so no
+    combination of branches can emit twice, and a cancelled call -- which
+    raises :class:`asyncio.CancelledError`, a ``BaseException`` that used to
+    escape the ``except Exception`` net and leave the call recorded *zero*
+    times -- now emits one ``outcome="cancelled"`` record before re-raising.
     """
+    # Resolve the sink once, here, and make it single-shot. Every branch below
+    # (and any branch added later) therefore shares one emission budget.
+    usage_sink = once_sink(
+        usage_sink if usage_sink is not None else get_default_recorder()
+    )
+
     if not base_url:
         _emit(usage_sink, purpose, model, time.time(), time.time(), 0.0,
               "error", "no_base_url", 1, None)
@@ -127,6 +141,15 @@ async def openai_chat_completion(
               (time.time() - started) * 1000.0, "ok", "", attempt, usage)
         return text
     except LlmCallError:
+        raise
+    except asyncio.CancelledError:
+        # The caller cancelled this call. CancelledError derives from
+        # BaseException, so the ``except Exception`` net below never saw it and
+        # the call vanished from the ledger entirely. Record it, then re-raise
+        # unchanged so cancellation semantics are preserved.
+        _emit(usage_sink, purpose, model, started, time.time(),
+              (time.time() - started) * 1000.0, "cancelled", "cancelled",
+              attempt, None)
         raise
     except Exception as exc:  # noqa: BLE001 - unexpected shape: record, re-raise
         _emit(usage_sink, purpose, model, started, time.time(),
