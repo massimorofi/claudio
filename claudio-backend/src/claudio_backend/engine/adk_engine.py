@@ -1099,6 +1099,10 @@ class AdkEngine:
             workspace_state_dir=workspace_state_dir(request.workspace_id),
             run_id=request.run_id,
             accountant=self.accountant,
+            # The live MCP catalog, so the plan/act audit checks a promised
+            # code-graph connector against the tools that connector really
+            # exposes instead of against a hard-coded vendor name.
+            mcp_entries=self._mcp_entries,
             concurrency=RunConcurrency.create(
                 int(getattr(self.config.agent, "max_read_concurrency", 4))
             ),
@@ -1192,6 +1196,9 @@ class AdkEngine:
             workspace_id=request.workspace_id,
             run_id=request.run_id,
             accountant=self.accountant,
+            # Workers inherit the same live catalog, so a worker that says it
+            # queried the graph is audited against the same real tool names.
+            mcp_entries=self._mcp_entries,
             concurrency=RunConcurrency.create(
                 int(getattr(self.config.agent, "max_read_concurrency", 4))
             ),

@@ -945,3 +945,116 @@ raise nothing.
    refinement.
 3. `config.example.yaml` still carries the retired index-manifest key (config
    migration, out of scope here).
+
+---
+
+# C4 — the plan/act audit stops knowing who the vendor is
+
+## The defect this closes
+
+The plan/act audit (`claudio_core.planact`) answers a factual question: *the
+narration said it would use a tool family, did a call to that family actually
+happen?* It existed because an agent wrote "let me check the code graph", issued
+no graph call, and reported results as if the graph had been consulted.
+
+The family it audited was built from a hard-coded vendor string
+(`GORTEX_FAMILY`). Three ways that was wrong:
+
+1. **It did nothing for any other server.** A deployment wiring a different
+   code-intelligence connector got no audit at all, because none of its tool
+   names matched the vendor pattern.
+2. **It could name a connector the run does not have.** The nudge said "you said
+   you would use *the vendor*", which is unactionable when no such tool is
+   advertised, and it taught the model to ignore nudges.
+3. **It put a product name in the framework-free core**, which is the coupling
+   the whole review is about.
+
+## What changed
+
+**`planact.py` — `CODE_GRAPH_FAMILY` (no vendor name).** Triggers are vendor-free
+narration vocabulary only: `code graph`, `callers`, `callees`, `call graph`,
+`change impact`, `index`, `symbol` (plus the same-kind stems already there:
+`graph tool`, `call hierarchy`, `impact analysis`, `code intelligence`,
+`dependenc`). `BUILTIN_FAMILIES` is `(CODE_GRAPH_FAMILY, WEB_SEARCH_FAMILY)`;
+neither carries a product name, and the literal `gortex` does not appear in the
+file. `audit_run(text, called_tools, families=BUILTIN_FAMILIES)` keeps its
+signature.
+
+**`planact.py` — `derive_families(mcp_entries) -> tuple[ToolFamily, ...]`.** One
+family per *connected* code-graph server, built entirely from what that server
+advertises via `mcp_capability.detect`:
+
+| family field | source |
+| --- | --- |
+| `name` | the **configured server id** (`graph-index`, not a product name) |
+| `triggers` | the server's **real prefixed tool names** + the generic narration vocabulary |
+| `tool_patterns` | those same real tool names (plus the id), regex-escaped |
+| `remedy` | prose that names the server id and tells the model to call it or correct the claim |
+
+Consequences that matter: a promise is satisfied only by a tool **that server
+actually exposes**, so an unrelated call cannot quietly close the gap; a server
+that is not in the catalog produces **no family**, so nothing is audited against
+tools the model does not have; a `None`/malformed catalog returns `()` and never
+raises. If a detected server publishes no tool names, the family falls back to
+the generic structural patterns rather than being impossible to satisfy.
+
+`families_for(entries)` is now `derive_families(entries) + BUILTIN_FAMILIES`, the
+same composition the engine uses.
+
+**`context.py` — the live catalog reaches the audit.** `ToolContext` gained
+`mcp_entries: list[dict] | None = None`, and `planact_report()` passes
+`derive_families(self.mcp_entries) + BUILTIN_FAMILIES` to `audit_run` when
+entries are present, falling back to the builtin families when they are not
+(legacy/test callers keep working unchanged).
+
+**`adk_engine.py` — who fills it.** `AdkEngine` already owns the run context
+(`_make_context` builds the `ToolContext`; `runs/manager.py` only mirrors
+counters from the event stream), so both `_make_context` and the sub-agent
+`worker_ctx` now pass `mcp_entries=self._mcp_entries` — the same catalog already
+fed to `build_static_instructions`. The audit and the prompt are therefore
+derived from one source of truth: the prompt can only advertise tools the audit
+knows about, and vice versa.
+
+## Tests
+
+* `claudio-core/tests/test_planact.py` — updated in place (it no longer imports a
+  vendor-named family) plus two pins: no builtin family may contain a vendor
+  string, and `derive_families` is empty for a missing / non-code-graph /
+  malformed catalog.
+* `claudio-core/tests/test_planact_derived.py` — new, synchronous, self-contained
+  `sys.path` bootstrap, no pydantic:
+  promise + call to a prefixed tool from the derived catalog → clean;
+  promise with no call → unfulfilled and `render_planact_nudge` names the
+  configured server id; an unrelated call does not satisfy the derived server;
+  promising server A and calling server B leaves A unfulfilled; a server that is
+  **not** connected is never audited (no false positive); honest disclosure stays
+  clean; detection qualifies a server on advertised vocabulary alone; and the
+  generic narration triggers still work with **no catalog at all**.
+
+## Verification for this increment
+
+```
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_planact.py tests/test_planact_derived.py -q   # 32 passed
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests -q                                                   # 347 passed
+cd claudio-backend && PYTHONPATH="src:../claudio-core/src" python3 -m pytest tests/test_engine_mcp.py tests/test_mcp_codegraph_wiring.py -q   # 37 passed
+test -z "$(grep -ri gortex claudio-core/src/claudio_core)"   # core is vendor-free end to end
+```
+
+End-to-end through `ToolContext`: narration "Let me check the code graph for the
+callers." + `read_file` only → `unfulfilled == {'graph-index', 'the code graph'}`
+and the nudge names `graph-index`; adding a real `mcp__graph_index__find_callers`
+call makes the report clean.
+
+## What remains
+
+1. `derive_families` deliberately does **not** deduplicate across families: with
+   two code-graph servers connected, a generic "the code graph" promise is
+   audited against both. If that proves noisy, the fix is to prefer the server
+   whose id the narration names, not to reintroduce a vendor string.
+2. The derived triggers assume the model quotes tool names it can see. A
+   deployment whose transport renames tools after the catalog is built would need
+   the catalog refreshed, not a pattern added here.
+3. `claudio-backend/tests/test_issue54_gortex.py` still carries the old vendor
+   name in its filename and fixtures (backend test, outside this increment's
+   writable scope); `test_mcp_codegraph_wiring.py` already covers the same chain
+   vendor-free.

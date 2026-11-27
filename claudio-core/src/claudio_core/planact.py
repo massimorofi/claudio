@@ -23,8 +23,9 @@ Design notes
 - **No vendor names, anywhere.** The family is described by capability
   vocabulary, never by a product name. When a server's tool names do not use
   that vocabulary, the extra patterns come *in band* from the catalog the server
-  itself advertised -- see :func:`code_graph_family`. Nothing in this module has
-  to be edited when the product changes.
+  itself advertised -- see :func:`code_graph_family` and :func:`derive_families`,
+  which builds one family per connected server from its configured id and real
+  tool names. Nothing in this module has to be edited when the product changes.
 - **Intent required.** Mentioning a tool in a sentence is not a plan. Negations
   and disclosures ("the graph was unavailable", "I did not query the graph") must
   not trigger a nudge, or the audit becomes noise the model learns to ignore.
@@ -76,8 +77,8 @@ class ToolFamily:
 CODE_GRAPH_TRIGGERS: tuple[str, ...] = (
     "code graph", "graph tool", "graph query", "graph results", "call graph",
     "callers", "callees", "call hierarchy", "change impact", "impact analysis",
-    "code intelligence", "code index", "index coverage", "code navigation",
-    "dependenc", "symbol",
+    "code intelligence", "code index", "index", "index coverage",
+    "code navigation", "dependenc", "symbol",
 )
 
 #: Patterns matched against *tool names* (already lower-cased) to decide whether a
@@ -152,11 +153,94 @@ def code_graph_family(
     )
 
 
+def derive_families(
+    mcp_entries: "Iterable[Mapping[str, Any]] | None" = None,
+) -> tuple[ToolFamily, ...]:
+    """One family per *connected* code-graph server, built from its own catalog.
+
+    This is what makes the audit vendor-agnostic. Nothing here knows who provides
+    the graph: :func:`claudio_core.mcp_capability.detect` answers "does this
+    server advertise code-graph capability?" and everything the family is made of
+    comes out of that server's catalog entry:
+
+    - ``name`` is the **configured server id**, so the nudge tells the model which
+      connector it promised and skipped ("graph-index"), not a product we guessed.
+    - ``triggers`` are the server's **real prefixed tool names** (the strings the
+      model actually writes in narration when it reads its own tool list) plus the
+      generic, vendor-free narration vocabulary in :data:`CODE_GRAPH_TRIGGERS`.
+    - ``tool_patterns`` are those same real tool names (plus the id), so a promise
+      is satisfied only by a call to a tool this server actually exposes -- a call
+      to some unrelated tool cannot quietly close the gap.
+
+    A server that is not in the catalog produces no family, so promising a
+    connector that is not connected is never audited against tools that do not
+    exist (no false positive). A ``None`` or malformed catalog yields ``()``.
+
+    Callers normally use ``derive_families(entries) + BUILTIN_FAMILIES``: the
+    builtins keep catching generic prose ("let me check the code graph") when no
+    catalog is wired in, the derived families add the per-server precision.
+    """
+    try:
+        servers = detect(mcp_entries or ())
+    except Exception:  # a broken catalog must never break a run
+        return ()
+
+    families: list[ToolFamily] = []
+    seen: set[str] = set()
+    for server in servers:
+        server_id = str(server.id or "").strip()
+        if not server_id or server_id.lower() in seen:
+            continue
+        seen.add(server_id.lower())
+
+        tool_names = [
+            str(t).strip().lower() for t in server.tools if str(t).strip()
+        ]
+        # Narration triggers: the tool names the model can see in its own tool
+        # list, then the vendor-free vocabulary. Lower-cased because sentences are
+        # lower-cased before matching.
+        triggers: list[str] = []
+        for token in (*tool_names, server_id.lower(), *CODE_GRAPH_TRIGGERS):
+            if token and token not in triggers:
+                triggers.append(token)
+
+        # Satisfaction patterns: only what this server really exposes. If the
+        # catalog carries no tool names we cannot be precise, so fall back to the
+        # generic structural vocabulary rather than a family nothing can satisfy.
+        patterns = [re.escape(t) for t in tool_names]
+        id_token = re.escape(server_id.lower())
+        if id_token and id_token not in patterns:
+            patterns.append(id_token)
+        if not tool_names:
+            patterns.extend(CODE_GRAPH_TOOL_PATTERNS)
+
+        families.append(
+            ToolFamily(
+                name=server_id,
+                triggers=tuple(triggers),
+                tool_patterns=tuple(patterns),
+                remedy=(
+                    f"Issue an actual tool call on the '{server_id}' server now "
+                    f"(it is connected and advertises those tools), or state "
+                    f"plainly that you did not use it and say where your findings "
+                    f"actually came from. Do not describe '{server_id}' as a "
+                    f"source you consulted."
+                ),
+            )
+        )
+    return tuple(families)
+
+
 def families_for(
     mcp_entries: "Iterable[Mapping[str, Any]] | None" = None,
 ) -> tuple[ToolFamily, ...]:
-    """The families to audit a run with, given the connected MCP catalog."""
-    return (code_graph_family(mcp_entries), WEB_SEARCH_FAMILY)
+    """The families to audit a run with, given the connected MCP catalog.
+
+    Per-server families derived from the catalog first (they are the precise
+    ones), then the builtin families so generic prose is still caught when no
+    catalog is wired in.
+    """
+    return derive_families(mcp_entries) + BUILTIN_FAMILIES
 
 
 def _sentences(text: str) -> list[str]:
@@ -263,6 +347,7 @@ __all__ = [
     "WEB_SEARCH_FAMILY",
     "BUILTIN_FAMILIES",
     "code_graph_family",
+    "derive_families",
     "families_for",
     "AuditReport",
     "mentions_family",

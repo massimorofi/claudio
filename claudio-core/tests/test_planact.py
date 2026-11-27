@@ -15,17 +15,45 @@ from __future__ import annotations
 
 from claudio_core.instructions import render_nudges
 from claudio_core.planact import (
+    BUILTIN_FAMILIES,
     CODE_GRAPH_FAMILY,
     AuditReport,
     audit_run,
     called_families,
     code_graph_family,
+    derive_families,
     mentions_family,
     planned_families,
     render_planact_nudge,
 )
 
 GRAPH = CODE_GRAPH_FAMILY.name
+
+# The whole point of the C4 change: the audit must work for any code-graph MCP
+# server, so no builtin may name a product. Pinned here so a vendor string can
+# never creep back into the shipped families.
+VENDOR_STRINGS = ("gortex", "c4", "vendor-co", "acme-corp")
+
+
+def test_builtin_families_carry_no_vendor_name():
+    for family in BUILTIN_FAMILIES:
+        blob = " ".join(
+            [family.name, family.remedy, *family.triggers, *family.tool_patterns]
+        ).lower()
+        for vendor in VENDOR_STRINGS:
+            assert vendor not in blob, (family.name, vendor)
+
+
+def test_derive_families_is_empty_without_a_catalog():
+    # No catalog means no per-server families; the builtins still work.
+    assert derive_families(None) == ()
+    assert derive_families([]) == ()
+    assert derive_families([{"id": "web", "tools": ["fetch_url"]}]) == ()
+
+
+def test_derive_families_survives_a_broken_catalog():
+    for junk in (None, [], {}, [None], "not-a-list", [{"id": None}], [1, 2]):
+        assert derive_families(junk) == ()
 
 
 # --------------------------------------------------------------- intent parsing --
