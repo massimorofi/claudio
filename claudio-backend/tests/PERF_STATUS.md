@@ -71,3 +71,70 @@ cd claudio-backend && PYTHONPATH="$(pwd)/src:$(pwd)/../claudio-core/src" \
 
 ============================== 17 passed in 0.14s ==============================
 ```
+
+## 0a(b)-ia — engine-side boundaries record cancellations too
+
+Increment 0a(b)-i closed the zero-record-on-cancellation and double-emission
+holes on the *auxiliary* path (`claudio_core.llm.openai_chat_completion`). The
+two **engine-side** boundaries still recorded nothing when a run was cancelled.
+This increment extends the same invariant — one logical model call, exactly one
+ledger record — to both of them.
+
+**Changes.**
+
+1. `claudio-backend/src/claudio_backend/engine/reasoning_llm.py` — the
+   `chat.completions.create` wrapper installed by `_patch_max_tokens_retry` is
+   the seam every engine HTTP call (primary turns, worker sub-agents, the daemon
+   agent) passes through. Two fixes:
+   * the resolved recorder is now wrapped in `accounting.once_sink` at call
+     entry, so the `max_tokens` rename followed by a later error — or any other
+     combination of emitting branches — cannot produce two records for one
+     logical call;
+   * an explicit `except asyncio.CancelledError:` branch around
+     `chat.completions.create` emits one record with
+     `outcome="cancelled", error_code="cancelled"` and re-raises unchanged.
+     `CancelledError` derives from `BaseException`, so the existing
+     `except Exception` net never saw it and a cancelled run emitted **zero**
+     records.
+2. `claudio-backend/src/claudio_backend/engine/reasoning_llm.py` —
+   `ReasoningOpenAILlm._generate_content_streaming` shares one `once_sink` guard
+   between its completion record and a new cancellation branch around stream
+   consumption, so a stream cancelled mid-flight emits exactly one `cancelled`
+   record while a stream that **completed and was then cancelled** cannot be
+   recorded twice.
+3. `claudio-backend/src/claudio_backend/engine/adk_engine.py` — the engine
+   installs `accountant.make_engine_recorder()` into every call context, so
+   boundary 1/2 already cover a call cancelled in flight. `_drive`'s
+   `except asyncio.CancelledError` (and the cooperative `self._cancelled` path)
+   now also call the new `_record_run_cancellation` backstop for cancellations
+   the client boundary cannot see (queued, between calls, inside tool
+   execution). Exactly-once is decided from the ledger itself: any existing
+   primary/retry record — `ok` or `cancelled` — means the call was already
+   accounted for, so only a run that would contribute *zero* records gets one,
+   and a per-run `once_sink` guard makes a second emission structurally
+   impossible.
+
+**Tests.** `claudio-backend/tests/test_issue58_call_coverage_engine.py` (fixed
+path, 18 tests, fully offline — a fake openai client and a fake recorder stand in
+for the provider, so no credentials and no non-loopback socket). One record
+asserted for each of: success (payload shape intact), the `max_tokens` rename
+(1 record, `attempt == 2`), rename-then-error (1 record, `error`, `attempt == 2`),
+a plain `BadRequestError`, a generic exception, cancellation during `create`,
+cancellation during streaming, a completed-then-cancelled stream, a raising
+recorder on both the ok and the error path, and the `once_sink` double-fire
+guard. Plus the engine backstop: records once when the run has no records,
+defers to a client-recorded `cancelled`, skips a completed-then-cancelled turn,
+double-fires to one record, and no-ops without an accountant.
+
+Regression proof: with the two `except asyncio.CancelledError` branches removed,
+exactly the two cancellation tests fail with `assert 0 == 1` — the zero-record
+bug — and the other 16 pass.
+
+**Gate (green).**
+
+```
+cd claudio-backend && PYTHONPATH="$(pwd)/src:$(pwd)/../claudio-core/src" \
+  python3 -m pytest tests/test_issue58_call_coverage_engine.py -p no:cacheprovider -o asyncio_mode=strict
+
+============================== 18 passed in 1.04s ==============================
+```

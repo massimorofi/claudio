@@ -39,7 +39,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from google.adk.agents import LlmAgent
 from google.adk.apps import App
@@ -886,6 +886,11 @@ class AdkEngine:
         # and legacy callers can build an engine without accounting.
         self.accountant = accountant
         self._cancelled: set[str] = set()
+        # Issue #58 Inc 0a(b)-ia: per-run once-guard so a run cancelled mid-turn
+        # contributes exactly one ``cancelled`` call record -- no more (the
+        # client boundary already recorded the call) and no less (the run would
+        # otherwise contribute nothing).
+        self._cancel_guards: dict[str, Callable[[dict[str, Any]], None]] = {}
         # MCP toolsets are built once per (mcp-config, approval-mode) pair and
         # reused across runs so connections pool rather than being re-opened per
         # request. ``_mcp_key`` records what the cached toolsets were built for;
@@ -943,8 +948,9 @@ class AdkEngine:
         # those calls as "retry" so primary vs retry cost is separable.
         if purpose == "primary" and int(request.metadata.get("attempt") or 1) > 1:
             purpose = "retry"
+        recorder = self.accountant.make_engine_recorder()
         return {
-            "recorder": self.accountant.make_engine_recorder(),
+            "recorder": recorder,
             "run_id": request.run_id,
             "session_id": request.session_id,
             "purpose": purpose,
@@ -953,6 +959,77 @@ class AdkEngine:
             "model": model or request.model.model,
             "reasoning_effort": str(getattr(request.model, "reasoning_effort", "") or ""),
         }
+
+    def _record_run_cancellation(self, request: RunRequest) -> None:
+        """Give a cancelled run exactly one ``cancelled`` primary call record.
+
+        The engine installs ``accountant.make_engine_recorder()`` into every
+        call context (see :meth:`_call_context`), so ``reasoning_llm`` already
+        emits ``outcome="cancelled"`` for an HTTP call cancelled in flight.
+        This is the backstop for the cancellations that boundary cannot see --
+        a run killed before its first call got recorded (queued, prompt being
+        built, cancellation landing inside tool execution).
+
+        Exactly-once is decided from the ledger itself, which is the only place
+        that knows what has been recorded:
+
+        * a ``cancelled`` primary record already present means the client
+          boundary handled this cancellation, so nothing is added;
+        * any other primary/retry record means the turn that was in flight had
+          already been accounted for, so a completed-then-cancelled turn is
+          never recorded twice;
+        * only a run that would otherwise contribute *zero* records gets one.
+
+        A per-run :func:`claudio_core.accounting.once_sink` guard makes a second
+        emission structurally impossible even if two cancellation paths race.
+        """
+        if self.accountant is None:
+            return
+        run_id = request.run_id
+        try:
+            prior = [
+                r
+                for r in self.accountant.llm_calls(run_id)
+                if getattr(r, "purpose", "") in ("primary", "retry")
+            ]
+        except Exception:  # noqa: BLE001 - unreadable ledger: record nothing
+            logger.debug("run-cancellation ledger read failed", exc_info=True)
+            return
+        if prior:
+            return
+        sink = self._cancel_guards.get(run_id)
+        if sink is None:
+            from claudio_core.accounting import once_sink
+
+            sink = once_sink(self.accountant.make_engine_recorder())
+            self._cancel_guards[run_id] = sink
+        if sink is None:  # pragma: no cover - accountant always returns one
+            return
+        now = time.time()
+        try:
+            sink(
+                {
+                    "purpose": "primary",
+                    "model": str(request.model.model or ""),
+                    "run_id": run_id,
+                    "session_id": request.session_id,
+                    "model_role": str(request.metadata.get("model_role") or ""),
+                    "profile_name": str(request.metadata.get("profile_name") or ""),
+                    "reasoning_effort": str(
+                        getattr(request.model, "reasoning_effort", "") or ""
+                    ),
+                    "started_at": now,
+                    "finished_at": now,
+                    "duration_ms": 0.0,
+                    "outcome": "cancelled",
+                    "error_code": "cancelled",
+                    "attempt": 1,
+                    "usage": None,
+                    "measured": False,
+                }
+            )
+        except Exception:  # noqa: BLE001 - telemetry must never break a cancel
+            logger.debug("run-cancellation record failed", exc_info=True)
 
     def _build_agent(self, request: RunRequest, ctx: ToolContext) -> LlmAgent:
         tools: list[Any] = []
@@ -1701,8 +1778,10 @@ class AdkEngine:
         try:
             async for event in agen:
                 if request.run_id in self._cancelled:
+                    self._record_run_cancellation(request)
                     await agen.aclose()
                     yield _failed(request.run_id, "cancelled", "Run cancelled by user", False)
+                    self._cancel_guards.pop(request.run_id, None)
                     return
 
                 tin, tout = usage_from_event(event)
@@ -1823,6 +1902,12 @@ class AdkEngine:
                         }
                         return
         except asyncio.CancelledError:
+            # The run was cancelled mid-turn. An HTTP call cancelled in flight
+            # was already recorded by reasoning_llm with outcome="cancelled";
+            # this covers a cancellation the client boundary could not see, and
+            # records nothing when the turn had already been accounted for.
+            self._record_run_cancellation(request)
+            self._cancel_guards.pop(request.run_id, None)
             raise
         except Exception as exc:  # noqa: BLE001 - surface as run_failed
             logger.exception("ADK run failed")
