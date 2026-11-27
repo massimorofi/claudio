@@ -85,6 +85,7 @@ async def _make_manager(tmp_path, items):
     return db, engine, mgr
 
 
+@pytest.mark.asyncio
 async def test_compact_replaces_conversation_and_drops_gauge(tmp_path, monkeypatch):
     # A long conversation, with a big stored context size to start.
     db = None
@@ -117,6 +118,7 @@ async def test_compact_replaces_conversation_and_drops_gauge(tmp_path, monkeypat
             await db.close()
 
 
+@pytest.mark.asyncio
 async def test_compact_reports_nothing_to_compact(tmp_path):
     db = None
     try:
@@ -134,6 +136,7 @@ async def test_compact_reports_nothing_to_compact(tmp_path):
             await db.close()
 
 
+@pytest.mark.asyncio
 async def test_compact_failure_trips_and_persists_breaker(tmp_path, monkeypatch):
     db = None
     try:
@@ -161,6 +164,7 @@ async def test_compact_failure_trips_and_persists_breaker(tmp_path, monkeypatch)
             await db.close()
 
 
+@pytest.mark.asyncio
 async def test_compact_refused_while_awaiting_approval(tmp_path):
     db = None
     try:

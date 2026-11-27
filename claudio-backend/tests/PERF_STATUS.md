@@ -273,3 +273,153 @@ without a purpose still shows up under `other`. If a future change records a
 call in a way the breakdown cannot see, `reconcile(run_id)["ok"]` goes False and
 the test fails — the totals are no longer just a number, they are a sum of named
 parts.
+
+## Close-out — Increment 0a verified green, bookkeeping repaired
+
+The re-driven Increment 0a (0a(b)-i, 0a(b)-ia, 0a(b)-ii, 0a(c)) broke nothing in
+behaviour. The sweep found exactly one defect, and it was in the **gate**, not in
+the code: 15 `async def` tests across three pre-existing files carried no
+`@pytest.mark.asyncio`, so under the gate's `-o asyncio_mode=strict` they failed
+with `Failed: async def functions are not natively supported` (and on an older
+pytest they were silently *skipped*, which is how earlier rounds looked green
+while never running). Markers were added; no assertion was touched. All 15 now
+genuinely execute and pass.
+
+### Green commands and counts
+
+Whole Increment 0a family, one scoped command, explicit paths, canonical
+invocation (no `find`, no glob, never the bare whole-suite command):
+
+```
+cd claudio-backend && PYTHONPATH="$(pwd)/src:$(pwd)/../claudio-core/src" \
+  python3 -m pytest tests/test_issue58_accounting.py tests/test_issue58_bench.py \
+  tests/test_issue58_budgets.py tests/test_issue58_concurrency.py \
+  tests/test_issue58_router.py tests/test_issue58_streaming.py \
+  tests/test_issue58_tier1.py tests/test_issue58_call_coverage.py \
+  tests/test_issue58_call_coverage_engine.py tests/test_issue58_aux_purposes.py \
+  tests/test_issue58_purpose_totals.py tests/test_midrun_compact.py \
+  tests/test_manual_compact.py -p no:cacheprovider -o asyncio_mode=strict
+
+============================= 145 passed in 7.29s ==============================
+```
+
+**145 passed / 0 failed / 0 errors / 0 skipped** (exit 0).
+
+| file | passed | failed |
+| --- | --- | --- |
+| tests/test_issue58_accounting.py | 16 | 0 |
+| tests/test_issue58_bench.py | 2 | 0 |
+| tests/test_issue58_budgets.py | 8 | 0 |
+| tests/test_issue58_concurrency.py | 19 | 0 |
+| tests/test_issue58_router.py | 3 | 0 |
+| tests/test_issue58_streaming.py | 3 | 0 |
+| tests/test_issue58_tier1.py | 6 | 0 |
+| tests/test_issue58_call_coverage.py | 17 | 0 |
+| tests/test_issue58_call_coverage_engine.py | 18 | 0 |
+| tests/test_issue58_aux_purposes.py | 28 | 0 |
+| tests/test_issue58_purpose_totals.py | 15 | 0 |
+| tests/test_midrun_compact.py | 6 | 0 |
+| tests/test_manual_compact.py | 4 | 0 |
+| **total** | **145** | **0** |
+
+Before the marker fix the same command reported `15 failed, 130 passed`
+(accounting 5, midrun_compact 6, manual_compact 4 — every one an unmarked
+`async def`). The 13 pre-existing failures recorded in `PERF_BASELINE.md`
+(`test_issue54_gortex` 6, `test_e2e` 4, `test_contract_shapes` 3) are out of
+scope, were **not** run, and no `config/config.yaml` was created to paper over
+them. `tests/conftest.py` and both `pyproject.toml` files were not touched.
+
+### Call-site audit (re-run)
+
+```
+python3 scripts/audit_llm_call_sites.py
+audited=8 untagged=0 bad_purpose=0 purposes_known=12      (exit 0)
+```
+
+`untagged=0` — every physical model-call site in the tree is purpose-tagged:
+
+```
+claudio-core/src/claudio_core/learning.py:175                 purpose=learning
+claudio-backend/src/claudio_backend/api/config.py:78          purpose=probe
+claudio-backend/.../autonomous/consolidation.py:139           purpose=consolidation
+claudio-backend/.../autonomous/consolidation.py:238           purpose=consolidation
+claudio-backend/.../autonomous/fixer.py:296                   purpose=fixer
+claudio-backend/.../engine/reasoning_llm.py:312               purpose=(from sink)
+claudio-backend/.../runs/manager.py:456                       purpose=compaction
+claudio-backend/.../runs/manager.py:851                       purpose=router
+```
+
+### by_purpose reconciliation
+
+`accountant.reconcile(run_id)` on the mixed 8-call ledger used by
+`tests/test_issue58_purpose_totals.py` (primary 4, compact 1, delegate 1,
+learning 1, router 1) returns an **exactly-zero** delta:
+
+```
+{'calls': 0, 'errors': 0, 'cancelled': 0, 'input_tokens': 0, 'output_tokens': 0,
+ 'cached_input_tokens': 0, 'reasoning_tokens': 0, 'cost_usd': 0.0, 'ok': True}
+```
+
+`sum(by_purpose) == usage_totals` on every field — calls 8, input_tokens 7080,
+output_tokens 547, cached_input_tokens 2600, `cache_hit_ratio` 0.3672 — so there
+is no orphan record and no double-counted record. A call with no purpose lands in
+`other` and the ledger still balances (`test_call_with_no_purpose_lands_in_other_and_still_balances`).
+
+### Restore tag
+
+`test -n "$(git tag -l CLAUDIO_BK_0.2.0)"` succeeds.
+
+```
+CLAUDIO_BK_0.2.0 -> c441308be4767d7969997e65c391378a2062d0fa   (c441308b)
+```
+
+The tag **already existed** at that commit. It was **not** recreated, moved,
+deleted or re-pointed by this round.
+
+### GitHub bookkeeping
+
+`gh` is not installed in this environment, so the GitHub REST API was used
+directly with `$GITHUB_TOKEN` via `curl`/`urllib`. All four calls returned
+HTTP 201.
+
+| issue | title | action | comment |
+| --- | --- | --- | --- |
+| #58 | Claudio Performances Improvement Plan | commented (close-out) | https://github.com/massimorofi/claudio/issues/58#issuecomment-7221687729 |
+| #153 | T2 - Increment 0a(b)-i: exactly-one-record on failure and cancellation paths | commented; already **closed (completed)**, re-confirmed | https://github.com/massimorofi/claudio/issues/153#issuecomment-7221696813 |
+| #154 | T3 - Increment 0a(b)-ii: every auxiliary caller emits exactly one purpose-tagged record | commented; already **closed (completed)**, re-confirmed | https://github.com/massimorofi/claudio/issues/154#issuecomment-7221697220 |
+| #155 | T4 - Increment 0a(c): per-purpose run-total reconciliation + report rows | commented; already **closed (completed)**, re-confirmed | https://github.com/massimorofi/claudio/issues/155#issuecomment-7221697716 |
+
+The `clams:task` children T2/T3/T4 of #58 were found already closed with
+`state_reason=completed`, so no state change was made (closing again would be a
+no-op); each received a close-out comment carrying the green counts, the audit
+result and the tag SHA. Sibling `T1` (#152, gate harness) is likewise closed.
+
+### Increments completed
+
+- **0a(a)** — `LLMCallRecord` schema + one emit point at the model-call boundary
+- **0a(b)-i** — exactly one accounting record per logical LLM call, including
+  cancellation (`accounting.once_sink`, `except asyncio.CancelledError` in
+  `claudio_core.llm.openai_chat_completion`)
+- **0a(b)-ia** — engine-side boundaries (primary `chat.completions.create`
+  wrapper + streaming) record cancellations exactly once, with an
+  `adk_engine._record_run_cancellation` backstop decided from the ledger
+- **0a(b)-ii** — every non-primary call site purpose-tagged (router, compaction,
+  learning, consolidation, fixer, probe, delegate, …)
+- **0a(c)** — per-purpose run totals that reconcile exactly to the run totals,
+  exposed through the run report / bench path
+
+### What remains
+
+To be filed as follow-up `clams:task` child issues under #58 (not yet created —
+this task's scope was the sweep and the bookkeeping repair):
+
+1. **Increment 3 — strict prefix cache + Tier-1 zero-LLM compaction.** Freeze a
+   static prompt prefix so the provider cache prefix survives turns, and compact
+   deterministically (drop/summarise by rule) before any LLM summariser is paid
+   for.
+2. **Increment 2 — zero-LLM deterministic paths.** Route hydration, compound
+   search, post-edit hooks, the router decision and batch reads through
+   deterministic code paths that cost no model call.
+3. **Increment 1 — bounded parallel execution.** Execute independent read tools
+   concurrently under a bounded semaphore with a deterministic
+   turn-boundary `ToolContext` reducer.
