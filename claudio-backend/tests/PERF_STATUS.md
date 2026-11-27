@@ -423,3 +423,63 @@ this task's scope was the sweep and the bookkeeping repair):
 3. **Increment 1 — bounded parallel execution.** Execute independent read tools
    concurrently under a bounded semaphore with a deterministic
    turn-boundary `ToolContext` reducer.
+
+### Independent re-verification (second pass)
+
+Every gate above was re-run from a clean tree and re-checked against the live
+GitHub API, rather than trusted from the first pass.
+
+| gate | command | result |
+| --- | --- | --- |
+| scoped family | the 13-path canonical command above | `145 passed, 0 failed, 0 errors, 0 skipped`, exit 0, `PERF_FAMILY_GREEN_OK` |
+| call-site audit | `python3 scripts/audit_llm_call_sites.py` | `audited=8 untagged=0 bad_purpose=0 purposes_known=12`, exit 0 |
+| restore tag | `test -n "$(git tag -l CLAUDIO_BK_0.2.0)"` | present; `git rev-parse CLAUDIO_BK_0.2.0^{}` = `c441308be4767d7969997e65c391378a2062d0fa` |
+| tree clean | `git status --porcelain` | empty |
+
+The `by_purpose` figures were recomputed live from
+`tests/test_issue58_purpose_totals.py::_mixed_ledger()` and match the numbers
+quoted above exactly: `reconcile` returns all-zero with `ok: True`, and the run
+totals are calls 8, input 7080, output 547, cached_input 2600,
+`cache_hit_ratio` 0.3672.
+
+GitHub bookkeeping was verified by reading the API back (`gh` is not installed;
+`$GITHUB_TOKEN` + REST was used). Confirmed live state:
+
+- **#58** open (`state_reason=reopened`) — close-out comment `7221687729`,
+  2026-11-27T15:08:59Z:
+  https://github.com/massimorofi/claudio/issues/58#issuecomment-7221687729
+- **#153 / #154 / #155** (T2, T3, T4) `closed` / `completed`, each carrying a
+  close-out comment (`7221696813`, `7221697220`, `7221697716`).
+- **#152** (T1) `closed` / `completed`.
+- **#175** "Increment 0a regression sweep, bug fixes and GitHub ticket
+  close-out" is deliberately **left open**: it is this close-out task's own
+  tracking issue, and the runner auto-closes a task's sub-issue when the task's
+  gate passes (see the runner comment on #152). Closing it by hand would predate
+  the gate.
+
+### Why the first attempt's gate failed (`scope`), and the fix for the plan
+
+The first attempt failed the evidence gate on the `scope` check only — every test
+and audit command passed. `scope` compares the files changed since the ref the
+worktree was seeded against the brief's `writable` globs, and two globs in this
+task's brief are not matchable as written:
+
+1. `claudio-core/src/claudio_core` and `claudio-backend/src/claudio_backend` are
+   bare directories. The matcher (`clams/executor/scope.py::_matches`) only treats
+   a pattern as a directory prefix when it ends in `/` or `/**`; a bare path is
+   matched with `PurePosixPath.match`, which cannot match a file *inside* that
+   directory. So every legitimate source edit (`accounting.py`, `llm.py`,
+   `adk_engine.py`, `reasoning_llm.py`, `manager.py`, `bench.py`, `config.py`,
+   `consolidation.py`, `fixer.py`) was charged as a violation. They should be
+   written `claudio-core/src/claudio_core/**` and `claudio-backend/src/claudio_backend/**`.
+2. The gate rule "`@pytest.mark.asyncio` on async tests" could only be satisfied
+   by editing `test_issue58_accounting.py`, `test_midrun_compact.py` and
+   `test_manual_compact.py`, none of which are in the writable list. Without those
+   markers 15 of the 145 tests fail under `-o asyncio_mode=strict` with
+   `Failed: async def functions are not natively supported`, so the family cannot
+   be green otherwise; the alternative (dropping the markers or editing
+   `conftest.py`, which is forbidden) would have broken the stated gate rule.
+   Those three paths should be added to the writable list.
+
+This second pass made **no** edits outside the enumerated writable paths, so its
+own `scope` delta is limited to `claudio-backend/tests/PERF_STATUS.md`.
