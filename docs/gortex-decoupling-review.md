@@ -846,3 +846,102 @@ None of these are under `claudio-core/src` or `claudio-backend/src`.
    Dropping it is a config migration, forbidden here (`claudio-backend/config/**` is off-limits).
 3. Renaming the vendor-named backend test files (`test_issue54_gortex.py`) would need the
    backend test tree, also out of scope.
+
+
+## Increment: the status report now comes over MCP (T1 item 3)
+
+The catalog entry used to carry only `id`, `tools` and `resources`, so
+`detect()` rested on tool names alone and `render_code_graph_status` always
+rendered *unknown*: nothing ever asked the server what it indexes. This
+increment supplies that question and feeds the answer back into the same entry,
+still with zero vendor knowledge in Claudio.
+
+**New: `claudio-core/src/claudio_core/mcp_status.py`** (stdlib only — `json`,
+`re`, `typing`; no pydantic, no ADK, no `mcp` import).
+
+* `pick_status_tool(tools, tool_descriptions) -> str | None` chooses the
+  advertised status tool by generic lexicon matching only: the five words
+  `index`, `coverage`, `workspace`, `status`, `capabilities`. Name tokens score 2,
+  description hits score 1, and a generic reporting verb (`get`, `list`,
+  `report`, `status`, …) is a tie-break only — so `cg_get_workspace_capabilities`
+  beats `cg_reindex_workspace` without either string being known to Claudio.
+  A skill-registry connector matches nothing and yields `None`.
+* `parse_status_payload(raw) -> dict | None` tolerantly extracts the object with
+  `tracked_repos` / `failed_repos` / `generated_at` from bare JSON, JSON in a
+  code fence (with or without a language tag), JSON behind log or prose lines,
+  an MCP `content` block list, a `{"result": {...}}` envelope, or an already
+  parsed dict. Anything else — garbage, truncated JSON, a non-dict — is `None`,
+  which is exactly the "status unknown" signal `codegraph.readiness_from_status`
+  already renders. It never raises.
+* `to_text(value)` flattens the shapes a `tools/call` answer arrives in, so the
+  engine holds no result-shape knowledge of its own.
+
+**`adk_engine._ensure_mcp_locked`** now fills the metadata the helpers were
+written to read, from data MCP already returns:
+
+| key | source |
+| --- | --- |
+| `instructions` | the server's `initialize` result, read off a pooled session |
+| `tool_descriptions` | `tools/list`, keyed by the **prefixed** name the model sees |
+| `capability` | the `MCPServerEntry` operator override (`""` = detect) |
+| `status` | the one-shot probe below (`None` until proven) |
+
+**`AdkEngine._probe_code_graph_status(entry, toolset)`** runs once per server per
+toolset build, inside the concurrent `_init_server` fan-out. It calls the picked
+tool with the *unprefixed* name (the session wants the server's own name), under
+`MCP_STATUS_PROBE_TIMEOUT_SECONDS = 5.0`. It is strictly best-effort: no status
+tool, no session access, a timeout, any exception or an unparseable payload all
+leave `entry["status"] = None`, and nothing escapes it — `_ensure_mcp` cannot
+fail because of a probe. Each outcome logs exactly one operator-visible line
+(`tracked=N failed=M`, `none (…)`, `failed (…)`) so a prompt that says *unknown*
+is explainable without a debugger.
+
+**`MCPServerEntry.capability: str = ""`** is the generic override T4 asked for,
+validated to `""` or `"code_graph"` against `mcp_capability.CAPABILITY_CODE_GRAPH`
+(one source of truth). The settings API needs no change: `GET /config` returns
+`config.model_dump()` and `PUT`/`PATCH` validate the whole `AppConfig`, and
+`GET /config/schema` serves `AppConfig.model_json_schema()`, so the field
+round-trips and appears in the form schema automatically.
+
+## Tests for this increment
+
+* `claudio-core/tests/test_mcp_status.py` — 29 synchronous tests, self-contained
+  `sys.path` bootstrap: lexicon hygiene, tool selection (name-only,
+  description-only, mutating-tool rejection, ties, tool objects, empty → `None`),
+  and parsing (bare / fenced / untagged-fence / log-prefixed / prose-wrapped JSON,
+  content blocks, envelopes, partial payloads, garbage → `None`, non-dict → `None`,
+  truncated → `None`, bytes, and never-raises on odd objects).
+* `claudio-backend/tests/test_mcp_codegraph_wiring.py` — 21 tests that import
+  **neither** `google.adk` nor `claudio_backend.engine.adk_engine` and never read
+  the gitignored `config/config.yaml` (the reason the old issue-54 tests cannot
+  run in the gate). They build a realistic fake catalog from the 21 tool names a
+  code-graph server advertises and walk the whole chain end to end: pick the
+  status tool → parse its answer → `detect()` → `readiness_from_status` →
+  `render_code_graph_status` / `render_code_discovery_policy`, plus the
+  vendor-free and framework-free source checks.
+
+## Verification for this increment
+
+```
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_mcp_status.py -q   # 29 passed
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests -q                       # 331 passed
+cd claudio-backend && python3 -m pytest tests/test_mcp_codegraph_wiring.py -q               # 21 passed
+cd claudio-backend && python3 -m pytest tests/test_engine_mcp.py -q                          # 16 passed (CI: ADK installed)
+test -z "$(grep -ri gortex claudio-core/src/claudio_core/mcp_status.py)"                     # vendor-free
+```
+
+The probe paths were exercised against a fake toolset (ADK is installed in the
+dev container, not in the gate): happy path stores the status and calls
+`get_workspace_capabilities` with `{}`; no-tool, no-session-access, exception,
+unparseable and a 6 s delay (cut off at 5.0 s) each leave `status = None` and
+raise nothing.
+
+## What remains
+
+1. `planact` family construction still takes tool-name patterns from config; it
+   could be fed the detected entry's real tool names instead.
+2. The probe runs at toolset build, so a long-lived process re-probes only when
+   the MCP config or approval mode changes. A TTL re-probe is a later, opt-in
+   refinement.
+3. `config.example.yaml` still carries the retired index-manifest key (config
+   migration, out of scope here).

@@ -299,6 +299,25 @@ class MCPServerEntry(BaseModel):
     command: list[str] = Field(default_factory=list)
     url: str | None = None
     enabled: bool = True
+    # Operator-declared capability override for this server. Generic: it names
+    # *what the server does*, never which product provides it, and Claudio has
+    # no vendor knowledge baked in. Empty (the default) means "figure it out
+    # from what the server advertises"; ``code_graph`` pins the code-navigation
+    # policy on without any heuristics. See claudio_core.mcp_capability.
+    capability: str = ""
+
+    @field_validator("capability")
+    @classmethod
+    def _known_capability(cls, v: str) -> str:
+        from claudio_core.mcp_capability import CAPABILITY_CODE_GRAPH
+
+        value = (v or "").strip().lower()
+        if value not in ("", CAPABILITY_CODE_GRAPH):
+            raise ValueError(
+                "capability must be '' (detect from what the server advertises) "
+                f"or {CAPABILITY_CODE_GRAPH!r} (operator override), got {v!r}"
+            )
+        return value
     # Extra HTTP headers sent on every request for the http/sse transports.
     # Used to carry a bearer token to an authenticated Streamable HTTP MCP
     # endpoint (e.g. {"Authorization": "Bearer <token>"} for a code-graph server

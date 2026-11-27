@@ -66,6 +66,7 @@ from claudio_core.instructions import (
     render_mcp_block,
     render_nudges,
 )
+from claudio_core.mcp_status import parse_status_payload, pick_status_tool, to_text
 from claudio_core.recovery import is_context_overflow
 from claudio_core.settings import (
     AppConfig,
@@ -98,6 +99,10 @@ def _adk_version() -> str:
 # give it a more forgiving budget so a slow first connect does not drop the
 # server from the catalog.
 MCP_CONNECT_TIMEOUT_SECONDS = 30.0
+# Cap for the one-shot index-status probe. The probe only decorates the prompt
+# with coverage facts; a slow server must never delay the first model call, so
+# it gets a short budget and is dropped (status stays unknown) when exceeded.
+MCP_STATUS_PROBE_TIMEOUT_SECONDS = 5.0
 
 # --------------------------------------------------------------------------
 # Context guard: the always-on "prevent, don't react" truncation
@@ -1421,11 +1426,29 @@ class AdkEngine:
             # that prefixing here so the prompt never names a tool the model
             # cannot invoke.
             tool_names = [f"{prefix}_{getattr(t, 'name', '')}" for t in tools]
-            return toolset, {
+            catalog: dict[str, Any] = {
                 "id": entry.id,
                 "tools": tool_names,
                 "resources": list(resources or []),
+                # What the server says about itself (MCP initialize
+                # ``instructions``) and what it says each tool does. Both are
+                # read by claudio_core.mcp_capability to decide -- with no vendor
+                # knowledge in Claudio -- whether this server is a code graph.
+                "instructions": await self._read_mcp_instructions(toolset),
+                "tool_descriptions": {
+                    f"{prefix}_{getattr(t, 'name', '')}": str(
+                        getattr(t, "description", "") or ""
+                    )
+                    for t in tools
+                },
+                # Operator-declared override ('' = detect from what is advertised).
+                "capability": str(getattr(entry, "capability", "") or ""),
+                # Filled by the one-shot status probe below; None = unknown.
+                "status": None,
             }
+            # One probe per server per toolset build, strictly best-effort.
+            await self._probe_code_graph_status(catalog, toolset)
+            return toolset, catalog
 
         enabled = [e for e in self.config.mcp.servers if e.enabled]
         # Bounded concurrent fan-out; results keep declaration order so the
@@ -1449,6 +1472,111 @@ class AdkEngine:
                 "Loaded %d MCP server(s): %s",
                 len(entries),
                 ", ".join(e["id"] for e in entries),
+            )
+
+    async def _read_mcp_instructions(self, toolset: Any) -> str:
+        """The server's own MCP ``instructions`` text (best-effort, never raises).
+
+        Read off the ``initialize`` result of a pooled session, so this costs no
+        extra handshake. A server that sends no instructions, or an ADK version
+        that does not expose the private session helper, yields ``""`` -- which
+        simply leaves capability detection to the tool names and descriptions.
+        """
+        try:
+            execute = getattr(toolset, "_execute_with_session", None)
+            if execute is None:  # pragma: no cover - depends on ADK internals
+                return ""
+
+            async def _read(session: Any) -> str:
+                init = getattr(session, "initialize_result", None)
+                return str(getattr(init, "instructions", "") or "")
+
+            text = await asyncio.wait_for(
+                execute(_read, "Failed to read MCP server instructions"),
+                timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+            )
+            return str(text or "")
+        except Exception as exc:  # noqa: BLE001 - metadata only, never fatal
+            logger.info("MCP instructions unavailable: %s", exc)
+            return ""
+
+    async def _probe_code_graph_status(self, entry: dict[str, Any], toolset: Any) -> None:
+        """Ask one server for its index/workspace status and store the answer.
+
+        ``entry["status"]`` is what the prompt's readiness block renders, so this
+        is the difference between the prompt *asserting* coverage and *reporting*
+        it. The probe runs once per server per toolset build, is capped at
+        :data:`MCP_STATUS_PROBE_TIMEOUT_SECONDS`, and is strictly best-effort: no
+        advertised status tool, a timeout, an error or an unparseable answer all
+        leave ``entry["status"] = None`` (rendered as "unknown") and nothing here
+        is allowed to raise out of ``_ensure_mcp``.
+        """
+        entry["status"] = None
+        server_id = str(entry.get("id") or "")
+        try:
+            tool_name = pick_status_tool(
+                entry.get("tools") or [], entry.get("tool_descriptions") or {}
+            )
+            if not tool_name:
+                logger.info(
+                    "MCP status probe %s: none (no advertised status tool)", server_id
+                )
+                return
+
+            # The catalog stores the prefixed name the model sees; the session
+            # wants the server's own (unprefixed) name.
+            prefix = _sanitize_mcp_prefix(server_id)
+            raw_name = tool_name
+            if raw_name.startswith(prefix + "_"):
+                raw_name = raw_name[len(prefix) + 1 :]
+
+            execute = getattr(toolset, "_execute_with_session", None)
+            if execute is None:  # pragma: no cover - depends on ADK internals
+                logger.info(
+                    "MCP status probe %s: none (no session access for %s)",
+                    server_id,
+                    tool_name,
+                )
+                return
+
+            async def _call(session: Any) -> Any:
+                return await session.call_tool(raw_name, arguments={})
+
+            result = await asyncio.wait_for(
+                execute(_call, f"Failed to call status tool {raw_name}"),
+                timeout=MCP_STATUS_PROBE_TIMEOUT_SECONDS,
+            )
+            status = parse_status_payload(to_text(result))
+            if status is None:
+                logger.info(
+                    "MCP status probe %s: none (tool %s returned no parseable "
+                    "status; index coverage stays unknown)",
+                    server_id,
+                    tool_name,
+                )
+                return
+            entry["status"] = status
+            tracked = status.get("tracked_repos")
+            failed = status.get("failed_repos")
+            logger.info(
+                "MCP status probe %s: tracked=%s failed=%s (tool %s, generated_at %s)",
+                server_id,
+                len(tracked) if isinstance(tracked, (list, tuple)) else "unknown",
+                len(failed) if isinstance(failed, (list, tuple)) else "unknown",
+                tool_name,
+                status.get("generated_at") or "not reported",
+            )
+        except asyncio.TimeoutError:
+            entry["status"] = None
+            logger.info(
+                "MCP status probe %s: failed (no answer within %.1fs; coverage unknown)",
+                server_id,
+                MCP_STATUS_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed probe must not sink the run
+            entry["status"] = None
+            logger.info(
+                "MCP status probe %s: failed (%s; coverage unknown)", server_id, exc
             )
 
     async def close(self) -> None:
