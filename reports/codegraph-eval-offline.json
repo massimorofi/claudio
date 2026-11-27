@@ -1,0 +1,66 @@
+{
+  "checks": [
+    {
+      "name": "policy_block_present",
+      "pass": true,
+      "detail": "1 server(s) detected, block is 2654 chars"
+    },
+    {
+      "name": "block_names_real_tools",
+      "pass": true,
+      "detail": "all 6 advertised tool names appear in the block"
+    },
+    {
+      "name": "block_names_configured_server_id",
+      "pass": true,
+      "detail": "configured id 'codegraph' quoted in the policy block"
+    },
+    {
+      "name": "readiness_is_covered",
+      "pass": true,
+      "detail": "status=covered repo='/work/massimorofi-claudio/27c5d7b7-02de-486a-bb94-b4b10c2b198a-a1/evals/fixtures/sample_repo' block=451 chars"
+    },
+    {
+      "name": "readiness_unknown_without_status",
+      "pass": true,
+      "detail": "status=unknown detail='the code-graph server reported no index status, so coverage is unknown'"
+    },
+    {
+      "name": "zero_vendor_strings",
+      "pass": true,
+      "detail": "scanned 3 rendered blocks, no vendor token"
+    },
+    {
+      "name": "prompts_vendor_free",
+      "pass": true,
+      "detail": "7 scripted prompts, none names a vendor"
+    },
+    {
+      "name": "planact_flags_narrated_not_called",
+      "pass": true,
+      "detail": "planned=['codegraph', 'the code graph'] unfulfilled=['codegraph', 'the code graph'] nudge=814 chars"
+    },
+    {
+      "name": "planact_clears_called_run",
+      "pass": true,
+      "detail": "satisfied=['codegraph', 'the code graph'] unfulfilled=[]"
+    },
+    {
+      "name": "derived_family_uses_server_id",
+      "pass": true,
+      "detail": "families=['codegraph']; advertised tool 'mcp__codegraph__find_callers' satisfies it"
+    },
+    {
+      "name": "non_codegraph_catalog_renders_no_block",
+      "pass": true,
+      "detail": "detect -> 0 servers, policy -> 0 chars, derived families -> 0"
+    },
+    {
+      "name": "fixture_shape",
+      "pass": true,
+      "detail": "7 python files, 1 markdown, edges=[('app', 'routes'), ('app', 'service'), ('repository', 'config'), ('repository', 'models'), ('routes', 'models'), ('routes', 'service'), ('service', 'config'), ('service', 'models'), ('service', 'repository')]"
+    }
+  ],
+  "passed": 12,
+  "failed": 0
+}

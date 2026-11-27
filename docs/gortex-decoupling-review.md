@@ -1180,3 +1180,170 @@ tests/test_mcp_codegraph_wiring.py             30 passed, 0 failed, 0 errors
    `docs/gortex-decoupling-review.md`** — the audit instrument and its record.
    They keep the name on purpose: they are how the coupling was measured, and the
    report is regenerated output.
+
+## Close-out
+
+This section closes the review. It states what each coupling class ended up
+with, how the decoupled behaviour is now measured, how to run the live half of
+that measurement, and what is deliberately left open.
+
+### What was decoupled, per class
+
+**C1 - vendor naming in the prompt.** The code-navigation policy is no longer a
+hand-written block under a vendor's name and is no longer gated on a substring of
+a user-chosen server id. `claudio_core.mcp_capability.detect()` asks whether a
+connected server *advertises* a code graph: an operator override
+(`capability: code_graph`), or the server's own MCP `instructions`, or at least
+two of its tool names / descriptions matching a generic lexicon
+(`CODE_GRAPH_LEXICON`). `render_code_graph_policy()` then renders from what was
+detected: the server is called by its **configured id** and the block bullets the
+**real prefixed tool names** from the catalog, so the prompt never names a tool
+the session cannot call. `instructions.py` carries no vendor token, and
+`skills/coding/references/gortex-code-discovery.md` became
+`code-graph-discovery.md` with the same guidance in generic terms.
+
+**C2 - the out-of-band filesystem channel.** The shared-mount manifest
+(`/workspace/.gortex-index.json`) is gone. Index coverage now arrives in-band:
+the code-graph server reports it on its own catalog entry (`entry["status"]`),
+`mcp_status.pick_status_tool()` finds the advertised status tool using five
+ordinary words, `parse_status_payload()` tolerates fences and log noise, and
+`codegraph.readiness_from_status()` turns the dict into covered / not_covered /
+unknown. There is no path to configure, no mount to share, and nothing written
+outside the MCP handshake. Anything unreported degrades to `unknown` and is
+rendered as unknown - never as a confident "not indexed".
+
+**C3 - deployment coupling.** Claudio no longer builds or supervises the indexer.
+`docker/gortex/` (Dockerfile, entrypoint) and its `compose.yaml` service are
+deleted; what remains is `docker/mcp/codegraph.compose.yaml`, an operator-owned
+overlay that is env-driven, read-only-mounted and profile-gated, plus the runbook
+`docs/mcp-codegraph.md`. The indexer's install URL, port, user and token are no
+longer Claudio's constants.
+
+**C4 - hardcoded plan/act triggers.** `GORTEX_FAMILY` is gone. The builtin family
+is `CODE_GRAPH_FAMILY`, built from generic structural vocabulary only, and
+`derive_families(mcp_entries)` derives **one family per connected code-graph
+server** from that server's own catalog entry: `name` is the configured id,
+`triggers` are its real tool names plus the generic vocabulary, `tool_patterns`
+are those same real names - so a promise is satisfied only by a call to a tool
+this server actually exposes. A server that is not connected produces no family,
+so nothing is audited against tools that do not exist.
+
+**C5 - config keys.** `agent.gortex_manifest_path` is deleted from
+`settings.py` along with every consumer, and the shipped
+`config.example.yaml` carries a commented generic example (`id: codegraph`,
+`streamable_http`, `${CODEGRAPH_URL}`, bearer header, `capability: code_graph`)
+instead of a vendor entry. Renaming a deployment is now a config edit, not a code
+change.
+
+### Offline eval results
+
+The claim being tested is the seamlessness one: with a code-graph server
+connected, the graph tools get used *without the user asking*, and the agent
+never hears a vendor name. `scripts/eval_codegraph_invocation.py --offline`
+proves the prompt half of that deterministically, in a bare gate: stdlib plus
+`claudio_core`, no network, no agent, no pydantic, and it always exits 0 because
+it is an instrument, not a wall.
+
+It builds a realistic catalog for the fixture workspace
+`evals/fixtures/sample_repo` (server id `codegraph`, six `mcp__codegraph__*`
+tools with descriptions, and a `status` payload whose `tracked_repos` covers the
+fixture path), scripts seven code-task prompts against it, and runs the **real**
+renderers - `mcp_capability.detect` / `render_code_graph_policy`,
+`codegraph.readiness_from_status` / `render_readiness_block`,
+`planact.derive_families` / `audit_run` / `render_planact_nudge`.
+
+Current result: **12 passed, 0 failed**
+(`reports/codegraph-eval-offline.json`, same table in `reports/codegraph-eval.md`).
+
+| check | what it pins |
+| --- | --- |
+| `policy_block_present` | the catalog is detected and a policy block is rendered |
+| `block_names_real_tools` | all six advertised prefixed tool names appear in the block |
+| `block_names_configured_server_id` | the server is named by its configured id |
+| `readiness_is_covered` | readiness from the server's own status payload is `covered` |
+| `readiness_unknown_without_status` | no status report degrades to `unknown`, never to a confident negative |
+| `zero_vendor_strings` | policy + readiness + nudge blocks contain no vendor token |
+| `prompts_vendor_free` | the scripted prompts name no vendor either |
+| `planact_flags_narrated_not_called` | "I will query the code graph" + `read_file` only -> unfulfilled, nudge rendered |
+| `planact_clears_called_run` | same narration with a real graph tool call -> clean, empty nudge |
+| `derived_family_uses_server_id` | the derived family is named `codegraph` and is satisfied by its advertised tool |
+| `non_codegraph_catalog_renders_no_block` | a calendar + ticket catalog renders **no** graph block and derives **no** family (no false trigger) |
+| `fixture_shape` | the fixture exists and its `ast`-derived import edges really are `app -> routes -> service -> repository` |
+
+The vendor test is a token scan (`gortex`, plus the two other names a copied
+prompt could plausibly leave behind), applied to every string the integration can
+put in front of the model. `claudio-core/tests/test_codegraph_eval.py` imports
+these same check functions and asserts `failed == 0` and zero vendor strings, so
+the gate and the report cannot drift apart.
+
+### Running the live eval
+
+The offline suite proves what the agent is *told*. The live half measures what it
+*does*, and is opt-in because it needs a running backend and a model:
+
+```
+export CLAUDIO_LIVE_EVAL=1
+export CODEGRAPH_EVAL_URL=http://localhost:8000   # backend base URL
+export CODEGRAPH_EVAL_TOKEN=<bearer token>
+python3 scripts/eval_codegraph_invocation.py --live
+```
+
+It sends the same seven prompts to a real session bound to
+`evals/fixtures/sample_repo`, reads the tool calls back off the run's event
+stream (`POST /chat` -> `GET /chat/runs/{run_id}`), and writes
+`reports/codegraph-eval-live.json` with the per-prompt tool list, the
+**graph-tool invocation rate** and the **fallback rate to the file tools**
+(`read_file`, `run_command`, `grep`, `glob`, `list_dir`, `write_file`,
+`edit_file`). Aliases `CLAUDIO_LIVE_BASE_URL` / `CLAUDIO_BACKEND_URL` and
+`CLAUDIO_LIVE_TOKEN` / `CLAUDIO_BACKEND_TOKEN` / `CLAUDIO_API_TOKEN` are accepted
+for the URL and token.
+
+Without `CLAUDIO_LIVE_EVAL=1`, or with the gate set but no URL/token, it writes
+`{"skipped": true, "reason": ...}` and still exits 0 - so the flag is safe to
+leave in any command line. The fixture must be inside the backend's
+`agent.workspace_allowed_roots` for the session to bind to it.
+
+### What remains
+
+1. **The live eval is not run in CI.** It needs a backend, a model and a token,
+   so it is opt-in and, in this tree, has never been executed: the committed
+   `reports/codegraph-eval-live.json` says `skipped`. The invocation and fallback
+   rates it produces are therefore *unmeasured* here - the offline suite is what
+   is actually green. Wiring it up needs a CI job that starts the backend with the
+   code-graph overlay, allows the fixture path as a workspace root, and uploads
+   the JSON.
+2. **The indexer repo now owns its own deployment.** C3 moved the Dockerfile and
+   entrypoint out of Claudio; the image build, version pinning, index warm-up and
+   repo tracking are the indexer's problem. The contract Claudio depends on is
+   only the MCP surface: `tools/list` names and descriptions, an advertised status
+   tool returning `{"tracked_repos": [...], "failed_repos": [...],
+   "generated_at": ...}`, and optionally `capability: code_graph`. If the indexer
+   changes the status payload's shape, `parse_status_payload` degrades to
+   `unknown` rather than breaking - but nobody is testing that contract across the
+   repo boundary yet.
+3. **Detection is lexical.** `detect()` matches advertised text against
+   `CODE_GRAPH_LEXICON`. A server that describes its tools in vocabulary outside
+   that lexicon is not recognised and gets no policy block; the operator override
+   (`capability: code_graph`) is the escape hatch. Conversely a server that
+   happens to use two lexicon words ("usages", "definitions") in an unrelated
+   sense can trigger the block. Both are accepted trade-offs: the override is
+   cheap, and a false negative is a prompt that says less, not one that lies.
+4. **Live readiness is a start-of-session snapshot.** The status tool is called
+   when the prompt is assembled. An index that finishes warming mid-session does
+   not retroactively change the verdict; the agent is told to re-check when an
+   empty result contradicts what it can see with the file tools.
+5. **Test-pinned names in older tests.** `test_codegraph.py` and `test_planact.py`
+   still carry the old vocabulary in places the coupling table flagged
+   (C1/C2/C4/C5 test pins). They pass and they assert the right behaviour; renaming
+   them is cosmetic and was left out of scope.
+6. **Out-of-tree stragglers.** `claudio-ctl` (`--profile gortex`,
+   `CLAUDIO_GORTEX_ENABLED`), `.env.example` (`GORTEX_*`), `doc/docker.md` §9 and
+   `doc/configuration.md` still describe the deleted service, and
+   `claudio-backend/tests/test_issue53_skill_compression.py` still asserts the old
+   skill wording. All are outside this task's writable scope and listed under
+   "What still carries the vendor name" above.
+7. **The audit instrument keeps the name on purpose.**
+   `scripts/audit_gortex_coupling.py`, `reports/gortex-coupling.json` and this
+   file are how the coupling was measured; they are the record, not the product.
+   The product-side gate is `grep -ri gortex claudio-core/src claudio-backend/src
+   compose.yaml docker/`, which is currently empty.
