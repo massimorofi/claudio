@@ -1,0 +1,414 @@
+# Gortex decoupling review
+
+**Scope.** How the optional Gortex code-intelligence server is coupled into
+Claudio's core, and the contract that removes that coupling.
+
+**Method.** Built from the working tree with file/grep tools only
+(`read_file`/`grep`/`sed`/`awk`); no code-graph MCP tool was available to the
+planner. Every claim below carries a `file:line` that was actually read. The
+machine-readable version of the hit list is `reports/gortex-coupling.json`,
+produced by `scripts/audit_gortex_coupling.py` (stdlib only, always exits 0 —
+it reports, it does not gate).
+
+**Baseline (this tree).** 204 hits over 167 scanned files: 193
+`vendor-token`, 11 `out-of-band-channel`. Hotspots by file:
+`planact.py` 30, `codegraph.py` 28, `docker/gortex/Dockerfile` 26,
+`compose.yaml` 26, `instructions.py` 24, `docker/gortex/entrypoint.sh` 25,
+`config.example.yaml` 10, `test_planact.py` 17, `test_codegraph.py` 14,
+`test_instructions_gortex.py` 12, `skills/coding/SKILL.md` 7,
+`references/gortex-code-discovery.md` 11, `settings.py` 4, `context.py` 1.
+
+## Findings
+
+### F1 — the vendor is named in the system prompt (`instructions.py`)
+
+- `claudio-core/src/claudio_core/instructions.py:102` —
+  `CODE_DISCOVERY_POLICY = """# Codebase lookup policy (Gortex)`. A whole
+  prompt block is authored under the vendor's name.
+- `instructions.py:104` — `"A \`gortex\` MCP server is connected. Gortex indexes the repository into a code"`:
+  the prompt *asserts the vendor's identity to the model* rather than reporting
+  what the handshake disclosed.
+- `instructions.py:126-127` — tells the model to "refer to \"the Gortex MCP tools\"",
+  i.e. the vendor name is the vocabulary the agent is instructed to use.
+- `instructions.py:155` — `def render_code_discovery_policy(...)`; the gate at
+  `instructions.py:164` is
+  `if not any("gortex" in str(e.get("id", "")).lower() for e in valid):` —
+  capability is inferred from a **substring of a user-chosen server id**, and
+  `instructions.py:166` returns the vendor block.
+- `instructions.py:169-175` — `def gortex_connected(...)`, same substring test
+  at `instructions.py:172`. A server id of `code-graph` providing identical
+  tools gets no policy block; a server id of `gortex-clone` providing none gets
+  one.
+- `instructions.py:178-198` — `def render_code_graph_status(...)`; gated on
+  `gortex_connected(mcp_entries)` at `instructions.py:192`, then imports
+  `.codegraph` and renders readiness from the on-disk manifest.
+- `instructions.py:283` and `instructions.py:290` — the two calls inside
+  `build_static_instructions`: `policy_block = render_code_discovery_policy(mcp_entries)`
+  and `status_block = render_code_graph_status(`, with
+  `instructions.py:292` passing
+  `manifest_path=getattr(config.agent, "gortex_manifest_path", None) or None`.
+  So the vendor reaches the prompt through two independent paths on every run.
+
+### F2 — Claudio reads the indexer's deployment internals off disk (`codegraph.py`)
+
+- `claudio-core/src/claudio_core/codegraph.py:37` —
+  `DEFAULT_MANIFEST_PATH = "/workspace/.gortex-index.json"`.
+- `codegraph.py:34` — the comment states the contract outright:
+  `# Written by docker/gortex/entrypoint.sh into the shared /workspace mount, which`.
+- `codegraph.py:16` — module docstring: `"the deployment knows and the model does not. The gortex entrypoint writes a"`.
+- `codegraph.py:48` — `"""What the gortex entrypoint recorded about what it managed to track."""`.
+- `codegraph.py:73` — `candidate = Path(path) if path else Path(DEFAULT_MANIFEST_PATH)` —
+  the read itself, inside `load_manifest`, feeding `assess()` (`codegraph.py:131`)
+  and `render_readiness_block()` (`codegraph.py:166`).
+- `codegraph.py:202` — the rendered text names the vendor to the model:
+  `"The Gortex index status for this workspace is **unknown** (no manifest "`.
+- `codegraph.py:195` — `"Gortex did not cover the workspace and which claims are therefore"`.
+- `codegraph.py:246` — `"DEFAULT_MANIFEST_PATH",` in `__all__`: the side-channel
+  constant is part of the module's public surface.
+
+**Why this is the worst of the findings.** The manifest is written by
+`docker/gortex/entrypoint.sh:21` (`MANIFEST="${GORTEX_MANIFEST:-/workspace/.gortex-index.json}"`)
+and emitted by `write_manifest()` at `entrypoint.sh:67-79`, atomically via the
+temp file `entrypoint.sh:71`
+(`tmp="$(dirname "$MANIFEST")/.gortex-index.$$.tmp"`). So Claudio's core has a
+hard-coded dependency on a *filename chosen by an external product's shell
+entrypoint*, in a *directory both containers bind-mount*. That is an
+out-of-band channel: it bypasses the MCP handshake entirely, it is invisible to
+capability negotiation, it silently goes stale (written once at container start,
+`entrypoint.sh:80`), and it breaks the moment the indexer is not the vendored
+one. Note `codegraph.py:210-242` already contains the right shape —
+`probe_index_health()` doing an authenticated HTTP call to
+`base_url + "/v1/index/health"` (`codegraph.py:224`) — but its own docstring at
+`codegraph.py:219-222` explains the manifest won because prompt assembly "must
+not block on the network". The fix is not to choose the network over the file;
+it is to ask the server over the transport we already hold open.
+
+### F3 — config keys carry the vendor name (`settings.py`)
+
+- `claudio-core/src/claudio_core/settings.py:245` — `gortex_manifest_path: str = ""`,
+  documented at `settings.py:242` as
+  `# Where the gortex entrypoint publishes which repos it actually indexed.` and
+  at `settings.py:244` as
+  `# current workspace. Empty = the built-in default (/workspace/.gortex-index.json).`
+- Consumed at `instructions.py:292` via `getattr(config.agent, "gortex_manifest_path", ...)`.
+- `claudio-core/tests/test_codegraph.py:217` — `cfg.agent.gortex_manifest_path = str(manifest)`
+  pins the key in tests.
+
+### F4 — plan/act auditing hardcodes the vendor's triggers (`planact.py`)
+
+- `claudio-core/src/claudio_core/planact.py:66-76` — `GORTEX_FAMILY = ToolFamily(`
+  with `name="the Gortex code graph"` (`:67`),
+  `triggers=("gortex", "code graph", "graph tool", "callers", "callees", "change impact", "impact analysis")`
+  (`:68-69`), `tool_patterns=(r"gortex", r"^graph")` (`:70`) and a remedy string
+  that instructs the model in vendor terms (`:71-75`, "Issue an actual Gortex
+  tool call now, or state plainly that you did not use Gortex...").
+- `planact.py:88` — `BUILTIN_FAMILIES: tuple[ToolFamily, ...] = (GORTEX_FAMILY, WEB_SEARCH_FAMILY)`.
+- `planact.py:152-156` — `def audit_run(..., families: tuple[ToolFamily, ...] = BUILTIN_FAMILIES)`:
+  the vendor family is the **default** for every run of every deployment, so the
+  nudge machinery carries the vendor even where no such server is configured.
+  Same default at `:112` (`called_families`), `:121` (`planned_families`),
+  `:139` (`AuditReport.families`).
+- `planact.py:191` — `"GORTEX_FAMILY",` exported in `__all__`.
+- `planact.py:20-22` — the design note is honest about the tension:
+  "**Families, not tool names.** Tool names are unstable across MCP servers and
+  versions (the Gortex guide says so explicitly)" — yet `:70` matches on the
+  vendor name anyway.
+- `claudio-core/src/claudio_core/context.py:87` — the only core hit outside the
+  four modules above, a comment: `# narration. Together they let the engine detect "said it would use Gortex, never`.
+
+### F5 — the indexer's build and repo-tracking live in Claudio's repo
+
+- `docker/gortex/Dockerfile` (26 hits) — installs a third-party binary from the
+  vendor's URL (`:36`, `curl -fsSL https://get.gortex.dev`), creates a
+  vendor-named user (`:46-48`), provisions `$HOME/.gortex` backed by a named
+  volume (`:49-56`), copies the vendor entrypoint (`:58`) and exposes the
+  daemon's port (`:68`, `EXPOSE 7411`).
+- `docker/gortex/entrypoint.sh` (25 hits) — decides *which repositories get
+  indexed* (`GORTEX_REPO`, `GORTEX_EXTRA_REPOS`, `:19`, `:44-62`, `gortex track`
+  at `:56`), publishes the manifest Claudio then reads (`:21`, `:67-80`), and
+  owns the daemon's auth token (`:88-93`, `:99`).
+- Net effect: Claudio knows the indexer's install URL, username, home layout,
+  CLI subcommands, env-var names, manifest filename, temp-file naming scheme and
+  port. Any indexer upgrade that changes one of those silently degrades
+  Claudio's prompt.
+
+### F6 — compose ships the vendor as a Claudio service
+
+- `compose.yaml:118-160` — a `gortex:` service with `profiles: ["gortex"]`
+  (`:120`), `image: claudio/gortex:${CLAUDIO_TAG:-latest}` (`:121`), a build
+  stanza pointing at `docker/gortex/Dockerfile` (`:124`), vendor env vars
+  (`:126-143`), a bind mount of the agent's workspace *and the operator's whole
+  host projects root* into the indexer (`:145-152`), the `gortex-data` volume
+  (`:154`, declared at `:185`) and a healthcheck against `/mcp` (`:155-158`).
+
+### F7 — the vendor is a first-class citizen in shipped config
+
+- `claudio-backend/config/config.example.yaml:159-175` — a commented
+  `# Gortex code-intelligence MCP (issue #54, Option B)` block (10 hits) with
+  `- id: gortex` (`:167`), `transport: streamable_http` (`:168`),
+  `url: http://gortex:7411/mcp` (`:170`) and
+  `Authorization: Bearer claudio-gortex-internal-token` (`:173-174`),
+  `enabled: false` (`:175`). The shape (url + bearer header) is exactly right;
+  the hard-coded service name, port and shared default token are the coupling.
+
+### F8 — agent-facing skill text names the vendor
+
+- `claudio-backend/skills/coding/SKILL.md` (7 hits) — the skill's own
+  `description` front-matter says "(when the gortex MCP server is connected)
+  using Gortex code discovery first for symbols, callers, dependencies and
+  change impact" (`:6-7`); the body has a `## Codebase discovery (Gortex)`
+  heading (`:254`), the instruction "When a `gortex` MCP server is connected,
+  use the Gortex tools **first**" (`:256`), a fallback clause naming the vendor
+  (`:261`), a pointer to `references/gortex-code-discovery.md` (`:263`) and a
+  reference index entry naming it again (`:276`).
+- `claudio-backend/skills/coding/references/gortex-code-discovery.md`
+  (11 hits) — the whole file is vendor-titled: `# Gortex code discovery (query
+  recipes)` (`:1`), "Gortex is an optional code-intelligence MCP server
+  (issue #54)" (`:3`), "`gortex` server is connected and enabled in Claudio's
+  `mcp.servers` config" (`:6`), plus `:10`, `:12`, `:23`, `:28`, `:34` and the
+  operator-facing install steps at `:40-43` ("Install the `gortex` binary on the
+  backend's PATH, start its daemon (`gortex daemon start --detach`)...").
+  Ironically `:34` already warns "Tool names can change between Gortex versions."
+
+### F9 — the tests encode the coupling as the expected contract
+
+- `claudio-core/tests/test_instructions_gortex.py` (12 hits) — the filename
+  itself; asserts the policy is absent without gortex (`:21`, `:45`) and present
+  with (`:27-31`, `:35` — `render_code_discovery_policy([{"id": "Gortex Code"}]) == CODE_DISCOVERY_POLICY`),
+  and feeds `mcp_entries=[{"id": "gortex", "tools": ["gortex_search"], ...}]`
+  (`:28`, `:56`).
+- `claudio-core/tests/test_codegraph.py` (14 hits) — writes the manifest at the
+  vendor filename (`:32`, `tmp_path / ".gortex-index.json"`), probes
+  `http://gortex:7411` (`:159`, `:168`, `:176`), defines
+  `GORTEX_MCP = [{"id": "gortex", "tools": ["Gortex_search"], ...}]` (`:182`)
+  and sets `cfg.agent.gortex_manifest_path` (`:217`).
+- `claudio-core/tests/test_planact.py` (17 hits) — imports `GORTEX_FAMILY`
+  (`:14`), sets `GRAPH = GORTEX_FAMILY.name` (`:23`), and drives the audit with
+  vendor sentences ("Let me check Gortex for the callers.", `:30`, `:67`, `:73`,
+  `:84`), asserting `"Gortex" in nudge` (`:87`) and
+  `"Gortex" in report.remedy_for(GRAPH)` (`:104`).
+- `claudio-core/tests/test_issue54_gortex.py` — **does not exist in this working
+  tree.** `find` over the repo and `grep -rl` over `claudio-core/tests` both
+  return nothing for that name; the issue-#54 coverage actually lives in
+  `test_instructions_gortex.py` and `test_codegraph.py`, whose docstrings cite
+  "issue #54" (`test_instructions_gortex.py:1`, `:7`; `test_codegraph.py:4`).
+  Recorded here because the audit brief listed it; the migration must not go
+  looking for a file that is not there.
+
+## Coupling classes
+
+Five classes, each with the sites above and the audit token that detects it.
+`vendor-token` counts are from `scripts/audit_gortex_coupling.py`; the
+out-of-band count is the `out-of-band-channel` class (11 hits).
+
+| Class | Name | Definition | Sites | Audit token |
+|---|---|---|---|---|
+| **C1** | vendor-naming-in-prompt | A vendor string is placed in text the model reads, or the decision to place it there is made by matching the vendor's name. | `instructions.py:102`, `:104`, `:126-127`, `:155`, `:164`, `:166`, `:169`, `:172`, `:178`, `:192`, `:283`, `:290`; `codegraph.py:195`, `:202`; `skills/coding/SKILL.md:6-7`, `:254`, `:256`, `:261`, `:263`, `:276`; `references/gortex-code-discovery.md:1`, `:3`, `:6`, `:10`, `:12`, `:23`, `:28`, `:34`, `:40-43` | `gortex` (case-insensitive) |
+| **C2** | out-of-band-filesystem-channel | Indexer state reaches Claudio through a file on a shared mount instead of the MCP transport, so it is invisible to capability negotiation. | `codegraph.py:37` (`DEFAULT_MANIFEST_PATH = "/workspace/.gortex-index.json"`), `:34`, `:48`, `:73`, `:246`; written by `docker/gortex/entrypoint.sh:21`, `:67-80`, `:71`; surfaced by `instructions.py:192-198`, `:290-292`; `settings.py:244` | `.gortex-index`, `DEFAULT_MANIFEST_PATH`, `gortex_manifest_path` |
+| **C3** | deployment-coupling | Claudio's repo builds, configures and supervises the indexer, and hardcodes its install URL, paths, port, user and token. | `docker/gortex/Dockerfile:36`, `:40-56`, `:58`, `:68`; `docker/gortex/entrypoint.sh:10-21`, `:44-62`, `:88-93`, `:99`; `compose.yaml:102-160`, `:118-128`, `:143`, `:145-154`, `:155-158`, `:185`; `config.example.yaml:159-175` (`:167`, `:170`, `:173-174`) | `gortex` |
+| **C4** | hardcoded-planact-triggers | Run auditing decides "the agent meant to use the code graph" from a vendor-named literal baked into the module, as a package default. | `planact.py:66-76` (`GORTEX_FAMILY`, triggers `:68-69`, `tool_patterns` `:70`, remedy `:71-75`), `:88` (`BUILTIN_FAMILIES`), `:112`, `:121`, `:139`, `:152-156`, `:191`; `context.py:87` | `gortex` |
+| **C5** | config-keys | Vendor name in a settings field / config key, so renaming the deployment requires a code change. | `settings.py:242-245` (`gortex_manifest_path: str = ""`); consumed `instructions.py:292`; shipped config `config.example.yaml:167`, `:170`, `:174`; test-pinned `test_codegraph.py:217` | `gortex_manifest_path`, `gortex` |
+
+Test files inherit their class from what they pin: `test_instructions_gortex.py`
+(C1), `test_codegraph.py` (C1/C2/C5), `test_planact.py` (C4). Renaming them is
+part of the migration, not a separate concern.
+
+**Count by class** (a site can appear in more than one class; the audit's
+mutually-exclusive line counts are 193 C1+C3+C4+C5 vendor-token and 11 C2):
+C1 is the largest and the most user-visible; C2 is the most architecturally
+wrong; C3 is the largest by lines of owned code; C4 and C5 are small and cheap.
+
+## Target contract
+
+The end state, stated as rules a reviewer can check.
+
+**T1 — discovery is MCP-only.** Code-graph capability and readiness are
+discovered **only** from the MCP handshake of a configured server:
+
+1. `initialize` → the server's `instructions` field, used verbatim as the
+   server's own guidance text (the server describes itself; Claudio does not
+   describe it on the server's behalf).
+2. `tools/list` → each tool's `name`, `description` and `annotations`
+   (including `readOnlyHint`/`destructiveHint`/`openWorldHint`). The prefixed
+   tool names Claudio already renders in `render_mcp_block`
+   (`instructions.py:130-152`) are the authoritative list; the policy text must
+   quote those names and nothing else.
+3. A **server-advertised status/capability tool** — a tool that appears in
+   `tools/list` and whose description says it reports index coverage/health —
+   is discovered by Claudio and **called exactly once per session**, at session
+   start, off the critical path of prompt assembly. Its result replaces the
+   manifest read. If no such tool is advertised, readiness is reported as
+   *unknown* (the honest state `codegraph.py:200-207` already renders) and
+   nothing else changes.
+
+No filesystem path, no environment variable and no out-of-band file participates
+in discovery. `DEFAULT_MANIFEST_PATH` (`codegraph.py:37`), `load_manifest`'s
+default candidate (`codegraph.py:73`), the `manifest_path` plumbing
+(`instructions.py:292`) and `agent.gortex_manifest_path` (`settings.py:245`) are
+deleted, not deprecated: a key that still works is a channel that still gets
+used.
+
+**T2 — zero vendor strings in shipped code.** `grep -ri gortex
+claudio-core/src claudio-backend/src` returns nothing. Concretely:
+`CODE_DISCOVERY_POLICY` becomes a capability-shaped template with no proper noun
+(`instructions.py:102-127`); `gortex_connected` becomes
+`code_graph_server(mcp_entries)`, which returns the *entry* whose advertised
+capability is `code-graph` rather than testing an id substring
+(`instructions.py:169-175`, `:164`); `render_code_discovery_policy` /
+`render_code_graph_status` take the discovered entry and the status-tool result
+(`instructions.py:155`, `:178`); `GORTEX_FAMILY` becomes a family *constructed
+from the discovered server's real tool names* and passed in by the caller, with
+`BUILTIN_FAMILIES` holding no code-graph family by default
+(`planact.py:66-76`, `:88`, `:155`).
+
+**T3 — the indexer is an external process.** Claudio does not build or ship it.
+It is registered as one `mcp.servers` entry: `id` (operator-chosen),
+`transport: streamable_http`, `url`, and a bearer token in `headers` — the shape
+already present at `config.example.yaml:167-175`, minus the vendor's service
+name, port and shared default token. `docker/gortex/` and the `compose.yaml`
+`gortex` service (`:102-160`, `:185`) leave the repo; the operator runs the
+indexer wherever they like and points the entry at it.
+
+**T4 — an operator override, never a Claudio guess.** The entry may carry an
+optional `capability: code-graph` field. It exists for the case where a server
+does not self-describe well; it is operator-declared, not inferred by Claudio
+from a name. Precedence: advertised capability (T1) > operator `capability`
+override > not a code-graph server. An id substring is never a signal.
+
+**T5 — what the agent is told.** The prompt says, in effect:
+
+> `a code-graph server <configured id> is connected` — with `<configured id>`
+> taken from the operator's `mcp.servers` entry, and the graph's capabilities
+> rendered from the server's own `initialize` instructions plus the real
+> prefixed tool names from `tools/list`.
+
+Never a vendor name chosen by Claudio. Readiness is appended from the status
+tool's answer ("covers this workspace", "does not cover it", "unknown"), and the
+remedy text in a plan/act nudge names the tools the agent should actually call.
+
+**T6 — the audit goes to zero and stays there.** After the migration,
+`python3 scripts/audit_gortex_coupling.py` reports 0 hits under
+`claudio-core/src` and `claudio-backend/src`; remaining hits are only in
+`docker/`, `compose.yaml`, `config.example.yaml` and tests, and those shrink
+with T3. The script keeps exiting 0 so it can be run as a report anywhere; a
+gate that fails is added separately once the count is zero.
+
+## Migration order
+
+Task 1 of this plan was the audit itself (`scripts/audit_gortex_coupling.py` +
+this document + `reports/gortex-coupling.json`), which establishes the baseline
+and changes no behaviour. The decoupling runs as tasks 2-7, in this order, each
+one a reviewable PR that leaves the tree green.
+
+**Task 2 — add MCP-only discovery, dead code first (C2, C1).**
+Add a `code_graph` discovery module in `claudio-core` that, from the connected
+MCP entries, reads `initialize` `instructions`, `tools/list`
+names/descriptions/annotations, and identifies + calls once per session the
+server-advertised status/capability tool. Cache the result on the session. No
+call sites yet, so nothing can regress; unit-tested with a fake MCP entry. This
+creates the replacement before the old path is touched.
+
+**Task 3 — switch readiness off the filesystem (C2).**
+Point `render_code_graph_status` (`instructions.py:178-198`) at the Task-2
+result instead of `codegraph.assess()`'s manifest read; delete
+`DEFAULT_MANIFEST_PATH` (`codegraph.py:37`), the manifest default candidate
+(`codegraph.py:73`) and the `manifest_path` plumbing (`instructions.py:292`).
+Delete `agent.gortex_manifest_path` (`settings.py:242-245`) — C5 falls out here
+rather than waiting. `probe_index_health` (`codegraph.py:210-242`) becomes an
+operator-only check, no longer a prompt input. Update `test_codegraph.py:32`,
+`:217`.
+
+**Task 4 — make the prompt vendor-neutral (C1).**
+Replace `gortex_connected`'s id-substring test (`instructions.py:164`, `:169-175`)
+with the Task-2 capability lookup; rewrite `CODE_DISCOVERY_POLICY`
+(`instructions.py:102-127`) as a template that names the configured server id and
+the real prefixed tool names, with no proper noun; strip the vendor from
+`codegraph.py:195`, `:202`. Both call sites (`instructions.py:283`, `:290`) keep
+their "only when a code-graph server is connected" behaviour, now decided by
+discovery. Update `test_instructions_gortex.py` and the `test_codegraph.py`
+prompt assertions.
+
+**Task 5 — make plan/act families data-driven (C4).**
+Construct the code-graph `ToolFamily` from the discovered server's real tool
+names and its status-tool name, passed in by the caller; remove `GORTEX_FAMILY`
+from `BUILTIN_FAMILIES` (`planact.py:66-76`, `:88`, `:152-156`, `:191`) so the
+package default carries no vendor, and make the remedy text name the tools the
+agent should call. Update `test_planact.py:14`, `:23`, `:30`, `:67`, `:73`,
+`:84`, `:87`, `:104` and `context.py:87`.
+
+**Task 6 — move the indexer out of the repo (C3).**
+Delete `docker/gortex/Dockerfile` and `docker/gortex/entrypoint.sh`, the
+`gortex` service and `gortex-data` volume from `compose.yaml`
+(`:102-160`, `:185`), and the vendor entry from `config.example.yaml`
+(`:159-175`); replace the latter with a commented generic example — `id`,
+`transport: streamable_http`, `url`, `headers: {Authorization: Bearer ...}`,
+optional `capability: code-graph` — and document the external-process
+registration in `doc/docker.md`. Repo tracking and manifest emission become the
+operator's concern.
+
+**Task 7 — rename the tests, zero the audit, add the gate.**
+`test_instructions_gortex.py` → `test_code_discovery_policy.py`;
+`test_codegraph.py` keeps its name (it is about the code graph, not the vendor)
+with its fixtures de-vendored; `test_planact.py` loses its vendor sentences.
+Re-run `python3 scripts/audit_gortex_coupling.py --json
+reports/gortex-coupling.json` and confirm 0 hits under `claudio-core/src` and
+`claudio-backend/src`; then wire the script into the pre-commit gate as a
+failing check, which is the first point it is allowed to gate.
+
+Order rationale: 2 before 3 (a replacement must exist before the side-channel is
+cut, or readiness silently degrades to "unknown" with no path back); 3 before 4
+(readiness text is one of the strings Task 4 must not name); 4 before 5 (the
+nudge remedy should reference the vocabulary the prompt now uses); 6 last among
+the code tasks because deleting deployment is only safe once nothing in the core
+depends on it; 7 closes out so the metric is the final change.
+
+## Status
+
+**Done (this change).**
+
+- `scripts/audit_gortex_coupling.py` — stdlib only (`argparse`, `json`, `pathlib`,
+  `sys`, `typing`), scans the seven required roots, classifies each hit as
+  `vendor-token` or `out-of-band-channel`, prints `<class> <path>:<line> <text>`
+  per hit plus a per-class summary, writes `--json`, and **always returns 0** —
+  including on an unreadable file or a missing root, which are reported rather
+  than raised. It reports; it does not gate.
+- `reports/gortex-coupling.json` — generated by that script against this tree:
+  204 hits / 167 files scanned / 193 `vendor-token` / 11 `out-of-band-channel`,
+  with `summary_by_file` and per-hit `matched_tokens`.
+- This review: findings F1-F9 with `file:line` for every claim, the five coupling
+  classes C1-C5, the target contract T1-T6, and migration tasks 2-7.
+
+**Not done / deliberately out of scope here.**
+
+- No production code was touched. `claudio-core/src/**`, `claudio-backend/src/**`,
+  `docker/**`, `compose.yaml`, `claudio-backend/config/config.yaml` and `.env`
+  are untouched by this change by design — the audit is read-only evidence, and
+  tasks 3-6 change behaviour and need their own reviewable PRs.
+- Tasks 2-7 are unstarted.
+- The audit is not yet wired into pre-commit (Task 7), because gating on a
+  non-zero count today would fail every build.
+
+**Corrections to the audit brief, found while reading.**
+
+- `claudio-core/tests/test_issue54_gortex.py` does not exist in this working
+  tree (see F9); its intended coverage lives in `test_instructions_gortex.py`
+  and `test_codegraph.py`.
+- The brief's framing "Claudio reading the indexer's deployment internals instead
+  of MCP" is confirmed exactly, and is worse than a single constant: the manifest
+  filename is agreed between `codegraph.py:37` and `entrypoint.sh:21`, so two
+  files in two different subsystems must change together. C2 is the class to
+  kill first for that reason.
+- `codegraph.py:210-242` already implements an authenticated HTTP health probe.
+  The target contract is therefore a smaller change than it looks: the transport
+  call exists, it is just not the source of truth.
+
+**Verification.** All four acceptance commands pass on this tree: the scanner
+exits 0 and prints `AUDIT_SCAN_OK`; the JSON is non-empty and contains both
+`codegraph.py` (28 hits) and `instructions.py` (24 hits) → `AUDIT_COVERS_HOTSPOTS_OK`;
+the five required headings are present → `REVIEW_SECTIONS_OK`; `C2` and
+`gortex_manifest_path` both appear in this document → `COUPLING_CLASSES_OK`.
+
+**Next action for a human.** Approve the target contract T1-T6 (specifically T1's
+"server-advertised status/capability tool", which requires the indexer to expose
+one — if it does not, that is an upstream request, and until then readiness
+stays honestly *unknown* rather than falling back to a file), then start Task 2.
