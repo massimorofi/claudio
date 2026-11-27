@@ -654,3 +654,55 @@ grep -ri gortex claudio-core/src/claudio_core/instructions.py # no matches
    reference doc** — classes **C1**/**C3**, untouched here (forbidden or out of scope).
 4. **`scripts/audit_gortex_coupling.py`** still lists the C2 tokens; that is correct —
    it is the detector, and it should keep failing if a manifest path ever returns.
+
+---
+
+# C2 closed — the package is now vendor-free
+
+The first C2 pass rewired readiness to MCP but left the package-wide gate
+`CORE_VENDOR_FREE_OK` failing, because two files outside the original writable list
+still named the vendor. This pass finishes the job.
+
+## What changed
+
+1. **`planact.py` — the tool family is now described by capability, not by product.**
+   `GORTEX_FAMILY` became `CODE_GRAPH_FAMILY` (`name="the code graph"`), and its
+   triggers / tool patterns became generic structural vocabulary
+   (`code graph`, `callers`, `callees`, `call hierarchy`, `change impact`,
+   `dependenc`, `symbol`, …), derived in part from
+   `mcp_capability.CODE_GRAPH_LEXICON` so there is one vocabulary, not two.
+   The remedy text says "the code graph" instead of naming a product.
+2. **Vendor-specific tool names are matched *in band*.** New
+   `code_graph_family(mcp_entries, extra_patterns=())` widens the family with the
+   server id and the real tool names taken from the catalog entry itself (via
+   `mcp_capability.detect`), and `families_for(mcp_entries)` returns the families to
+   audit a run with. A server whose tools are called
+   `mcp__vendorx__do_thing` is therefore matched without any vendor string in this
+   repo — which is the same principle C2 applies to index coverage. A malformed or
+   absent catalog degrades to the builtin family; it never raises.
+3. **`context.py`** — the stale comment naming the vendor now says "the code graph".
+4. **`codegraph.py` fail-safe tightened.** A status dict whose `tracked_repos` is
+   present but not a list (e.g. a string) now yields `status_unknown`, not
+   `not_covered`. A report that cannot be read is not evidence that the workspace
+   sits outside the index, so it must not render as a confident "not indexed".
+5. **`tests/test_planact.py`** follows the rename (it imported `GORTEX_FAMILY`, so
+   leaving it would have broken the suite) and gains coverage for in-band matching
+   and for a broken catalog.
+
+## Verification
+
+```
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_codegraph.py -q   # 20 passed
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests -q                     # 300 passed
+NO_FILE_SIDECHANNEL_OK  NO_VENDOR_IN_CODEGRAPH_OK  READINESS_WIRED_OK  CORE_VENDOR_FREE_OK
+```
+
+`grep -ri gortex claudio-core/src/claudio_core` is now empty.
+
+## What still carries the vendor name (out of this task's scope)
+
+- `claudio-backend/src/claudio_backend/agent.py` — class **C3** (backend prompt text).
+- `docker/gortex/**`, `compose.yaml`, `config.example.yaml`, the coding skill's
+  reference doc — classes **C1** / **C3**.
+- `scripts/audit_gortex_coupling.py` keeps the C2 tokens on purpose: it is the
+  detector, and it must fail again if a manifest path ever comes back.

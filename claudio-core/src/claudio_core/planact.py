@@ -4,10 +4,10 @@ Why this exists
 ---------------
 A stated intention to use a tool and the tool call itself are unrelated events
 unless something connects them. Nothing did. An agent could write "let me check
-Gortex" in its narration, never issue a single graph call, mark the plan item
-done, and report a result -- and the transcript looked fine. That is exactly what
-happened on a documentation task where the plan said "via Gortex + source reads"
-and only file tools were ever called.
+the code graph" in its narration, never issue a single graph call, mark the plan
+item done, and report a result -- and the transcript looked fine. That is exactly
+what happened on a documentation task where the plan said "via the code graph +
+source reads" and only file tools were ever called.
 
 This module makes the gap *computable*. Given the assistant's own text and the
 set of tools actually invoked, it reports families of tools that were named with
@@ -18,10 +18,15 @@ afterwards.
 Design notes
 ------------
 - **Families, not tool names.** Tool names are unstable across MCP servers and
-  versions (the Gortex guide says so explicitly). A family is a prose trigger
-  ("gortex", "code graph") plus patterns that match the real tool names.
+  versions, so a family is a set of generic prose triggers ("code graph",
+  "callers") plus patterns that match the real tool names.
+- **No vendor names, anywhere.** The family is described by capability
+  vocabulary, never by a product name. When a server's tool names do not use
+  that vocabulary, the extra patterns come *in band* from the catalog the server
+  itself advertised -- see :func:`code_graph_family`. Nothing in this module has
+  to be edited when the product changes.
 - **Intent required.** Mentioning a tool in a sentence is not a plan. Negations
-  and disclosures ("Gortex was unavailable", "I did not query the graph") must
+  and disclosures ("the graph was unavailable", "I did not query the graph") must
   not trigger a nudge, or the audit becomes noise the model learns to ignore.
 - **Satisfied means called.** Once any tool in the family has run, the family is
   no longer outstanding, regardless of what was said earlier.
@@ -30,6 +35,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any, Iterable, Mapping
+
+from .mcp_capability import CODE_GRAPH_LEXICON, detect
 
 # Words that, next to a tool-family trigger, indicate the agent intends to act.
 INTENT_WORDS = (
@@ -62,16 +70,32 @@ class ToolFamily:
         return any(re.search(p, lowered) for p in self.tool_patterns)
 
 
-# The family this exists for, plus two adjacent ones that fail the same way.
-GORTEX_FAMILY = ToolFamily(
-    name="the Gortex code graph",
-    triggers=("gortex", "code graph", "graph tool", "callers", "callees",
-              "change impact", "impact analysis"),
-    tool_patterns=(r"gortex", r"^graph"),
+#: Generic vocabulary that only a code-navigation / code-intelligence server is
+#: likely to advertise. Deliberately vendor-free: no product names, no company
+#: names, just the structural concepts the tools answer questions about.
+CODE_GRAPH_TRIGGERS: tuple[str, ...] = (
+    "code graph", "graph tool", "graph query", "graph results", "call graph",
+    "callers", "callees", "call hierarchy", "change impact", "impact analysis",
+    "code intelligence", "code index", "index coverage", "code navigation",
+    "dependenc", "symbol",
+)
+
+#: Patterns matched against *tool names* (already lower-cased) to decide whether a
+#: call satisfied the family. Generic structural vocabulary only; anything
+#: vendor-specific is added in band by :func:`code_graph_family`.
+CODE_GRAPH_TOOL_PATTERNS: tuple[str, ...] = tuple(
+    r"\b" + re.escape(term) for term in sorted(CODE_GRAPH_LEXICON, key=len, reverse=True)
+) + (r"graph", r"callers", r"callees", r"dependenc", r"symbol", r"impact")
+
+# The family this exists for, plus an adjacent one that fails the same way.
+CODE_GRAPH_FAMILY = ToolFamily(
+    name="the code graph",
+    triggers=CODE_GRAPH_TRIGGERS,
+    tool_patterns=CODE_GRAPH_TOOL_PATTERNS,
     remedy=(
-        "Issue an actual Gortex tool call now, or state plainly that you did not "
-        "use Gortex and that your findings come from the file tools instead. "
-        "Do not describe the graph as a source you consulted."
+        "Issue an actual code-graph tool call now, or state plainly that you did "
+        "not use the graph and that your findings come from the file tools "
+        "instead. Do not describe the graph as a source you consulted."
     ),
 )
 
@@ -85,7 +109,54 @@ WEB_SEARCH_FAMILY = ToolFamily(
     ),
 )
 
-BUILTIN_FAMILIES: tuple[ToolFamily, ...] = (GORTEX_FAMILY, WEB_SEARCH_FAMILY)
+BUILTIN_FAMILIES: tuple[ToolFamily, ...] = (CODE_GRAPH_FAMILY, WEB_SEARCH_FAMILY)
+
+
+def code_graph_family(
+    mcp_entries: "Iterable[Mapping[str, Any]] | None" = None,
+    extra_patterns: "Iterable[str]" = (),
+) -> ToolFamily:
+    """The code-graph family, widened with what the connected servers advertise.
+
+    The builtin patterns cover the vocabulary a code-navigation server normally
+    uses. A server whose tool names use some other vocabulary is still matched,
+    because the extra patterns come *in band* from its own catalog entry (server
+    id and real tool names) via :func:`claudio_core.mcp_capability.detect` --
+    never from a vendor name written into this file.
+
+    Args:
+        mcp_entries: The same plain-dict catalog entries used everywhere else
+            (``{"id": ..., "tools": [...], ...}`). ``None`` or a malformed
+            catalog simply yields the builtin family; nothing raises.
+        extra_patterns: Operator-supplied regexes, appended last.
+    """
+    patterns = list(CODE_GRAPH_TOOL_PATTERNS)
+    try:
+        servers = detect(mcp_entries or ())
+    except Exception:  # a broken catalog must never break a run
+        servers = ()
+    for server in servers:
+        for name in (server.id, *server.tools):
+            token = str(name).strip().lower()
+            if token and token not in patterns:
+                patterns.append(re.escape(token))
+    for pattern in extra_patterns:
+        text = str(pattern).strip()
+        if text:
+            patterns.append(text)
+    return ToolFamily(
+        name=CODE_GRAPH_FAMILY.name,
+        triggers=CODE_GRAPH_FAMILY.triggers,
+        tool_patterns=tuple(patterns),
+        remedy=CODE_GRAPH_FAMILY.remedy,
+    )
+
+
+def families_for(
+    mcp_entries: "Iterable[Mapping[str, Any]] | None" = None,
+) -> tuple[ToolFamily, ...]:
+    """The families to audit a run with, given the connected MCP catalog."""
+    return (code_graph_family(mcp_entries), WEB_SEARCH_FAMILY)
 
 
 def _sentences(text: str) -> list[str]:
@@ -188,9 +259,11 @@ def render_planact_nudge(report: AuditReport) -> str:
 
 __all__ = [
     "ToolFamily",
-    "GORTEX_FAMILY",
+    "CODE_GRAPH_FAMILY",
     "WEB_SEARCH_FAMILY",
     "BUILTIN_FAMILIES",
+    "code_graph_family",
+    "families_for",
     "AuditReport",
     "mentions_family",
     "called_families",

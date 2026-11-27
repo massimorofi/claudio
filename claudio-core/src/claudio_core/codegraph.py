@@ -155,8 +155,9 @@ def readiness_from_status(workspace: Any, status: Any) -> GraphReadiness:
     The decision table is deliberately narrow:
 
     * ``status`` is not a dict (``None``, a string, a list, an int) -> **unknown**
-    * a dict without a usable ``tracked_repos`` key -> **unknown**
-      (the server did not report coverage; that is not evidence of absence)
+    * a dict without a usable ``tracked_repos`` key, or whose value is not a
+      list -> **unknown** (the server did not report coverage; that is not
+      evidence of absence)
     * the workspace sits inside a reported repository -> **covered**
     * the server reported repositories and none contains the workspace ->
       **not_covered**
@@ -176,7 +177,15 @@ def readiness_from_status(workspace: Any, status: Any) -> GraphReadiness:
             "the code-graph server's status carries no tracked-repository list",
         )
 
-    tracked = _as_str_tuple(status.get("tracked_repos"))
+    raw_tracked = status.get("tracked_repos")
+    if not isinstance(raw_tracked, (list, tuple)):
+        # Present but unusable is still "not reported properly", which is not
+        # evidence that the workspace sits outside the index.
+        return status_unknown(
+            ws, "the code-graph server reported its tracked repositories in an unusable form"
+        )
+
+    tracked = _as_str_tuple(raw_tracked)
     failed = _as_str_tuple(status.get("failed_repos"))
     generated_at = str(status.get("generated_at", "")) if status.get("generated_at") is not None else ""
 

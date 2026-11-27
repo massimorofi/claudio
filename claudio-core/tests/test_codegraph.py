@@ -105,11 +105,14 @@ def test_unknown_from_dict_without_a_tracked_repos_key():
     assert readiness_from_status(WS, {"generated_at": "x"}).status == STATUS_UNKNOWN
 
 
-def test_malformed_values_degrade_instead_of_raising():
+def test_malformed_values_degrade_to_unknown_instead_of_a_confident_negative():
+    # A report that cannot be read is not evidence of absence: it must land on
+    # "unknown", never on the "this workspace is not indexed" verdict.
     r = readiness_from_status(WS, {"tracked_repos": "a-string-not-a-list",
                                    "failed_repos": None})
-    assert r.status in (STATUS_UNKNOWN, STATUS_NOT_COVERED)
+    assert r.status == STATUS_UNKNOWN
     assert r.tracked == () and r.failed == ()
+    assert "does NOT cover" not in render_readiness_block(r)
 
 
 def test_readiness_from_status_never_raises_on_any_input():

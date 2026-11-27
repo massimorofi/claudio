@@ -84,8 +84,8 @@ class ToolContext:
     reads_since_write: int = 0
     # Plan/act audit (see ``claudio_core.planact``). ``called_tools`` records every
     # tool actually invoked this run; ``assistant_text`` accumulates the model's own
-    # narration. Together they let the engine detect "said it would use Gortex, never
-    # called it" -- a claim about a source that was not consulted.
+    # narration. Together they let the engine detect "said it would use the code
+    # graph, never called it" -- a claim about a source that was not consulted.
     called_tools: set[str] = field(default_factory=set)
     assistant_text: list[str] = field(default_factory=list)
     # Set by the run manager so tools (e.g. delegate_task) can build agents.
