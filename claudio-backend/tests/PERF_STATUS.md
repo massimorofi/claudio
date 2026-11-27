@@ -197,3 +197,79 @@ python3 scripts/audit_llm_call_sites.py
 
 audited=8 untagged=0 bad_purpose=0 purposes_known=12
 ```
+
+## 0a(c) — run totals are provably complete per purpose
+
+**What changed.** `claudio_core.accounting` gained
+`CallAccountant.usage_totals_by_purpose(run_id)` and
+`CallAccountant.reconcile(run_id)`. The first returns one row per purpose
+present in the run's ledger — `purpose`, `calls`, `errors`, `cancelled`,
+`input_tokens`, `output_tokens`, `cached_input_tokens`, `reasoning_tokens`,
+`cost_usd`, `cache_hit_ratio` — computed from the *same* records with the *same*
+rules as `usage_totals` (only measured calls contribute tokens; every call
+counts as a call, error or cancellation). The second returns
+`run_totals[field] - sum(per_purpose[field])` for every field in
+`PURPOSE_TOTAL_FIELDS`; all of them are exactly zero, and `ok` says so in one
+boolean. Purposes are never pre-seeded and no call is dropped: an unlabelled
+call lands in `other`, so there is no unlabelled remainder to hide work in.
+
+**Where it is surfaced.** `RunManager._fold_accounting` — the finalize path that
+already called `usage_totals` — now also fills `record.by_purpose` (rows sorted
+by calls desc) and `record.purpose_reconcile`, adds both to the dict it returns,
+and the `run_completed` event carries them as additive keys
+(`by_purpose`, `purpose_reconcile`), so anything reading a finished run's report
+sees the breakdown next to the totals it reconciles against.
+`claudio_backend.bench` gained `purpose_breakdown`,
+`merge_breakdowns` and `render_purpose_markdown`, so a benchmark report carries
+`by_purpose` / `reconcile` / `trials_by_purpose` next to the existing
+`summarize()` keys. No existing key changed shape or meaning. The breakdown is
+computed **before** `flush()`, which detaches the buffer.
+
+**Sample.** The mixed ledger from `tests/test_issue58_purpose_totals.py`
+(primary ok, primary error, retry at `attempt=2`, router, tier-2 compaction,
+learning, delegate, a cancelled call, one of them unmeasured):
+
+| purpose | calls | errors | cancelled | input | cached | output | reasoning | cache hit | cost USD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| primary | 4 | 1 | 1 | 2200 | 1500 | 180 | 40 | 0.6818 | 0.006700 |
+| compact | 1 | 0 | 0 | 4000 | 1000 | 300 | 0 | 0.25 | 0.006000 |
+| delegate | 1 | 0 | 0 | 300 | 100 | 25 | 0 | 0.3333 | 0.000500 |
+| learning | 1 | 0 | 0 | 500 | 0 | 40 | 0 | 0.0 | 0.000800 |
+| router | 1 | 0 | 0 | 80 | 0 | 2 | 0 | 0.0 | 0.000100 |
+
+Run totals for the same ledger: `calls=8, errors=1, input_tokens=7080,
+output_tokens=547, cached_input_tokens=2600, reasoning_tokens=40,
+cost_usd=0.0141, cache_hit_ratio=0.3672`. The rows sum to every one of those
+figures, so the reconciliation delta is
+
+```
+{'calls': 0, 'errors': 0, 'cancelled': 0, 'input_tokens': 0,
+ 'output_tokens': 0, 'cached_input_tokens': 0, 'reasoning_tokens': 0,
+ 'cost_usd': 0.0, 'ok': True}
+```
+
+**Guards.** `tests/test_issue58_purpose_totals.py` (15 tests, stdlib-only
+`FakeDB` duck-typing `add_llm_calls` / `add_tool_calls`) asserts the per-purpose
+rows against hand-written expectations, that `sum(by_purpose.calls)` and every
+token sum equal `usage_totals`, that each row's `cache_hit_ratio` and the run's
+agree, that a second `flush()` writes **zero** duplicate rows (no double
+counting across the finalize + post-capture flushes), that a run with no calls
+reconciles to zero rows instead of crashing, and that both seams
+(`_fold_accounting`, `bench.purpose_breakdown`) carry the breakdown.
+
+**Verification.**
+
+```
+cd claudio-backend && PYTHONPATH="$(pwd)/src:$(pwd)/../claudio-core/src" \
+  python3 -m pytest tests/test_issue58_purpose_totals.py -p no:cacheprovider -o asyncio_mode=strict
+
+============================== 15 passed in 2.55s ==============================
+```
+
+**What this makes impossible.** A "win" that moves calls out of `primary` into
+retries, compaction, router, learning or delegate calls now shows up as a
+purpose row instead of vanishing, and any call that somehow reaches the ledger
+without a purpose still shows up under `other`. If a future change records a
+call in a way the breakdown cannot see, `reconcile(run_id)["ok"]` goes False and
+the test fails — the totals are no longer just a number, they are a sum of named
+parts.

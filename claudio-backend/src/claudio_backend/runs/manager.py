@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from claudio_core.accounting import CallAccountant
+from claudio_core.accounting import CallAccountant, purpose_rows
 from claudio_core.context import context_usage_payload
 from claudio_core.db import Database, utcnow
 from claudio_core.engine import (
@@ -234,6 +234,12 @@ class RunRecord:
     model_calls: int = 0
     tool_calls: int = 0
     cache_hit_ratio: float = 0.0
+    # Issue #58 Increment 0a(c): the ledger's spend broken down by purpose
+    # (rows sorted by calls desc) and the reconciliation delta proving those
+    # rows sum to the run totals. Both are filled by ``_fold_accounting`` while
+    # the ledger buffer is still live, i.e. before the flush detaches it.
+    by_purpose: list = field(default_factory=list)
+    purpose_reconcile: dict = field(default_factory=dict)
 
 
 class RunManager:
@@ -1875,10 +1881,26 @@ class RunManager:
         Issue #58 Increment 0: cached/reasoning tokens and the physical call
         count come from the unified ledger (measured provider usage only);
         the lifecycle counters merge the record's own loop counters with the
-        accountant's. Returns the ledger totals for the caller's use.
+        accountant's.
+
+        Issue #58 Increment 0a(c): the same ledger is also broken down by
+        purpose (``by_purpose``, rows sorted by calls desc) together with the
+        reconciliation delta (``purpose_reconcile``) between the per-purpose
+        sums and the totals above. Every delta must be zero -- that is what
+        makes a run's recorded work provably complete, so an optimization
+        cannot hide calls in retries, compaction or background purposes. This
+        must run *before* the ledger flush, which detaches the buffer.
+
+        Returns the ledger totals (plus the additive ``by_purpose`` /
+        ``purpose_reconcile`` keys) for the caller's use.
         """
-        totals = self._acct().usage_totals(record.run_id)
-        life = self._acct().lifecycle(record.run_id)
+        acct = self._acct()
+        totals = acct.usage_totals(record.run_id)
+        record.by_purpose = purpose_rows(acct.usage_totals_by_purpose(record.run_id))
+        record.purpose_reconcile = acct.reconcile(record.run_id)
+        totals["by_purpose"] = record.by_purpose
+        totals["purpose_reconcile"] = record.purpose_reconcile
+        life = acct.lifecycle(record.run_id)
         record.cached_input_tokens = int(totals["cached_input_tokens"])
         record.reasoning_tokens = int(totals["reasoning_tokens"])
         record.model_calls = int(totals["calls"])
@@ -2018,6 +2040,13 @@ class RunManager:
                         "output_tokens": record.output_tokens,
                         "cost_usd": record.cost_usd,
                     },
+                    # Issue #58 Increment 0a(c), additive keys: where the run's
+                    # calls/tokens/cost actually went (one row per purpose,
+                    # most calls first) and the delta proving those rows sum to
+                    # the ledger totals -- no work hidden in retries,
+                    # compaction or background calls.
+                    "by_purpose": list(record.by_purpose),
+                    "purpose_reconcile": dict(record.purpose_reconcile),
                     "summary": {
                         "files_written": list(record.files_written),
                         "commands_run": record.commands_run,
