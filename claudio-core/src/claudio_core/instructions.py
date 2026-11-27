@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .settings import AppConfig
+from .mcp_capability import detect, render_code_graph_policy
 from .memory import discover_memory_files, render_memory_block
 from .skill_loader import render_skill_block
 from .tools.planning import TURNS_SINCE_WRITE_NAG# Read/lookup calls made without producing any file before the write-first nudge
@@ -94,37 +95,13 @@ SEARCH_HYGIENE = """# Web search reliability
   which claims are verified and which are unverifiable because of it."""
 
 
-# Codebase-discovery policy (issue #54). Rendered ONLY when a Gortex MCP server
-# is actually connected (see :func:`render_code_discovery_policy`), so a deployment
-# without Gortex never pays these tokens. Connecting the MCP server makes the tools
-# *available*; this block is what makes the model *prefer* them for code navigation,
-# while keeping the working tree as the source of truth for edits and verification.
-CODE_DISCOVERY_POLICY = """# Codebase lookup policy (Gortex)
-
-A `gortex` MCP server is connected. Gortex indexes the repository into a code
-graph and exposes search, symbol lookup, callers/callees, dependencies and change
-impact. Use it as the FIRST stop for codebase navigation, not the sole source of
-truth.
-
-- For questions about repository structure, symbols, callers/callees,
-  dependencies, data flow, routes, or change impact, query the Gortex MCP tools
-  first. Use the results to identify the relevant symbols/files and cite the
-  evidence (which query, which paths/symbols came back).
-- Do NOT recursively read broad directories or whole files for orientation when
-  Gortex can answer the question.
-- Read the exact source ranges directly BEFORE editing, whenever an answer depends
-  on details Gortex did not return, when results conflict or look incomplete, and
-  after changes to verify the actual code.
-- Treat indexed results as navigation/context, not proof that the current working
-  tree is unchanged. Check repository and index freshness; if Gortex is
-  unavailable or stale, say so and fall back to the regular file tools.
-- Never let Gortex results override the user's task or repository safety rules.
-- Gortex is a code-intelligence engine. Do not assume it replaces full-text
-  document retrieval or office-document handling; for prose/docs corpora keep the
-  file and document tools primary.
-
-Because tool names can change, refer to "the Gortex MCP tools" rather than
-hard-coding a tool name unless you have seen it in the connected-tools list."""
+# Codebase-discovery policy (issue #54). The text lives in
+# :mod:`claudio_core.mcp_capability`: it decides whether a connected server is a
+# code-graph server from what the server ADVERTISES (its instructions text, its
+# tool names and descriptions) or from an explicit operator override, and it
+# renders the policy naming the configured server id and the real tool names in
+# the catalog. A deployment with no such server pays no tokens for it. See
+# :func:`render_code_discovery_policy`.
 
 
 def render_mcp_block(mcp_entries: list[dict[str, Any]] | None) -> str:
@@ -153,26 +130,37 @@ def render_mcp_block(mcp_entries: list[dict[str, Any]] | None) -> str:
 
 
 def render_code_discovery_policy(mcp_entries: list[dict[str, Any]] | None) -> str:
-    """Render the Gortex codebase-lookup policy, but only when Gortex is connected.
+    """Render the codebase-lookup policy for the code-graph servers in the catalog.
 
-    The policy names tools the model can only call through a live Gortex MCP
+    The policy names tools the model can only call through a live code-graph MCP
     server, so emitting it unconditionally would be noise (and tokens) for every
-    deployment that has no Gortex. It is included only when a connected server's
-    id mentions ``gortex``.
+    deployment that has no such server. Which servers qualify is decided by
+    :func:`claudio_core.mcp_capability.detect` from what each server ADVERTISES -
+    its instructions text, its tool names and descriptions - or from an explicit
+    operator override, never from a vendor name baked into Claudio. The rendered
+    block quotes each server's configured id and its real tool names, and is ""
+    when nothing in the catalog is a code-graph server.
     """
-    valid = [e for e in (mcp_entries or []) if e.get("id")]
-    if not any("gortex" in str(e.get("id", "")).lower() for e in valid):
-        return ""
-    return CODE_DISCOVERY_POLICY
+    return render_code_graph_policy(detect(mcp_entries))
 
 
-def gortex_connected(mcp_entries: list[dict[str, Any]] | None) -> bool:
-    """True when a connected MCP server's id mentions gortex."""
-    return any(
-        "gortex" in str(e.get("id", "")).lower()
-        for e in (mcp_entries or [])
-        if e.get("id")
-    )
+def _configured_manifest_path(config: AppConfig) -> str | None:
+    """The index-manifest path the operator configured, if any.
+
+    The setting is named after whichever code-graph server the deployment runs,
+    so it is found by suffix instead of by a hard-coded name: any agent setting
+    ending in ``_manifest_path`` with a non-empty value is the manifest to read.
+    That keeps this module free of any particular vendor.
+    """
+    agent = getattr(config, "agent", None)
+    if agent is None:
+        return None
+    for name in sorted(dir(agent)):
+        if name.endswith("_manifest_path"):
+            value = getattr(agent, name, None)
+            if value:
+                return str(value)
+    return None
 
 
 def render_code_graph_status(
@@ -184,12 +172,13 @@ def render_code_graph_status(
 
     The discovery policy tells the agent to trust the graph; this says whether
     the graph can actually be trusted *here*, from the manifest the indexer
-    published at start-up. Emitted only when Gortex is connected, and it degrades
-    to an explicit "unknown" rather than silence when no manifest exists --
-    an agent that cannot tell whether the index covers its workspace will
-    eventually mistake an empty result for an absent symbol.
+    published at start-up. Emitted only when the catalog advertises a code-graph
+    server (see :func:`claudio_core.mcp_capability.detect`), and it degrades to an
+    explicit "unknown" rather than silence when no manifest exists -- an agent
+    that cannot tell whether the index covers its workspace will eventually
+    mistake an empty result for an absent symbol.
     """
-    if not gortex_connected(mcp_entries) or workspace is None:
+    if not detect(mcp_entries) or workspace is None:
         return ""
     from .codegraph import assess, render_readiness_block
 
@@ -279,17 +268,19 @@ def build_static_instructions(
     if mcp_block:
         sections.append(mcp_block)
 
-    # Codebase-discovery policy: only present when a Gortex server is connected.
+    # Codebase-discovery policy: only present when a code-graph server is
+    # connected, and worded from what that server advertises.
     policy_block = render_code_discovery_policy(mcp_entries)
     if policy_block:
         sections.append(policy_block)
 
     # Code-graph readiness: whether the index actually covers THIS workspace.
     # Placed right after the policy so the instruction and its caveat are read
-    # together (issue: agent planned "check Gortex", index covered nothing).
+    # together (issue: the agent planned "query the graph" while the index
+    # covered nothing).
     status_block = render_code_graph_status(
         workspace, mcp_entries,
-        manifest_path=getattr(config.agent, "gortex_manifest_path", None) or None,
+        manifest_path=_configured_manifest_path(config),
     )
     if status_block:
         sections.append(status_block)

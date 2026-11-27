@@ -412,3 +412,155 @@ the five required headings are present → `REVIEW_SECTIONS_OK`; `C2` and
 "server-advertised status/capability tool", which requires the indexer to expose
 one — if it does not, that is an upstream request, and until then readiness
 stays honestly *unknown* rather than falling back to a file), then start Task 2.
+
+---
+
+# Part 2 — Implementation record: the policy now derives from advertisement
+
+**Scope:** `claudio-core` prompt assembly (the F1 finding above).
+**Goal:** the prompt's code-navigation policy derives from what a connected MCP
+server *advertises*, not from the vendor string that was baked into Claudio.
+
+**Method.** Written and verified with file/grep/pytest tools only. No code-graph
+MCP tool was consulted: this worktree has no code-graph server connected, which is
+exactly the case the new gate is designed for (it renders nothing).
+
+## Before
+
+`claudio_core/instructions.py` held a hand-written `CODE_DISCOVERY_POLICY` string
+that named one product throughout, and a gate:
+
+```python
+def gortex_connected(mcp_entries):
+    return any("<vendor>" in str(e.get("id", "")).lower() for e in mcp_entries)
+```
+
+Consequences of that coupling:
+
+* A different code-intelligence server (another vendor, a fork, a renamed entry)
+  connected and advertised everything, and got **no** policy — the agent never
+  learned to use it first.
+* An entry merely *named* after the vendor got the full policy even if it
+  advertised nothing of the sort.
+* The policy told the model to "refer to the vendor MCP tools rather than guessing
+  a tool name", so it could name tools that did not exist in that session.
+* `render_code_graph_status()` (index readiness) gated on the same vendor-id test,
+  and read a setting whose name contained the vendor string.
+
+## After
+
+New module **`claudio_core/mcp_capability.py`** (stdlib only: `typing`,
+`dataclasses`, `re`; no pydantic, no `claudio_backend`):
+
+| Name | Purpose |
+| --- | --- |
+| `CAPABILITY_CODE_GRAPH = "code_graph"` | The capability id an operator can pin on a catalog entry. |
+| `CODE_GRAPH_LEXICON` | Generic vocabulary only — `code graph`, `callers`, `callees`, `symbol`, `dependency`, `change impact`, `call graph`, `index coverage`, … No product names. |
+| `MIN_LEXICON_MATCHES = 2` | One stray word is noise; two advertised hits is a pattern. |
+| `detect(mcp_entries) -> tuple[CodeGraphServer, ...]` | Which connected servers are code-graph servers. |
+| `render_code_graph_policy(servers) -> str` | The policy block, or `""`. |
+
+A server qualifies when **either**
+
+1. **operator override** — the entry carries `"capability": "code_graph"`, or
+2. **advertised text** — its MCP `instructions` string matches the lexicon, or
+   at least `MIN_LEXICON_MATCHES` of its tool names / tool descriptions do.
+
+`CodeGraphServer` carries the configured `id`, the tool names, the advertised
+descriptions and the **evidence** for the match, so a wrong guess is diagnosable.
+
+`render_code_graph_policy` keeps the intent of the old block — graph tools first
+for structure/symbols/callers/impact; read the exact source before editing; an
+empty result is not absence; disclose the query used — but it is generated: it
+names each server by its **configured id** and bullets the **real prefixed tool
+names** from the catalog, with each tool's advertised description. No servers →
+`""`, so a deployment without a code graph still pays no tokens.
+
+`instructions.py` keeps its public name and call site:
+
+```python
+def render_code_discovery_policy(mcp_entries):
+    return render_code_graph_policy(detect(mcp_entries))
+```
+
+`CODE_DISCOVERY_POLICY` and `gortex_connected()` are deleted. Neither
+`instructions.py` nor `mcp_capability.py` contains the vendor string in any case.
+The index-manifest setting is now found by suffix (`*_manifest_path`) instead of
+by a hard-coded vendor-named attribute, so `settings.py` did not have to change.
+
+## Catalog entry shape
+
+`detect()` reads plain dicts, all keys except `id` optional:
+
+```python
+{"id": str, "tools": list[str], "resources": list[str],
+ "instructions": str, "tool_descriptions": dict[str, str], "capability": str}
+```
+
+Malformed entries (not a dict, no `id`) are skipped, never fatal: this runs on
+every prompt build. Today the engine catalog (`adk_engine._ensure_mcp_locked`)
+populates only `id`, `tools` and `resources`, so detection currently rests on
+**tool names** alone. That is enough for a real code-graph server, whose prefixed
+tool names carry the vocabulary (`codegraph_find_callers`, `…_symbol_search`,
+`…_list_dependencies`). To make detection unambiguous, the producer can also pass
+through what MCP already gives it — the server's `instructions` string and each
+tool's description — or the operator can pin `"capability": "code_graph"` on the
+config entry. Both paths are supported now; neither requires a Claudio change.
+
+## Tests
+
+`claudio-core/tests/test_mcp_capability.py` (16 tests, synchronous, no network, no
+pydantic, bootstraps `sys.path` itself) covers:
+
+* no servers → `""`; `None` → `""`
+* a non-code-graph server (a skill registry with `search`/`get` tools) → `""`
+* lexicon match on **tool descriptions** → policy rendered, and it contains the
+  real tool names
+* explicit `capability` override wins with **no** lexicon match (case-insensitive)
+* server `instructions` text alone qualifies a server
+* one lexicon hit is below the threshold
+* rendered text contains no vendor word when the id is `codegraph`
+* a server literally id'd with the vendor name is rendered **with that id** —
+  proof the id comes from config, not from Claudio
+* multiple servers each get their own tool section
+* a detected server with no tool catalog says so instead of naming nothing
+* the lexicon and the module source contain no vendor string
+* `build_static_instructions` still emits the policy (and still omits it when no
+  code graph is connected)
+
+`claudio-core/tests/test_instructions_gortex.py` is deleted: every assertion in it
+keyed on the vendor id. The equivalent coverage lives in the new file.
+
+## Verification
+
+```
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_mcp_capability.py -q   # 16 passed
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests -q                          # 296 passed, 2 failed
+grep -ri gortex claudio-core/src/claudio_core/instructions.py   # no matches
+grep -ri gortex claudio-core/src/claudio_core/mcp_capability.py # no matches
+```
+
+## Known follow-ups (outside this task's writable scope)
+
+1. **`claudio-core/tests/test_codegraph.py` — 2 failures.** Its fixture
+   `GORTEX_MCP = [{"id": "gortex", "tools": ["Gortex_search"], "resources": []}]`
+   qualified only because the id contained the vendor string; it advertises
+   nothing code-graph-ish, so `detect()` correctly ignores it and the *readiness*
+   block no longer renders. One-line fix, in that file:
+   `"capability": "code_graph"` on the fixture entry (or rename the tool to
+   `codegraph_find_callers` + add a second graph-y tool). The other 13 tests in
+   the file pass unchanged.
+2. **`claudio_core/codegraph.py`** still renders the readiness sentence with the
+   vendor word ("the <vendor> index status …"). Same treatment applies — name the
+   detected server id — but the file was explicitly out of scope here.
+3. **`settings.py`** still names the field `gortex_manifest_path`. `instructions.py`
+   now finds it by `*_manifest_path` suffix, so renaming it to
+   `code_graph_manifest_path` is a separate, config-migration change.
+4. **`claudio-backend/tests/test_issue54_gortex.py`** asserts the old end-to-end
+   behaviour with a mocked toolset exposing one tool, `search_symbols` — a single
+   lexicon hit, below the threshold. That file already fails in this worktree (no
+   `config/config.yaml`), and it is under the forbidden `claudio-backend/**` path;
+   when it is revived it should advertise two graph tools or set the capability.
+5. **Producer side:** have the engine catalog forward `instructions` and
+   `tool_descriptions` (and honour a `capability` field on `MCPServerEntry`) so
+   detection stops depending on tool-name spelling.
