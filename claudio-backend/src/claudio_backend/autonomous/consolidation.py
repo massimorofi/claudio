@@ -31,8 +31,9 @@ import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
+from claudio_core.accounting import get_default_recorder
 from claudio_core.db import Database
 from claudio_core.llm import openai_chat_completion
 from claudio_core.settings import AppConfig, resolve_profile
@@ -57,6 +58,37 @@ def _slugify(text: str) -> str:
     return s[:60]
 
 
+def _accounting_sink(
+    purpose: str,
+    *,
+    accountant: Any = None,
+    model: str = "",
+    model_role: str = "",
+    run_id: str = "",
+    session_id: str = "",
+) -> Callable[[dict[str, Any]], None] | None:
+    """Purpose-tagged ledger sink for a call that outlives any run.
+
+    Issue #58 (Increment 0a(b)-ii): consolidation runs on the scheduler, not
+    inside a chat run, so it has no per-run sink handed to it. It prefers a live
+    :class:`claudio_core.accounting.CallAccountant` when one is available and
+    otherwise falls back to the process-wide default recorder the supervisor
+    installs at startup. Either way ``openai_chat_completion`` emits exactly one
+    record and the payload's own ``purpose`` wins inside the sink, so the row is
+    tagged ``consolidation`` and never double-counted.
+    """
+    make = getattr(accountant, "make_llm_sink", None)
+    if callable(make):
+        return make(
+            purpose=purpose,
+            model=model,
+            model_role=model_role,
+            run_id=run_id,
+            session_id=session_id,
+        )
+    return get_default_recorder()
+
+
 def _learning_block(learning: dict[str, Any]) -> str:
     """Render one learning as a compact block for the drafting prompt."""
     lines = [f"- {learning.get('title', '')}"]
@@ -72,7 +104,10 @@ def _learning_block(learning: dict[str, Any]) -> str:
 
 
 async def _merge_categories(
-    categories: list[str], samples: dict[str, str], config: AppConfig
+    categories: list[str],
+    samples: dict[str, str],
+    config: AppConfig,
+    usage_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, str]:
     """Collapse near-duplicate categories with one LLM pass.
 
@@ -116,6 +151,13 @@ async def _merge_categories(
             temperature=0.1,
             max_tokens=1024,
             timeout=float(fast.timeout_seconds),
+            usage_sink=(
+                usage_sink
+                if usage_sink is not None
+                else _accounting_sink(
+                    "consolidation", model=fast.model, model_role="fast"
+                )
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - merge is an optimization, not a requirement
         logger.warning("category merge failed, using raw categories: %s", exc)
@@ -157,6 +199,7 @@ async def _draft_skill(
     learnings: list[dict[str, Any]],
     existing_body: str | None,
     config: AppConfig,
+    usage_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[str, str]:
     """Draft a skill's (description, body) from a cluster of learnings.
 
@@ -207,6 +250,13 @@ async def _draft_skill(
         temperature=0.3,
         max_tokens=2048,
         timeout=float(fast.timeout_seconds),
+        usage_sink=(
+            usage_sink
+            if usage_sink is not None
+            else _accounting_sink(
+                "consolidation", model=fast.model, model_role="fast"
+            )
+        ),
     )
     return _split_description_body(raw, fallback_category=category)
 

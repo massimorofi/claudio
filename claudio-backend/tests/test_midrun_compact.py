@@ -140,6 +140,7 @@ def _compacted_events(record):
     return [e for e in _events(record) if e.get("event") == "run_compacted"]
 
 
+@pytest.mark.asyncio
 async def test_overflow_actually_compacts_before_restarting(tmp_path, monkeypatch):
     # Attempt 1 overflows; attempt 2 completes. The overflow must cause a real
     # summarise + replace, not the old cosmetic restart.
@@ -170,6 +171,7 @@ async def test_overflow_actually_compacts_before_restarting(tmp_path, monkeypatc
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_overflow_with_failing_summariser_fails_run(tmp_path, monkeypatch):
     # If the summariser itself fails, restarting would just overflow again:
     # the run must stop with a clear failure, not burn five blind restarts.
@@ -189,6 +191,7 @@ async def test_overflow_with_failing_summariser_fails_run(tmp_path, monkeypatch)
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_overflow_beyond_cap_fails(tmp_path, monkeypatch):
     # Every attempt overflows and every compaction succeeds; once the cap is
     # reached the next overflow fails the run instead of looping forever.
@@ -206,6 +209,7 @@ async def test_overflow_beyond_cap_fails(tmp_path, monkeypatch):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_manual_request_consumed_at_boundary(tmp_path, monkeypatch):
     # A compaction requested while the run is in flight is applied at the
     # next boundary instead of being silently dropped.
@@ -227,6 +231,7 @@ async def test_manual_request_consumed_at_boundary(tmp_path, monkeypatch):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_proactive_compaction_at_threshold(tmp_path, monkeypatch):
     # Last turn's reported usage crossed window - reserve: the next attempt is
     # preceded by a compaction even without an overflow or a manual request.
@@ -249,6 +254,7 @@ async def test_proactive_compaction_at_threshold(tmp_path, monkeypatch):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_request_compact_defers_when_run_starts_during_summariser(
     tmp_path, monkeypatch
 ):

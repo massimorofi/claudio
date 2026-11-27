@@ -329,6 +329,7 @@ async def _make(tmp_path, scripts, *, accountant=None):
     return db, mgr, record, engine, acc
 
 
+@pytest.mark.asyncio
 async def test_finalize_persists_ledger_and_lifecycle(tmp_path):
     """Engine-path records + loop counters land on the run row and ledger."""
     db, mgr, record, engine, acc = await _make(tmp_path, [_completed()])
@@ -357,6 +358,7 @@ async def test_finalize_persists_ledger_and_lifecycle(tmp_path):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_retry_counter_persisted(tmp_path):
     fail = [
         {
@@ -383,6 +385,7 @@ async def test_retry_counter_persisted(tmp_path):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_router_call_recorded_with_purpose(tmp_path, monkeypatch):
     """An auto-routing classifier call lands in the ledger as purpose=router."""
 
@@ -427,6 +430,7 @@ async def test_router_call_recorded_with_purpose(tmp_path, monkeypatch):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_compaction_call_recorded_as_tier2(tmp_path, monkeypatch):
     """A mid-run overflow compaction records purpose=compaction and bumps tier2."""
     from claudio_core.compaction import Compactor
@@ -476,6 +480,7 @@ async def test_compaction_call_recorded_as_tier2(tmp_path, monkeypatch):
         await db.close()
 
 
+@pytest.mark.asyncio
 async def test_learning_call_recorded_after_finalize(tmp_path, monkeypatch):
     """The post-run learning extraction call is recorded and flushed."""
 

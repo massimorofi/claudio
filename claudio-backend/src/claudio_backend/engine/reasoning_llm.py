@@ -25,6 +25,7 @@ so the thinking shows live and is restored on every reload.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -37,7 +38,7 @@ from google.adk.integrations.openai import _openai_llm as _adk_openai
 from google.genai import types
 from openai import AsyncOpenAI
 
-from claudio_core.accounting import get_default_recorder
+from claudio_core.accounting import get_default_recorder, once_sink
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,15 @@ def make_openai_client(
     :mod:`claudio_core.llm` usage sink uses. When no recorder is given the
     process-wide default recorder is used, so the daemon agent's calls are
     accounted for too.
+
+    Increment 0a(b)-ia closes the two engine-side coverage holes: the recorder
+    is wrapped in :func:`claudio_core.accounting.once_sink` per logical call, so
+    no combination of branches (rename retry followed by an error, a stream that
+    completed and was then cancelled) can emit twice; and an
+    ``asyncio.CancelledError`` -- a ``BaseException``, so invisible to the
+    ``except Exception`` nets -- is caught explicitly and emitted once with
+    ``outcome="cancelled", error_code="cancelled"`` before being re-raised
+    unchanged.
     """
     key = api_key or "local"
     client = AsyncOpenAI(
@@ -171,7 +181,10 @@ def _patch_max_tokens_retry(client: AsyncOpenAI) -> None:
 
     async def create_with_retry(*args: Any, **kwargs: Any):
         ctx = getattr(client, "_claudio_call_context", None) or {}
-        recorder = ctx.get("recorder") or get_default_recorder()
+        # One emission budget per logical call: the max_tokens rename plus a
+        # later error, or an error branch racing a cancellation, can then never
+        # produce two records for the same call (issue #58, Inc 0a(b)-ia).
+        recorder = once_sink(ctx.get("recorder") or get_default_recorder())
         if recorder is None:
             # Fast path: no accounting attached, behave exactly as before.
             try:
@@ -205,6 +218,18 @@ def _patch_max_tokens_retry(client: AsyncOpenAI) -> None:
                 kwargs = dict(kwargs)
                 kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
                 result = await original_create(*args, **kwargs)
+        except asyncio.CancelledError:
+            # ``CancelledError`` derives from ``BaseException``, so the
+            # ``except Exception`` net below never saw it and a run cancelled
+            # mid-call emitted *zero* records (issue #58, Inc 0a(b)-ia). Emit
+            # exactly one cancelled record -- the once_sink guard makes a
+            # second emission structurally impossible -- then re-raise the
+            # cancellation completely unchanged.
+            _record_call(
+                recorder, ctx, model, started, attempt,
+                "cancelled", "cancelled", None,
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 - record, then surface unchanged
             if not getattr(exc, "_claudio_recorded", False):
                 _record_call(
@@ -286,18 +311,27 @@ class ReasoningOpenAILlm(OpenAILlm):
         _t0 = time.time()
         raw_stream = await self._openai_client.chat.completions.create(**kwargs)
 
-        def _record_streamed(usage_obj: Any) -> None:
+        ctx = getattr(self._openai_client, "_claudio_call_context", None) or {}
+        # Shared by the completion record and the cancellation branch below, so
+        # this one logical stream emits at most one record (issue #58,
+        # Inc 0a(b)-ia): a stream that finished and was *then* cancelled must
+        # not be counted twice.
+        recorder = once_sink(ctx.get("recorder") or get_default_recorder())
+
+        def _record_streamed(
+            usage_obj: Any, outcome: str = "ok", error_code: str = ""
+        ) -> None:
             # Record the streaming call once, with the real usage from the
             # trailing chunk, so the token budget and cache signal work under
             # streaming (issue #58 review). create_with_retry skips its own
             # record for stream=True to avoid double-counting.
-            ctx = getattr(self._openai_client, "_claudio_call_context", None) or {}
-            recorder = ctx.get("recorder") or get_default_recorder()
             if recorder is None:
                 return
             _record_call(
                 recorder, ctx, str(kwargs.get("model") or ""), _t0, 1,
-                "ok", "", _usage_from_response(SimpleNamespace(usage=usage_obj)),
+                outcome, error_code,
+                _usage_from_response(SimpleNamespace(usage=usage_obj))
+                if outcome == "ok" else None,
             )
 
         text_accumulated = ""
@@ -306,7 +340,18 @@ class ReasoningOpenAILlm(OpenAILlm):
         usage = None
         finish_reason = None
 
-        async for chunk in raw_stream:
+        stream_iter = raw_stream.__aiter__()
+        while True:
+            try:
+                chunk = await stream_iter.__anext__()
+            except StopAsyncIteration:
+                break
+            except asyncio.CancelledError:
+                # The run was cancelled while the stream was being consumed:
+                # the call is real, in-flight and unrecorded, so emit exactly
+                # one cancelled record before the cancellation propagates.
+                _record_streamed(None, "cancelled", "cancelled")
+                raise
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
             if not chunk.choices:
