@@ -781,3 +781,68 @@ READINESS_MCP_OK  NO_FILE_SIDECHANNEL_OK  NO_VENDOR_IN_CODEGRAPH_OK  READINESS_W
 
 Files changed by this attempt: `claudio-core/tests/test_codegraph.py`,
 `docs/gortex-decoupling-review.md`. Both are on the writable list.
+
+---
+
+## C2 closure record (branch `clams/da137776-b962-46da-9bf7-8235cffdf2d9-a4`)
+
+### Gate history
+
+| Attempt | Gate | Result |
+| --- | --- | --- |
+| a1 | `CORE_VENDOR_FREE_OK` (`grep -ri gortex claudio-core/src/claudio_core`) | FAIL exit 1 — vendor strings survived outside `codegraph.py` (`context.py`, `planact.py`, the old id-substring test). |
+| a2 | `scope` | FAIL — the branch carries the C4 vendor scrub in addition to C2, i.e. it is broader than the C2 goal statement. |
+| a4 | all five | PASS (below). |
+
+### Human decision on the a2 scope failure
+
+> keep the C4 scrub in this branch (all 5 verification commands pass, scope over-broad)
+
+The over-breadth is therefore intentional and retained: `claudio-core/src/claudio_core` is
+vendor-free as a whole, not just `codegraph.py`. That is what makes gate 5
+(`CORE_VENDOR_FREE_OK`) satisfiable at all — gate 5 greps the entire package, so a C2-only
+branch cannot pass it while `context.py` / `planact.py` still name the vendor. The C4 work
+that rides along is: `mcp_capability.py` (capability detection replaces id-substring
+matching), the `context.py` / `planact.py` string scrub, and `scripts/audit_gortex_coupling.py`
+plus `reports/gortex-coupling.json` as the audit artifacts.
+
+### Verification, as run on this branch
+
+```
+1  claudio-core && PYTHONPATH=src python3 -m pytest tests/test_codegraph.py -p no:cacheprovider
+   -> 22 passed, 0 failed, 0 errors            READINESS_MCP_OK
+2  grep -rn 'gortex_manifest_path|.gortex-index|DEFAULT_MANIFEST_PATH' claudio-core/src claudio-backend/src
+   -> no matches                               NO_FILE_SIDECHANNEL_OK
+3  grep -ri gortex claudio-core/src/claudio_core/codegraph.py
+   -> no matches                               NO_VENDOR_IN_CODEGRAPH_OK
+4  grep -c 'def readiness_from_status' codegraph.py -> 1
+   grep -c 'unknown'                codegraph.py -> 13
+   grep -c 'readiness_from_status'  instructions.py -> 2   READINESS_WIRED_OK
+5  grep -ri gortex claudio-core/src/claudio_core
+   -> no matches                               CORE_VENDOR_FREE_OK
+```
+
+Regression sweep beyond the gate: the whole `claudio-core` suite is green
+(`302 passed`), and no file under `claudio-backend/src` imports `codegraph` or calls
+`render_code_graph_status`, so the signature change has no out-of-tree caller.
+`claudio-frontend/src` contains neither `gortex` nor `manifest`, so per the task statement
+nothing under `claudio-frontend/` was touched.
+
+### Where the remaining strings live (all intentional)
+
+* `scripts/audit_gortex_coupling.py` — the audit tool has to name the patterns it hunts.
+* `docs/gortex-decoupling-review.md` — this document, which quotes the pre-fix code.
+* `claudio-core/tests/test_codegraph.py` — asserts the names are *absent*.
+
+None of these are under `claudio-core/src` or `claudio-backend/src`.
+
+### Known follow-ups (not in this branch's scope)
+
+1. `claudio-backend/tests/test_issue54_gortex.py` still asserts
+   `"Codebase lookup policy" in prompt`. That header is still emitted
+   (`mcp_capability.render_code_graph_policy`), so the assertion holds; the file is outside
+   this task's writable paths and was left alone.
+2. `claudio-backend/config/config.example.yaml` still carries the retired index-manifest key.
+   Dropping it is a config migration, forbidden here (`claudio-backend/config/**` is off-limits).
+3. Renaming the vendor-named backend test files (`test_issue54_gortex.py`) would need the
+   backend test tree, also out of scope.
