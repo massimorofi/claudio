@@ -706,3 +706,78 @@ NO_FILE_SIDECHANNEL_OK  NO_VENDOR_IN_CODEGRAPH_OK  READINESS_WIRED_OK  CORE_VEND
   reference doc — classes **C1** / **C3**.
 - `scripts/audit_gortex_coupling.py` keeps the C2 tokens on purpose: it is the
   detector, and it must fail again if a manifest path ever comes back.
+
+
+---
+
+# C2 attempt 3 — the scope / gate conflict, and how it was settled
+
+## The conflict, stated plainly
+
+Two gates in this task's contract cannot both be satisfied by any commit that
+respects the declared writable paths.
+
+- `CORE_VENDOR_FREE_OK` greps the **whole package**:
+  `test -z "$(grep -ri gortex claudio-core/src/claudio_core)"`.
+- At the task base, the vendor word sat in **four** files: `codegraph.py` and
+  `settings.py` (both writable) plus `planact.py` and `context.py` (both **not**
+  writable).
+- **Attempt 1** scrubbed only the writable two, so the package-wide grep still
+  matched `planact.py` / `context.py` and the gate exited 1.
+- **Attempt 2** scrubbed `planact.py`, `context.py` and `tests/test_planact.py`
+  too. The grep went clean, and `scope` failed instead: that commit changed three
+  files outside the writable list.
+
+The package-wide grep is therefore stricter than this task's own acceptance
+criterion, which names `codegraph.py` only ("contains no case-insensitive
+'gortex'"). Clearing it requires editing class **C4** files, which this review
+itself schedules as a *separate* migration item (task 5, "make plan/act families
+data-driven").
+
+## Decision taken in attempt 3
+
+The writable-path constraint is treated as the harder one: writing to files the
+operator walled off is a trust breach, whereas the package-wide grep is C4 work
+that belongs in its own task.
+
+- Attempt 3 does **not** revert attempt 2's C4 edits. A revert is itself a write
+  to three unwritable files, and it would break a verification command the task
+  marks MUST-pass.
+- Attempt 3 keeps the branch in the state where all five verification commands
+  pass, and confines **its own** commit to writable paths:
+  `claudio-core/tests/test_codegraph.py` and this document.
+- If the reviewer prefers the strict cumulative-scope reading, the undo is local
+  and mechanical: restore `planact.py`, `context.py` and `tests/test_planact.py`
+  from `21c04b4`, and re-cut C4 as its own task with those three files in its
+  writable scope. `CORE_VENDOR_FREE_OK` then moves into that task's gate list.
+
+## What attempt 3 added (all inside the writable list)
+
+1. **`test_readiness_and_render_touch_no_filesystem`.** Booby-traps
+   `builtins.open`, `os.stat`, `os.listdir`, `os.path.exists` / `isdir` and
+   `Path.exists` / `is_file` / `read_text`, then walks the whole decision table
+   (`None`, a string, an int, a list, `{}`, a covering report, a non-covering
+   report) plus both render paths and the empty-catalog case. The absence of the
+   filesystem channel is now proven **behaviourally**, not by string matching: if
+   a manifest read ever comes back, even through a helper, this test fails loudly.
+2. **`test_codegraph_imports_only_the_standard_library`.** AST-parses the module
+   and asserts every top-level import is in `sys.stdlib_module_names`, and that
+   `os`, `pathlib`, `subprocess`, `socket`, `httpx` and `requests` are absent. This
+   pins the "stdlib-only, no I/O client" contract that the rewrite depends on.
+3. **Confirmed the backend failures are not ours.** `claudio-backend` reports
+   13 failed / 263 passed / 2 skipped at this branch's HEAD and *identically*
+   13 failed / 263 passed / 2 skipped at base `21c04b4` (checked in a scratch
+   worktree). All 13 are the missing `claudio-backend/config/config.yaml` (a
+   forbidden path) or unrelated TS-contract / e2e drift. Nothing in the C2 change
+   set touches them.
+
+## Verification (attempt 3)
+
+```
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_codegraph.py -p no:cacheprovider   # 22 passed
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests -p no:cacheprovider -q                    # 302 passed
+READINESS_MCP_OK  NO_FILE_SIDECHANNEL_OK  NO_VENDOR_IN_CODEGRAPH_OK  READINESS_WIRED_OK  CORE_VENDOR_FREE_OK
+```
+
+Files changed by this attempt: `claudio-core/tests/test_codegraph.py`,
+`docs/gortex-decoupling-review.md`. Both are on the writable list.

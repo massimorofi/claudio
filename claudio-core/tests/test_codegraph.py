@@ -12,7 +12,9 @@ Run:  cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_co
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import os
 import sys
 from pathlib import Path
 
@@ -201,3 +203,60 @@ def test_no_file_side_channel_names_survive_anywhere():
         source = Path(module.__file__).read_text().lower()
         assert "gortex" not in source
         assert "manifest" not in source
+
+
+# ------------------------------------------------------- the side channel is gone --
+
+
+def test_readiness_and_render_touch_no_filesystem(monkeypatch):
+    """C2: coverage arrives over the MCP transport and nowhere else.
+
+    Every disk entry point is booby-trapped, then the whole decision table is
+    walked. If a manifest read ever comes back -- even indirectly, through a
+    helper -- this fails loudly instead of quietly trusting a stale file.
+    """
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("code-graph readiness must not touch the filesystem")
+
+    monkeypatch.setattr("builtins.open", _forbidden)
+    monkeypatch.setattr(os, "stat", _forbidden)
+    monkeypatch.setattr(os, "listdir", _forbidden)
+    monkeypatch.setattr(os.path, "exists", _forbidden)
+    monkeypatch.setattr(os.path, "isdir", _forbidden)
+    monkeypatch.setattr(Path, "exists", _forbidden)
+    monkeypatch.setattr(Path, "is_file", _forbidden)
+    monkeypatch.setattr(Path, "read_text", _forbidden)
+
+    for reported in (
+        None,
+        "junk",
+        7,
+        [],
+        {},
+        {"tracked_repos": [WS]},
+        {"tracked_repos": ["/elsewhere"]},
+    ):
+        readiness = readiness_from_status(WS, reported)
+        assert readiness.status in {STATUS_COVERED, STATUS_NOT_COVERED, STATUS_UNKNOWN}
+        assert render_readiness_block(readiness)
+
+    assert render_code_graph_status(WS, GRAPH_WITH_STATUS)
+    assert render_code_graph_status(WS, GRAPH_WITHOUT_STATUS)
+    assert render_code_graph_status(WS, []) == ""
+
+
+def test_codegraph_imports_only_the_standard_library():
+    """No third-party I/O client may sneak back into the readiness module."""
+    import claudio_core.codegraph as cg
+
+    tree = ast.parse(Path(cg.__file__).read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+
+    assert imported <= set(sys.stdlib_module_names), imported
+    assert not imported & {"os", "pathlib", "subprocess", "socket", "httpx", "requests"}
