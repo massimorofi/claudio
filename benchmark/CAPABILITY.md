@@ -13,7 +13,7 @@ python3 benchmark/capability.py            # rewrites results/capability.json
 PYTHONPATH=benchmark python3 -m pytest benchmark/tests/test_capability.py -q
 ```
 
-Snapshot taken: `2026-11-27T20:06:19Z` (Python 3.11.18).
+Snapshot taken: `2026-11-27T21:09:29Z` (Python 3.11.18).
 
 ## Availability
 

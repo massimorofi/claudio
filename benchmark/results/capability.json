@@ -101,7 +101,7 @@
       "reason": "binary 'opencode' not found on PATH; no credential in OPENAI_API_KEY, OPENAI_AUTH_TOKEN, CLAUDIO__LLM__API_KEY"
     }
   },
-  "generated_at": "2026-11-27T20:00:54Z",
+  "generated_at": "2026-11-27T21:09:29Z",
   "notes": [
     "Probes are offline: PATH lookups, importable-module lookups and environment variables only. No network call and no CLI subprocess.",
     "A backend is 'available' only when its binary/module prerequisite and at least one credential env var are present; credentials are never validated against a live endpoint.",
