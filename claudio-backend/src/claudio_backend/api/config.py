@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from claudio_core.accounting import get_default_recorder
 from claudio_core.llm import LlmCallError, openai_chat_completion
 from claudio_core.settings import (
     REDACTED,
@@ -27,6 +28,67 @@ from ..paths import validate_workspace_dir, WorkspaceValidationError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _accounting_sink(
+    purpose: str,
+    *,
+    accountant: Any = None,
+    model: str = "",
+    model_role: str = "",
+    run_id: str = "",
+    session_id: str = "",
+) -> Any:
+    """Purpose-tagged ledger sink for a call that outlives any run.
+
+    Issue #58 (Increment 0a(b)-ii): every model call must land in the unified
+    ledger exactly once with the right ``purpose``. A probe / fixer /
+    consolidation call has no run of its own, so it prefers the live
+    :class:`claudio_core.accounting.CallAccountant` (the supervisor's) and
+    otherwise falls back to the process-wide default recorder the supervisor
+    installs at startup. Either way the payload's own ``purpose`` wins inside
+    the sink, so the record is tagged correctly and only once.
+    """
+    make = getattr(accountant, "make_llm_sink", None)
+    if callable(make):
+        return make(
+            purpose=purpose,
+            model=model,
+            model_role=model_role,
+            run_id=run_id,
+            session_id=session_id,
+        )
+    return get_default_recorder()
+
+
+async def run_llm_probe(
+    *,
+    base_url: str | None,
+    model: str,
+    api_key: str = "local",
+    timeout: float = 30.0,
+    usage_sink: Any = None,
+) -> str:
+    """One-shot connectivity probe, tagged ``purpose="probe"`` in the ledger.
+
+    Split out of ``POST /config/llm/test`` so the probe is drivable without an
+    HTTP request. ``usage_sink`` defaults to the process-wide default recorder;
+    either way the call emits exactly one ``outcome=ok|error|cancelled`` record.
+    """
+    return await openai_chat_completion(
+        base_url=base_url,
+        model=model,
+        messages=[{"role": "user", "content": "Reply with the single word: OK"}],
+        api_key=api_key,
+        # Reasoning models spend tokens on reasoning_content before any
+        # visible text; a tiny budget empties `content` and the test
+        # reports "no text". 512 leaves room for both.
+        max_tokens=512,
+        temperature=0.0,
+        timeout=timeout,
+        purpose="probe",
+        usage_sink=usage_sink if usage_sink is not None else get_default_recorder(),
+    )
 
 
 def _normalize_workspace_key(payload: dict) -> dict:
@@ -163,18 +225,16 @@ async def test_llm(request: Request, payload: dict) -> dict:
 
     start = time.time()
     try:
-        content = await openai_chat_completion(
+        content = await run_llm_probe(
             base_url=base_url,
             model=model,
-            messages=[{"role": "user", "content": "Reply with the single word: OK"}],
             api_key=api_key,
-            # Reasoning models spend tokens on reasoning_content before any
-            # visible text; a tiny budget empties `content` and the test
-            # reports "no text". 512 leaves room for both.
-            max_tokens=512,
-            temperature=0.0,
-            timeout=30.0,
-            purpose="probe",
+            usage_sink=_accounting_sink(
+                "probe",
+                accountant=getattr(supervisor, "accountant", None),
+                model=model,
+                model_role=str(profile_name or "llm"),
+            ),
         )
     except (LlmCallError, Exception) as e:  # noqa: BLE001
         latency_ms = int((time.time() - start) * 1000)

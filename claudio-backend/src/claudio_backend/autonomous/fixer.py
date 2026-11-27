@@ -25,8 +25,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass, asdict
-from typing import Any
+from typing import Any, Callable
 
+from claudio_core.accounting import get_default_recorder
 from claudio_core.llm import openai_chat_completion
 from claudio_core.settings import AppConfig, resolve_profile
 
@@ -229,10 +230,42 @@ def _format_tried(tried: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _accounting_sink(
+    purpose: str,
+    *,
+    accountant: Any = None,
+    model: str = "",
+    model_role: str = "",
+    run_id: str = "",
+    session_id: str = "",
+) -> Callable[[dict[str, Any]], None] | None:
+    """Purpose-tagged ledger sink for a call that outlives any run.
+
+    Issue #58 (Increment 0a(b)-ii): the fixer runs on the health scheduler, not
+    inside a chat run, so no per-run sink is handed to it. It prefers a live
+    :class:`claudio_core.accounting.CallAccountant` when one is available and
+    otherwise falls back to the process-wide default recorder the supervisor
+    installs at startup. Each generation attempt is one logical call and emits
+    exactly one record (the retry loop makes a *new* call, it does not re-emit
+    the old one), tagged ``purpose="fixer"``.
+    """
+    make = getattr(accountant, "make_llm_sink", None)
+    if callable(make):
+        return make(
+            purpose=purpose,
+            model=model,
+            model_role=model_role,
+            run_id=run_id,
+            session_id=session_id,
+        )
+    return get_default_recorder()
+
+
 async def propose_fix(
     issue: dict[str, Any],
     config: AppConfig,
     tried: list[tuple[str, str]] | None = None,
+    usage_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> FixProposal:
     """Propose a valid fix command, retrying with feedback until one passes.
 
@@ -272,6 +305,13 @@ async def propose_fix(
             max_tokens=1024,
             timeout=float(fast.timeout_seconds),
             purpose="fixer",
+            usage_sink=(
+                usage_sink
+                if usage_sink is not None
+                else _accounting_sink(
+                    "fixer", model=fast.model, model_role="fast"
+                )
+            ),
         )
         data = _extract_json(raw)
         command = str(data.get("command", "")).strip()

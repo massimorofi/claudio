@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
+from claudio_core.accounting import get_default_recorder
 from claudio_core.llm import openai_chat_completion
 from claudio_core.settings import AppConfig, resolve_profile
 
@@ -186,7 +187,9 @@ async def extract_learnings(
             max_tokens=2048,
             timeout=float(fast.timeout_seconds),
             purpose="learning",
-            usage_sink=usage_sink,
+            usage_sink=usage_sink
+            if usage_sink is not None
+            else get_default_recorder(),
         )
     except Exception as exc:  # noqa: BLE001 - capture must never break the run
         logger.warning("learning extraction call failed: %s", exc)

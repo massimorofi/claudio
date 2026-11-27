@@ -138,3 +138,62 @@ cd claudio-backend && PYTHONPATH="$(pwd)/src:$(pwd)/../claudio-core/src" \
 
 ============================== 18 passed in 1.04s ==============================
 ```
+
+## 0a(b)-ii — every non-primary call site is purpose-tagged
+
+Increment 0a(b)-i/-ia made one logical call emit exactly one record. This
+increment closes the *coverage* half of the gap: the auxiliary paths (router,
+Tier-2 compaction, learning, fixer, consolidation, the daemon and the
+`/config/llm/test` probe) now each reach the ledger with the right `purpose`,
+and with `run_id` / `session_id` / `model_role` filled in wherever they are
+known. Nothing is left untagged, and nothing is tagged twice — the sink is
+resolved once at the call entry point and `llm.openai_chat_completion` wraps it
+in `accounting.once_sink`.
+
+### Audited call sites
+
+Every `openai_chat_completion(` / `chat.completions.create(` call site in
+`claudio-core/src` and `claudio-backend/src`, as printed by
+`python3 scripts/audit_llm_call_sites.py`:
+
+| Site | Purpose | How it reaches the ledger |
+| --- | --- | --- |
+| `claudio-core/src/claudio_core/learning.py:175` | `learning` | `usage_sink=` from `runs/manager.py` (`make_llm_sink(purpose="learning")`, run/session filled); falls back to `get_default_recorder()` when no run is live |
+| `claudio-backend/src/claudio_backend/api/config.py:78` (`run_llm_probe`, used by `POST /config/llm/test`) | `probe` | `usage_sink=` from the supervisor's `CallAccountant` (`model_role` = probed profile name), else `get_default_recorder()` |
+| `claudio-backend/src/claudio_backend/autonomous/consolidation.py:139` (`_merge_categories`) | `consolidation` | `usage_sink=` (`make_llm_sink(purpose="consolidation", model_role="fast")`) else default recorder |
+| `claudio-backend/src/claudio_backend/autonomous/consolidation.py:238` (`_draft_skill`) | `consolidation` | same as above |
+| `claudio-backend/src/claudio_backend/autonomous/fixer.py:296` (`propose_fix`) | `fixer` | `usage_sink=` (`model_role="fast"`); each retry-loop generation is a *new* logical call, so it adds its own single record |
+| `claudio-backend/src/claudio_backend/engine/reasoning_llm.py:312` (`chat.completions.create`, streaming) | `daemon` (engine path also carries `primary` / `retry` / `delegate`) | `_claudio_call_context["recorder"] or get_default_recorder()`, `once_sink`-wrapped per logical call; the daemon agent's context sets `purpose="daemon"` and its `session_id` |
+| `claudio-backend/src/claudio_backend/runs/manager.py:450` (`_build_summariser`, Tier-2) | `compaction` | `usage_sink=` from `make_llm_sink(run_id, session_id, purpose="compaction", model_role="fast")` |
+| `claudio-backend/src/claudio_backend/runs/manager.py:845` (`_auto_route_role`) | `router` | `usage_sink=` from `make_llm_sink(run_id, session_id, purpose="router", model_role="fast")` |
+| `claudio-backend/src/claudio_backend/runs/manager.py:2100` (`extract_learnings` call) | `learning` | passes the purpose-tagged `learning_sink` down to the `learning.py` site above |
+
+`claudio_core/llm.py:29` is the *definition* of `openai_chat_completion`, not a
+call site, so it is not audited as one.
+
+### Guard rails
+
+* `scripts/audit_llm_call_sites.py` — stdlib-only (`ast` + `pathlib`) static
+  audit. Walks both source trees, prints one line per audited call site, flags
+  any site whose enclosing call lacks `usage_sink=` / `recorder=` / a
+  default-recorder path, flags any literal `purpose=` outside
+  `accounting.PURPOSES`, and ends with `audited=N untagged=0 bad_purpose=0`.
+  Exits non-zero on any finding.
+* `tests/test_issue58_aux_purposes.py` — drives each auxiliary helper with an
+  in-memory `httpx.MockTransport` (or a stubbed SDK client for the daemon) and
+  asserts **exactly one** record with the expected `purpose`, plus that a
+  failure (`outcome="error"`) and a cancellation (`outcome="cancelled"`) of the
+  same call still yield exactly one record. No network, no credentials.
+
+### Verification
+
+```
+cd claudio-backend && PYTHONPATH="$(pwd)/src:$(pwd)/../claudio-core/src" \
+  python3 -m pytest tests/test_issue58_aux_purposes.py -p no:cacheprovider -o asyncio_mode=strict
+
+============================== 28 passed in 1.06s ==============================
+
+python3 scripts/audit_llm_call_sites.py
+
+audited=8 untagged=0 bad_purpose=0 purposes_known=12
+```
