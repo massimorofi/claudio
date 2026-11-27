@@ -144,46 +144,43 @@ def render_code_discovery_policy(mcp_entries: list[dict[str, Any]] | None) -> st
     return render_code_graph_policy(detect(mcp_entries))
 
 
-def _configured_manifest_path(config: AppConfig) -> str | None:
-    """The index-manifest path the operator configured, if any.
+def _reported_status(mcp_entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The index-coverage report the code-graph server published about itself.
 
-    The setting is named after whichever code-graph server the deployment runs,
-    so it is found by suffix instead of by a hard-coded name: any agent setting
-    ending in ``_manifest_path`` with a non-empty value is the manifest to read.
-    That keeps this module free of any particular vendor.
+    Coverage is an in-band claim: the server that advertises the tools also
+    advertises what it indexes, on its own catalog entry (``entry["status"]``).
+    The first code-graph entry carrying a usable status dict wins. Anything else
+    -- no status, a non-dict status, a non-code-graph entry -- yields ``None``,
+    which downstream means "unknown", never "not indexed".
     """
-    agent = getattr(config, "agent", None)
-    if agent is None:
-        return None
-    for name in sorted(dir(agent)):
-        if name.endswith("_manifest_path"):
-            value = getattr(agent, name, None)
-            if value:
-                return str(value)
+    for entry in mcp_entries:
+        status = entry.get("status")
+        if isinstance(status, dict) and detect([entry]):
+            return dict(status)
     return None
 
 
 def render_code_graph_status(
     workspace: Path | None,
     mcp_entries: list[dict[str, Any]] | None,
-    manifest_path: str | Path | None = None,
 ) -> str:
     """Render the code-graph readiness block for this workspace.
 
     The discovery policy tells the agent to trust the graph; this says whether
-    the graph can actually be trusted *here*, from the manifest the indexer
-    published at start-up. Emitted only when the catalog advertises a code-graph
-    server (see :func:`claudio_core.mcp_capability.detect`), and it degrades to an
-    explicit "unknown" rather than silence when no manifest exists -- an agent
-    that cannot tell whether the index covers its workspace will eventually
-    mistake an empty result for an absent symbol.
+    the graph can actually be trusted *here*, from the coverage the code-graph
+    server reports on its own catalog entry. Emitted only when the catalog
+    advertises a code-graph server (see :func:`claudio_core.mcp_capability.detect`),
+    and it degrades to an explicit "unknown" when the server reports no coverage
+    -- an agent that cannot tell whether the index covers its workspace will
+    eventually mistake an empty result for an absent symbol.
     """
-    if not detect(mcp_entries) or workspace is None:
+    entries = [e for e in (mcp_entries or ()) if isinstance(e, dict)]
+    if workspace is None or not str(workspace).strip() or not detect(entries):
         return ""
-    from .codegraph import assess, render_readiness_block
+    from .codegraph import readiness_from_status, render_readiness_block
 
     return render_readiness_block(
-        assess(workspace, manifest_path=manifest_path)
+        readiness_from_status(workspace, _reported_status(entries))
     )
 
 
@@ -278,10 +275,7 @@ def build_static_instructions(
     # Placed right after the policy so the instruction and its caveat are read
     # together (issue: the agent planned "query the graph" while the index
     # covered nothing).
-    status_block = render_code_graph_status(
-        workspace, mcp_entries,
-        manifest_path=_configured_manifest_path(config),
-    )
+    status_block = render_code_graph_status(workspace, mcp_entries)
     if status_block:
         sections.append(status_block)
 

@@ -564,3 +564,93 @@ grep -ri gortex claudio-core/src/claudio_core/mcp_capability.py # no matches
 5. **Producer side:** have the engine catalog forward `instructions` and
    `tool_descriptions` (and honour a `capability` field on `MCPServerEntry`) so
    detection stops depending on tool-name spelling.
+
+---
+
+# C2 removed — readiness now comes from MCP, not from a file
+
+**Status: done.** The out-of-band filesystem channel (class **C2**, plus the
+`gortex_manifest_path` half of **C5**) is gone. Index coverage reaches Claudio
+only through the code-graph server's own catalog entry.
+
+## What changed
+
+1. **`claudio_core/codegraph.py` — rewritten, no I/O.**
+   Deleted: `DEFAULT_MANIFEST_PATH`, `IndexManifest`, `read_manifest()`,
+   `covered_repo()`, `assess()`, every `manifest_path` parameter, the
+   `probe_index_health()` HTTP helper (it pulled in `httpx`; the module is
+   stdlib-only now) and every `.gortex-index` reference.
+   Kept: `GraphReadiness` and the `covered` / `not_covered` statuses.
+   Added: `STATUS_UNKNOWN = "unknown"`, `status_unknown(workspace, detail)` and
+   `readiness_from_status(workspace, status)`, where `status` is the plain dict
+   the MCP server reports about itself:
+   `{"tracked_repos": [...], "failed_repos": [...], "generated_at": str}`.
+   Decision table: non-dict → `unknown`; dict without a usable `tracked_repos`
+   key → `unknown`; workspace inside a reported repo → `covered`; reported repos
+   and none contains the workspace → `not_covered`; an explicitly empty list is a
+   report, so → `not_covered`. Path comparison is lexical (string segments, no
+   `resolve()`, no `stat()`), so the module performs no filesystem access at all.
+   `render_readiness_block` renders exactly three cases:
+   *covered* — graph results are trustworthy evidence, cite the query;
+   *not_covered* — an empty graph result means **not indexed**, never a finding
+   about the code, use the file tools and say so;
+   *unknown* — coverage was not reported: verify with a query you expect to
+   return something before trusting an empty result, and do not claim the graph
+   is absent or broken.
+   Fail-safe: no input raises, and a missing report is never upgraded into a
+   confident "not indexed".
+2. **`claudio_core/instructions.py`.** `render_code_graph_status(workspace,
+   mcp_entries)` — the `manifest_path` parameter and the `_configured_manifest_path`
+   helper are gone. Detection uses `mcp_capability.detect`; with no code-graph
+   server in the catalog it returns `""`. The status is read from the entries
+   themselves (`entry.get("status")`, first code-graph entry that carries a dict),
+   and `build_static_instructions` passes only `(workspace, mcp_entries)`.
+3. **`claudio_core/settings.py`.** `agent.gortex_manifest_path` deleted; the
+   remaining vendor word in that module (an auth-header example comment) was
+   reworded to "a code-graph server".
+4. **Backend / frontend.** `grep -rn gortex claudio-backend/src/claudio_backend/api/config.py`
+   matched nothing — the field was never enumerated there (the settings API dumps
+   the model), so there was nothing to delete and the file is untouched.
+   `grep -rni 'gortex|manifest' claudio-frontend/src` matched nothing, so
+   **nothing under `claudio-frontend/` was touched**.
+5. **`claudio-core/tests/test_codegraph.py` — replaced.** 20 synchronous,
+   self-contained tests (own `sys.path` bootstrap, no pydantic, no network, no
+   tmp-file fixtures): covered, covered-nested/longest-match, not_covered,
+   not_covered-with-empty-report, unknown-from-`None`, unknown-from-garbage
+   (string / int / list / bytes / object), unknown-from-dict-without-the-key,
+   malformed-values-degrade, never-raises-on-any-input, the three render cases,
+   `""` when no code-graph server is in the catalog, `unknown` when a code-graph
+   server reports nothing, the rendered `not_covered` text carrying the
+   "not indexed" warning, and two negative assertions that no rendered text and
+   no module source contains the vendor word or the word "manifest".
+
+## Verification
+
+```
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_codegraph.py -p no:cacheprovider   # 20 passed
+cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests -p no:cacheprovider -q                   # 296 passed
+test -z "$(grep -rn 'gortex_manifest_path|\.gortex-index|DEFAULT_MANIFEST_PATH' claudio-core/src claudio-backend/src)"   # clean
+grep -ri gortex claudio-core/src/claudio_core/codegraph.py    # no matches
+grep -ri gortex claudio-core/src/claudio_core/settings.py     # no matches
+grep -ri gortex claudio-core/src/claudio_core/instructions.py # no matches
+```
+
+## What remains
+
+1. **Producer side, `adk_engine._ensure_mcp_locked` (not writable in this task).**
+   The engine catalog still emits only `{"id", "tools", "resources"}`, so no
+   server's `status` reaches `render_code_graph_status` yet. Until the producer
+   forwards it, every connected code-graph server renders the **unknown** block —
+   the intended fail-safe, never a false "not indexed". Forwarding
+   `entry["status"]` (plus `instructions` / `tool_descriptions`, and honouring a
+   `capability` pin) is the one remaining wire to make coverage a positive claim.
+2. **`planact.py` / `context.py` (not writable in this task).** They still name the
+   vendor (`GORTEX_FAMILY`, its triggers and remedy text, and a comment in
+   `context.py:87`), so the package-wide `CORE_VENDOR_FREE_OK` gate cannot pass
+   from this change alone: that is class **C4**, a separate item. After this task
+   the only `gortex` hits left under `claudio-core/src/claudio_core/` are those two
+   files.
+3. **`docker/gortex/**`, `compose.yaml`, `config.example.yaml`, the coding skill's
+   reference doc** — classes **C1**/**C3**, untouched here (forbidden or out of scope).
+4. **`scripts/audit_gortex_coupling.py`** still lists the C2 tokens; that is correct —
+   it is the detector, and it should keep failing if a manifest path ever returns.

@@ -239,10 +239,6 @@ class AgentConfig(BaseModel):
     strict_tools: bool = False
     skills_enabled: bool = True
     skills_dir: str = "./skills"
-    # Where the gortex entrypoint publishes which repos it actually indexed.
-    # The prompt uses it to tell the agent whether the code graph covers the
-    # current workspace. Empty = the built-in default (/workspace/.gortex-index.json).
-    gortex_manifest_path: str = ""
     auto_routing_enabled: bool = False
     # Issue #58 Inc 2: short-circuit the auto-router's LLM call when the
     # request unambiguously needs tools (deterministic "primary" first).
@@ -305,8 +301,8 @@ class MCPServerEntry(BaseModel):
     enabled: bool = True
     # Extra HTTP headers sent on every request for the http/sse transports.
     # Used to carry a bearer token to an authenticated Streamable HTTP MCP
-    # endpoint (e.g. {"Authorization": "Bearer <token>"} for Gortex, which
-    # refuses a non-localhost bind without one). Ignored by stdio.
+    # endpoint (e.g. {"Authorization": "Bearer <token>"} for a code-graph server
+    # that refuses a non-localhost bind without one). Ignored by stdio.
     headers: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("command", mode="before")
