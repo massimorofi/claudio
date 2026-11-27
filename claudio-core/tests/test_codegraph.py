@@ -1,234 +1,262 @@
-"""Tests for code-graph readiness (Fix B: make the index precondition visible).
+"""Tests for code-graph readiness, learned from MCP -- never from a file.
 
 The behaviour under test is the one that was missing: an agent must be told
-whether the Gortex index actually covers its workspace, and must never be able to
-read "empty result" as "absent symbol" when the truth is "not indexed".
+whether the connected code graph actually covers its workspace, and it must
+never read "empty result" as "absent symbol" when the truth is "not indexed".
 
-Run:  cd claudio-core && .venv/bin/python -m pytest tests/test_codegraph.py -q
+Coverage arrives in-band, as the plain dict the code-graph server reports on its
+own catalog entry. There is no manifest, no shared mount and no path to configure,
+so these tests touch no filesystem and no network.
+
+Run:  cd claudio-core && PYTHONPATH="$(pwd)/src" python3 -m pytest tests/test_codegraph.py -q
 """
 from __future__ import annotations
 
-import json
+import ast
+import inspect
+import os
+import sys
 from pathlib import Path
 
-import httpx
-import pytest
+# Self-contained bootstrap: work with a bare interpreter, no installed package,
+# no pydantic models, no fixtures that need a plugin.
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-from claudio_core.codegraph import (
+from claudio_core.codegraph import (  # noqa: E402
     STATUS_COVERED,
-    STATUS_NO_MANIFEST,
     STATUS_NOT_COVERED,
+    STATUS_UNKNOWN,
     GraphReadiness,
-    IndexManifest,
-    assess,
-    covered_repo,
-    probe_index_health,
-    read_manifest,
+    readiness_from_status,
     render_readiness_block,
+    status_unknown,
 )
+from claudio_core.instructions import render_code_graph_status  # noqa: E402
+
+WS = "/work/repos/clams"
+
+# A catalog entry that advertises a code graph (two lexicon hits: "callers",
+# "symbol") and reports its own coverage in-band.
+GRAPH_WITH_STATUS = [
+    {
+        "id": "graph",
+        "tools": ["graph_find_callers", "graph_symbol_search"],
+        "resources": [],
+        "status": {
+            "tracked_repos": ["/work/repos/clams"],
+            "failed_repos": [],
+            "generated_at": "2026-11-27T00:00:00Z",
+        },
+    }
+]
+GRAPH_WITHOUT_STATUS = [
+    {"id": "graph", "tools": ["graph_find_callers", "graph_symbol_search"], "resources": []}
+]
+NOT_A_GRAPH_SERVER = [{"id": "weather", "tools": ["forecast"], "resources": []}]
 
 
-def write_manifest(tmp_path: Path, tracked, failed=()) -> Path:
-    p = tmp_path / ".gortex-index.json"
-    p.write_text(json.dumps(
-        {"generated_at": "2026-11-18T00:00:00Z",
-         "tracked_repos": list(tracked), "failed_repos": list(failed)}
-    ))
-    return p
+def status(tracked, failed=(), generated_at="2026-11-27T00:00:00Z"):
+    return {"tracked_repos": list(tracked), "failed_repos": list(failed),
+            "generated_at": generated_at}
 
 
-# ---------------------------------------------------------------- manifest IO --
+# --------------------------------------------------------------- readiness_from_status --
 
-def test_read_manifest_roundtrip(tmp_path):
-    p = write_manifest(tmp_path, ["/repos/clams", "/repos/claudio"])
-    m = read_manifest(p)
-    assert m is not None
-    assert m.tracked_repos == ("/repos/clams", "/repos/claudio")
-    assert m.failed_repos == ()
-    assert m.healthy is True
+def test_covered_when_workspace_is_inside_a_tracked_repo():
+    r = readiness_from_status(WS, status(["/work/repos/clams"]))
+    assert r.status == STATUS_COVERED
+    assert r.usable is True
+    assert r.repo == "/work/repos/clams"
 
 
-def test_missing_manifest_is_none_not_empty(tmp_path):
-    # The distinction matters: None means "unknown", not "nothing indexed".
-    assert read_manifest(tmp_path / "absent.json") is None
+def test_covered_for_a_nested_workspace_and_longest_repo_wins():
+    r = readiness_from_status("/work/repos/clams/src/app",
+                              status(["/work/repos", "/work/repos/clams"]))
+    assert r.status == STATUS_COVERED and r.repo == "/work/repos/clams"
 
 
-def test_malformed_manifest_is_none(tmp_path):
-    p = tmp_path / "bad.json"
-    p.write_text("{not json")
-    assert read_manifest(p) is None
-    p.write_text(json.dumps(["a list, not a dict"]))
-    assert read_manifest(p) is None
+def test_not_covered_when_the_server_reports_other_repos():
+    r = readiness_from_status("/work/elsewhere",
+                              status(["/work/repos/clams"], ["/work/gone:absent"]))
+    assert r.status == STATUS_NOT_COVERED
+    assert r.usable is False
+    assert "/work/gone:absent" in r.failed
 
 
-def test_manifest_with_wrong_types_degrades_safely(tmp_path):
-    p = tmp_path / "weird.json"
-    p.write_text(json.dumps({"tracked_repos": "a-string-not-a-list"}))
-    m = read_manifest(p)
-    assert m is not None and m.tracked_repos == ()
+def test_not_covered_when_the_server_explicitly_tracks_nothing():
+    r = readiness_from_status(WS, status([]))
+    assert r.status == STATUS_NOT_COVERED
 
 
-def test_failed_repo_makes_manifest_unhealthy(tmp_path):
-    m = IndexManifest(tracked_repos=("/repos/a",), failed_repos=("/repos/b:absent",))
-    assert m.healthy is False
+def test_unknown_from_none():
+    # The whole point: no report is NOT evidence that the workspace is unindexed.
+    r = readiness_from_status(WS, None)
+    assert r.status == STATUS_UNKNOWN
+    assert r.usable is False
 
 
-# ------------------------------------------------------------------- coverage --
-
-def test_covered_repo_matches_nested_workspace(tmp_path):
-    repo = tmp_path / "clams"
-    repo.mkdir()
-    ws = repo / "src" / "clams"
-    ws.mkdir(parents=True)
-    m = IndexManifest(tracked_repos=(str(repo),))
-    assert covered_repo(m, ws) == str(repo.resolve())
+def test_unknown_from_garbage_when_status_is_not_a_dict():
+    for garbage in ("a string", 42, ["/work/repos/clams"], ["not", "a", "dict"], object(), b"bytes"):
+        r = readiness_from_status(WS, garbage)
+        assert r.status == STATUS_UNKNOWN, garbage
 
 
-def test_covered_repo_picks_longest_match(tmp_path):
-    parent, nested = tmp_path / "ai", tmp_path / "ai" / "clams"
-    nested.mkdir(parents=True)
-    m = IndexManifest(tracked_repos=(str(parent), str(nested)))
-    assert covered_repo(m, nested) == str(nested.resolve())
+def test_unknown_from_dict_without_a_tracked_repos_key():
+    assert readiness_from_status(WS, {"generated_at": "x"}).status == STATUS_UNKNOWN
 
 
-def test_covered_repo_returns_none_when_outside(tmp_path):
-    repo, other = tmp_path / "clams", tmp_path / "elsewhere"
-    repo.mkdir(); other.mkdir()
-    assert covered_repo(IndexManifest(tracked_repos=(str(repo),)), other) is None
+def test_malformed_values_degrade_to_unknown_instead_of_a_confident_negative():
+    # A report that cannot be read is not evidence of absence: it must land on
+    # "unknown", never on the "this workspace is not indexed" verdict.
+    r = readiness_from_status(WS, {"tracked_repos": "a-string-not-a-list",
+                                   "failed_repos": None})
+    assert r.status == STATUS_UNKNOWN
+    assert r.tracked == () and r.failed == ()
+    assert "does NOT cover" not in render_readiness_block(r)
 
 
-# --------------------------------------------------------------------- assess --
-
-def test_assess_covered(tmp_path):
-    repo = tmp_path / "clams"; repo.mkdir()
-    p = write_manifest(tmp_path, [str(repo)])
-    r = assess(repo, manifest_path=p)
-    assert r.status == STATUS_COVERED and r.usable
+def test_readiness_from_status_never_raises_on_any_input():
+    for bad in (None, {}, [], "x", 0, 1.5, set(), {"tracked_repos": [None, 1]},
+                {"tracked_repos": [""]}, {"tracked_repos": ["/"], "failed_repos": "x"}):
+        assert isinstance(readiness_from_status(WS, bad), GraphReadiness)
 
 
-def test_assess_not_covered(tmp_path):
-    repo, other = tmp_path / "clams", tmp_path / "untracked"
-    repo.mkdir(); other.mkdir()
-    p = write_manifest(tmp_path, [str(repo)], ["/gone:absent"])
-    r = assess(other, manifest_path=p)
-    assert r.status == STATUS_NOT_COVERED and not r.usable
-    assert "/gone:absent" in r.failed
+def test_status_unknown_helper_builds_the_fail_safe_verdict():
+    r = status_unknown(WS)
+    assert r.status == STATUS_UNKNOWN and r.workspace == WS and not r.usable
 
 
-def test_assess_no_manifest(tmp_path):
-    r = assess(tmp_path, manifest_path=tmp_path / "absent.json")
-    assert r.status == STATUS_NO_MANIFEST and not r.usable
+# --------------------------------------------------------------------------- render --
+
+def test_render_covered_says_results_are_trustworthy():
+    block = render_readiness_block(readiness_from_status(WS, status([WS])))
+    assert "covers your current workspace" in block and WS in block
 
 
-# ------------------------------------------------------------------- rendering --
-
-def test_render_covered_says_trustworthy(tmp_path):
-    r = GraphReadiness(status=STATUS_COVERED, workspace="/w", repo="/repos/clams")
-    block = render_readiness_block(r)
-    assert "covers your current workspace" in block
-    assert "/repos/clams" in block
-
-
-def test_render_not_covered_forbids_the_false_inference(tmp_path):
-    r = GraphReadiness(
-        status=STATUS_NOT_COVERED, workspace="/w",
-        tracked=("/repos/clams",), failed=("/x:absent",),
-    )
-    block = render_readiness_block(r)
-    # The exact trap: empty graph result must not be reported as a code finding.
-    assert "not indexed" in block and "does not exist" in block
+def test_render_not_covered_carries_the_not_indexed_warning():
+    block = render_readiness_block(
+        readiness_from_status("/work/elsewhere", status(["/work/repos/clams"])))
+    # The exact trap: an empty graph result must not become a finding about code.
+    assert "not indexed" in block
+    assert "does not exist" in block
+    assert "Never report an empty graph result as a finding" in block
     assert "file tools" in block
     assert "Do not claim you queried the graph" in block
 
 
-def test_render_unknown_never_claims_absent(tmp_path):
-    r = GraphReadiness(status=STATUS_NO_MANIFEST, workspace="/w")
-    block = render_readiness_block(r)
+def test_render_unknown_never_overclaims_and_asks_for_verification():
+    block = render_readiness_block(readiness_from_status(WS, None))
     assert "unknown" in block
-    assert "does NOT cover" not in block  # must not over-claim
+    assert "does NOT cover" not in block          # must not claim absence
+    assert "verify" in block.lower() or "Before trusting an empty result" in block
 
 
-# ------------------------------------------------------------------ live probe --
-
-def test_probe_index_health_parses_success():
-    def handler(request):
-        assert request.headers["Authorization"] == "Bearer tok"
-        return httpx.Response(200, json={"status": "ready", "node_count": 13106})
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
-        out = probe_index_health("http://gortex:7411", token="tok", client=c)
-    assert out["node_count"] == 13106
-
-
-@pytest.mark.parametrize("status", [401, 500])
-def test_probe_index_health_non_2xx_is_none(status):
-    with httpx.Client(
-        transport=httpx.MockTransport(lambda r: httpx.Response(status))
-    ) as c:
-        assert probe_index_health("http://gortex:7411", client=c) is None
+def test_rendered_text_never_names_a_vendor():
+    cases = [
+        readiness_from_status(WS, status([WS])),
+        readiness_from_status(WS, status(["/other"], ["/gone:absent"])),
+        readiness_from_status(WS, None),
+        readiness_from_status(WS, "garbage"),
+        status_unknown(WS),
+    ]
+    for r in cases:
+        lowered = render_readiness_block(r).lower()
+        assert "gortex" not in lowered
+        assert "manifest" not in lowered
 
 
-def test_probe_index_health_transport_error_is_none():
-    def boom(request):
-        raise httpx.ConnectError("refused")
+# ------------------------------------------------------------------ prompt wiring --
 
-    with httpx.Client(transport=httpx.MockTransport(boom)) as c:
-        assert probe_index_health("http://gortex:7411", client=c) is None
-
-
-# ------------------------------------------------------- prompt wiring (Fix B3) --
-# The modules only matter if the verdict reaches the system prompt.
-
-GORTEX_MCP = [{"id": "gortex", "tools": ["Gortex_search"], "resources": []}]
+def test_render_returns_empty_when_no_code_graph_server_in_the_catalog():
+    assert render_code_graph_status(Path(WS), []) == ""
+    assert render_code_graph_status(Path(WS), None) == ""
+    assert render_code_graph_status(Path(WS), NOT_A_GRAPH_SERVER) == ""
 
 
-def _config(tmp_path: Path):
-    from claudio_core.settings import AppConfig
-
-    return AppConfig.model_validate(
-        {"agent": {"workspace_dir": str(tmp_path), "skills_enabled": False,
-                   "tools": {"enabled": ["read_file"], "disabled": []}}}
-    )
+def test_render_emits_a_block_when_a_code_graph_server_is_connected():
+    assert render_code_graph_status(Path(WS), GRAPH_WITH_STATUS) != ""
 
 
-def test_status_block_absent_without_gortex(tmp_path):
-    from claudio_core.instructions import render_code_graph_status
-
-    assert render_code_graph_status(tmp_path, []) == ""
-    assert render_code_graph_status(tmp_path, GORTEX_MCP, manifest_path=None) != ""
+def test_connected_server_without_a_report_renders_unknown_not_absence():
+    block = render_code_graph_status(Path(WS), GRAPH_WITHOUT_STATUS)
+    assert "unknown" in block and "does NOT cover" not in block
 
 
-def test_status_block_absent_without_workspace(tmp_path):
-    from claudio_core.instructions import render_code_graph_status
-
-    assert render_code_graph_status(None, GORTEX_MCP) == ""
-
-
-def test_static_instructions_carry_the_verdict(tmp_path):
-    from claudio_core.instructions import build_static_instructions
-
-    repo = tmp_path / "clams"
-    repo.mkdir()
-    other = tmp_path / "untracked"
-    other.mkdir()
-    manifest = write_manifest(tmp_path, [str(repo)])
-
-    cfg = _config(tmp_path)
-    cfg.agent.gortex_manifest_path = str(manifest)
-
-    covered = build_static_instructions(
-        cfg, "s1", mcp_entries=GORTEX_MCP, workspace=repo)
-    assert "Code graph status" in covered and "covers your current workspace" in covered
-
-    missed = build_static_instructions(
-        cfg, "s1", mcp_entries=GORTEX_MCP, workspace=other)
-    assert "does NOT cover your current workspace" in missed
+def test_rendered_block_follows_the_servers_own_report():
+    assert "covers your current workspace" in render_code_graph_status(Path(WS), GRAPH_WITH_STATUS)
+    other = [dict(GRAPH_WITH_STATUS[0], status=status(["/somewhere/else"]))]
+    assert "not indexed" in render_code_graph_status(Path(WS), other)
 
 
-def test_status_block_absent_from_prompt_when_gortex_missing(tmp_path):
-    # A deployment without Gortex must not pay tokens for any of this.
-    from claudio_core.instructions import build_static_instructions
+def test_render_code_graph_status_takes_no_manifest_path():
+    params = inspect.signature(render_code_graph_status).parameters
+    assert list(params) == ["workspace", "mcp_entries"]
+    assert not any("manifest" in name for name in params)
 
-    cfg = _config(tmp_path)
-    prompt = build_static_instructions(cfg, "s1", mcp_entries=[], workspace=tmp_path)
-    assert "Code graph status" not in prompt
+
+def test_no_file_side_channel_names_survive_anywhere():
+    import claudio_core.codegraph as cg
+    import claudio_core.instructions as ins
+    for module in (cg, ins):
+        source = Path(module.__file__).read_text().lower()
+        assert "gortex" not in source
+        assert "manifest" not in source
+
+
+# ------------------------------------------------------- the side channel is gone --
+
+
+def test_readiness_and_render_touch_no_filesystem(monkeypatch):
+    """C2: coverage arrives over the MCP transport and nowhere else.
+
+    Every disk entry point is booby-trapped, then the whole decision table is
+    walked. If a manifest read ever comes back -- even indirectly, through a
+    helper -- this fails loudly instead of quietly trusting a stale file.
+    """
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("code-graph readiness must not touch the filesystem")
+
+    monkeypatch.setattr("builtins.open", _forbidden)
+    monkeypatch.setattr(os, "stat", _forbidden)
+    monkeypatch.setattr(os, "listdir", _forbidden)
+    monkeypatch.setattr(os.path, "exists", _forbidden)
+    monkeypatch.setattr(os.path, "isdir", _forbidden)
+    monkeypatch.setattr(Path, "exists", _forbidden)
+    monkeypatch.setattr(Path, "is_file", _forbidden)
+    monkeypatch.setattr(Path, "read_text", _forbidden)
+
+    for reported in (
+        None,
+        "junk",
+        7,
+        [],
+        {},
+        {"tracked_repos": [WS]},
+        {"tracked_repos": ["/elsewhere"]},
+    ):
+        readiness = readiness_from_status(WS, reported)
+        assert readiness.status in {STATUS_COVERED, STATUS_NOT_COVERED, STATUS_UNKNOWN}
+        assert render_readiness_block(readiness)
+
+    assert render_code_graph_status(WS, GRAPH_WITH_STATUS)
+    assert render_code_graph_status(WS, GRAPH_WITHOUT_STATUS)
+    assert render_code_graph_status(WS, []) == ""
+
+
+def test_codegraph_imports_only_the_standard_library():
+    """No third-party I/O client may sneak back into the readiness module."""
+    import claudio_core.codegraph as cg
+
+    tree = ast.parse(Path(cg.__file__).read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+
+    assert imported <= set(sys.stdlib_module_names), imported
+    assert not imported & {"os", "pathlib", "subprocess", "socket", "httpx", "requests"}

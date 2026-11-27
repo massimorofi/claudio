@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# Optional overlay: run ANY Streamable-HTTP code-graph MCP indexer next to
+# Claudio. Nothing here is product-specific: the image, the port and the bearer
+# token all come from the environment, and the workspace is mounted READ-ONLY.
+#
+# Claudio does not build, ship or supervise a code indexer. It only connects to
+# one over MCP. This file exists so an operator who wants a container on the
+# same bridge can start one with two flags instead of writing a compose file:
+#
+#   CODEGRAPH_IMAGE=<registry>/<indexer>:<tag> \
+#   CODEGRAPH_TOKEN=<a-real-secret> \
+#   docker compose -f compose.yaml -f docker/mcp/codegraph.compose.yaml \
+#     --profile codegraph up -d
+#
+# Then register it in config.yaml under mcp.servers (see docs/mcp-codegraph.md):
+#
+#   - id: codegraph
+#     transport: streamable_http
+#     url: http://codegraph:7411/mcp
+#     headers: { Authorization: Bearer <CODEGRAPH_TOKEN> }
+#     capability: code_graph
+#     enabled: true
+#
+# Env (all read by this file only; the agent does not read them):
+#   CODEGRAPH_IMAGE   image to run                                  (required)
+#   CODEGRAPH_PORT    port the indexer listens on INSIDE its net    (default 7411)
+#   CODEGRAPH_TOKEN   bearer token the /mcp endpoint requires       (required)
+#   CODEGRAPH_MCP_PATH  MCP endpoint path                           (default /mcp)
+#   CODEGRAPH_HEALTH_PATH  probe path for the healthcheck           (default = CODEGRAPH_MCP_PATH)
+#   CODEGRAPH_MOUNT   container path for the workspace mount        (default /workspace)
+#   CODEGRAPH_WORKSPACE_DIR  host dir to mount read-only            (default CLAUDIO_WORKSPACE_DIR)
+# ---------------------------------------------------------------------------
+
+services:
+  codegraph:
+    # Opt-in: the default stack is unchanged unless --profile codegraph is given.
+    profiles: ["codegraph"]
+    restart: unless-stopped
+    init: true
+    image: ${CODEGRAPH_IMAGE:?set CODEGRAPH_IMAGE to the indexer image you want to run}
+    container_name: claudio-codegraph
+    environment:
+      # Consumed by this file (port + healthcheck) and forwarded to the indexer,
+      # whose variable names vary: set the one your indexer reads, or add it here.
+      CODEGRAPH_PORT: ${CODEGRAPH_PORT:-7411}
+      CODEGRAPH_TOKEN: ${CODEGRAPH_TOKEN:?set CODEGRAPH_TOKEN to the bearer token the endpoint requires}
+      # Common alternative names, so most indexers work without editing this file.
+      MCP_PORT: ${CODEGRAPH_PORT:-7411}
+      MCP_TOKEN: ${CODEGRAPH_TOKEN}
+      MCP_PATH: ${CODEGRAPH_MCP_PATH:-/mcp}
+      # The indexer must resolve the same paths the agent does, so the workspace
+      # is mounted at an identical path - read-only, because an indexer has no
+      # business writing to the tree it describes.
+      REPO: ${CODEGRAPH_MOUNT:-/workspace}
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Read-only by design. A code indexer is a reader; giving it write access
+      # to the tree the agent edits invites index-time mutations that the agent
+      # then cannot reproduce or revert.
+      - ${CODEGRAPH_WORKSPACE_DIR:-${CLAUDIO_WORKSPACE_DIR:-./workspace}}:${CODEGRAPH_MOUNT:-/workspace}:ro
+    # No published host port: the endpoint is reachable only from claudio-net,
+    # where the agent container connects to it by service name. If you must
+    # reach it from the host, add a "ports:" entry bound to 127.0.0.1 and keep
+    # the bearer token mandatory.
+    healthcheck:
+      # Any HTTP response means the endpoint is listening (a 401/403 is fine:
+      # curl without -f exits 0 on any status and non-zero only on connect fail).
+      # Requires curl in the indexer image - delete this block if it has none.
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:${CODEGRAPH_PORT:-7411}${CODEGRAPH_MCP_PATH:-/mcp}"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    networks: [claudio-net]
+
+networks:
+  # Same name and definition as in compose.yaml, so the merge is a no-op when
+  # this file is used as an overlay (and it still parses on its own).
+  claudio-net:
+    driver: bridge

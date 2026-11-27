@@ -84,10 +84,18 @@ class ToolContext:
     reads_since_write: int = 0
     # Plan/act audit (see ``claudio_core.planact``). ``called_tools`` records every
     # tool actually invoked this run; ``assistant_text`` accumulates the model's own
-    # narration. Together they let the engine detect "said it would use Gortex, never
-    # called it" -- a claim about a source that was not consulted.
+    # narration. Together they let the engine detect "said it would use the code
+    # graph, never called it" -- a claim about a source that was not consulted.
     called_tools: set[str] = field(default_factory=set)
     assistant_text: list[str] = field(default_factory=list)
+    # The live MCP catalog the engine advertises (server id -> real tool names,
+    # instructions, descriptions) in the plain-dict shape understood by
+    # ``claudio_core.mcp_capability.detect``. When present, the plan/act audit
+    # derives one family per connected code-graph server, so a promise to use a
+    # specific connector is checked against the tools that connector actually
+    # exposes -- and a connector that is not connected is never audited at all.
+    # ``None`` (legacy/test callers) leaves the audit on the builtin families.
+    mcp_entries: list[dict[str, Any]] | None = None
     # Set by the run manager so tools (e.g. delegate_task) can build agents.
     agent_factory: Any = None
     # Unified call/tool ledger (issue #58, Increment 0). A
@@ -120,10 +128,20 @@ class ToolContext:
             self.assistant_text.append(text)
 
     def planact_report(self):
-        """Audit what the narration promised against what actually ran."""
-        from .planact import audit_run
+        """Audit what the narration promised against what actually ran.
 
-        return audit_run("\n".join(self.assistant_text), self.called_tools)
+        With a live catalog (``mcp_entries``) the audit runs against the
+        per-server families derived from it plus the builtins; without one it
+        falls back to the builtin families, which know only generic,
+        vendor-free vocabulary.
+        """
+        from .planact import BUILTIN_FAMILIES, audit_run, derive_families
+
+        text = "\n".join(self.assistant_text)
+        if self.mcp_entries:
+            families = derive_families(self.mcp_entries) + BUILTIN_FAMILIES
+            return audit_run(text, self.called_tools, families)
+        return audit_run(text, self.called_tools)
 
     @property
     def max_output_chars(self) -> int:

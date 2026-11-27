@@ -239,10 +239,6 @@ class AgentConfig(BaseModel):
     strict_tools: bool = False
     skills_enabled: bool = True
     skills_dir: str = "./skills"
-    # Where the gortex entrypoint publishes which repos it actually indexed.
-    # The prompt uses it to tell the agent whether the code graph covers the
-    # current workspace. Empty = the built-in default (/workspace/.gortex-index.json).
-    gortex_manifest_path: str = ""
     auto_routing_enabled: bool = False
     # Issue #58 Inc 2: short-circuit the auto-router's LLM call when the
     # request unambiguously needs tools (deterministic "primary" first).
@@ -303,10 +299,29 @@ class MCPServerEntry(BaseModel):
     command: list[str] = Field(default_factory=list)
     url: str | None = None
     enabled: bool = True
+    # Operator-declared capability override for this server. Generic: it names
+    # *what the server does*, never which product provides it, and Claudio has
+    # no vendor knowledge baked in. Empty (the default) means "figure it out
+    # from what the server advertises"; ``code_graph`` pins the code-navigation
+    # policy on without any heuristics. See claudio_core.mcp_capability.
+    capability: str = ""
+
+    @field_validator("capability")
+    @classmethod
+    def _known_capability(cls, v: str) -> str:
+        from claudio_core.mcp_capability import CAPABILITY_CODE_GRAPH
+
+        value = (v or "").strip().lower()
+        if value not in ("", CAPABILITY_CODE_GRAPH):
+            raise ValueError(
+                "capability must be '' (detect from what the server advertises) "
+                f"or {CAPABILITY_CODE_GRAPH!r} (operator override), got {v!r}"
+            )
+        return value
     # Extra HTTP headers sent on every request for the http/sse transports.
     # Used to carry a bearer token to an authenticated Streamable HTTP MCP
-    # endpoint (e.g. {"Authorization": "Bearer <token>"} for Gortex, which
-    # refuses a non-localhost bind without one). Ignored by stdio.
+    # endpoint (e.g. {"Authorization": "Bearer <token>"} for a code-graph server
+    # that refuses a non-localhost bind without one). Ignored by stdio.
     headers: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("command", mode="before")

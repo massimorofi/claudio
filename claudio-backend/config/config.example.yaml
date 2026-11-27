@@ -156,23 +156,29 @@ mcp:
         - https://api.skillmd.com/mcp
       url: https://api.skillmd.com/mcp
       enabled: true
-    # Gortex code-intelligence MCP (issue #54, Option B). Ships DISABLED so a
-    # fresh deploy that does not run the gortex container is unaffected. When
-    # enabled it points at the gortex daemon's Streamable HTTP MCP endpoint on the
-    # internal bridge (the `gortex` compose service, profile "gortex"). To turn it
-    # on: set CLAUDIO_GORTEX_ENABLED=true in .env (or `docker compose --profile
-    # gortex up -d`), flip `enabled: true`, then restart the agent. The daemon
-    # indexes the same /workspace mount the agent uses so returned paths match.
-    # See doc/docker.md §9.
-    - id: gortex
-      transport: streamable_http
-      command: []
-      url: http://gortex:7411/mcp
-      # Must match the gortex container's GORTEX_DAEMON_HTTP_TOKEN (Gortex
-      # requires a bearer token for its non-localhost /mcp bind). Change it.
-      headers:
-        Authorization: Bearer claudio-gortex-internal-token
-      enabled: false
+    # --- Optional: an external code-graph MCP server -----------------------
+    # Claudio ships NO indexer. If you run a code-intelligence server that speaks
+    # the MCP Streamable HTTP transport, register it here and Claudio discovers
+    # what it can do from the MCP handshake (initialize + tools/list) - never
+    # from a file, and never from the entry's name.
+    #
+    # Deliberately commented out: a fresh clone starts fine with no indexer at
+    # all, and the codebase-lookup policy stays out of the prompt until you
+    # connect one. To enable: uncomment, point `url` at your server, set the two
+    # env vars, then restart the agent so it rebuilds its MCP toolset.
+    # Runbook: docs/mcp-codegraph.md
+    #
+    # - id: codegraph                  # operator-chosen; quoted verbatim in the prompt
+    #   transport: streamable_http
+    #   command: []
+    #   url: ${CODEGRAPH_URL}          # REPLACE the placeholder - Claudio does not
+    #                                  # expand env vars inside this file. On the
+    #                                  # compose bridge the URL is the service name,
+    #                                  # e.g. http://codegraph:7411/mcp
+    #   headers:
+    #     Authorization: Bearer ${CODEGRAPH_TOKEN}   # likewise: paste the real token
+    #   capability: code_graph         # optional override; forces the lookup policy on
+    #   enabled: true
 
 monitoring:
   log_level: INFO

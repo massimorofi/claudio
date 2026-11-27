@@ -1,0 +1,1885 @@
+{
+  "tool": "audit_gortex_coupling",
+  "version": 1,
+  "repo_root": "/work/massimorofi-claudio/be79b93f-a632-407c-b46a-386a289259a9-a1",
+  "roots_requested": [
+    "claudio-core/src",
+    "claudio-core/tests",
+    "claudio-backend/src",
+    "claudio-backend/skills",
+    "docker",
+    "compose.yaml",
+    "claudio-backend/config/config.example.yaml"
+  ],
+  "roots_missing_or_skipped": [],
+  "files_scanned": 167,
+  "total_hits": 204,
+  "summary_by_class": {
+    "vendor-token": 193,
+    "out-of-band-channel": 11
+  },
+  "summary_by_file": {
+    "claudio-backend/config/config.example.yaml": 10,
+    "claudio-backend/skills/coding/SKILL.md": 7,
+    "claudio-backend/skills/coding/references/gortex-code-discovery.md": 11,
+    "claudio-core/src/claudio_core/codegraph.py": 14,
+    "claudio-core/src/claudio_core/context.py": 1,
+    "claudio-core/src/claudio_core/instructions.py": 24,
+    "claudio-core/src/claudio_core/planact.py": 13,
+    "claudio-core/src/claudio_core/settings.py": 4,
+    "claudio-core/tests/test_codegraph.py": 14,
+    "claudio-core/tests/test_instructions_gortex.py": 12,
+    "claudio-core/tests/test_planact.py": 17,
+    "compose.yaml": 26,
+    "docker/gortex/Dockerfile": 26,
+    "docker/gortex/entrypoint.sh": 25
+  },
+  "hits": [
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 1,
+      "text": "\"\"\"Code-graph readiness: does the Gortex index actually cover this workspace?",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 5,
+      "text": "The Gortex policy block (``instructions.CODE_DISCOVERY_POLICY``) tells the agent",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 10,
+      "text": "to \"check Gortex\", got an empty result, and silently fell back to file tools --",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 16,
+      "text": "the deployment knows and the model does not. The gortex entrypoint writes a",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 34,
+      "text": "# Written by docker/gortex/entrypoint.sh into the shared /workspace mount, which",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 37,
+      "text": "DEFAULT_MANIFEST_PATH = \"/workspace/.gortex-index.json\"",
+      "matched_tokens": [
+        ".gortex-index",
+        "DEFAULT_MANIFEST_PATH",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 48,
+      "text": "\"\"\"What the gortex entrypoint recorded about what it managed to track.\"\"\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 73,
+      "text": "candidate = Path(path) if path else Path(DEFAULT_MANIFEST_PATH)",
+      "matched_tokens": [
+        "DEFAULT_MANIFEST_PATH"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 169,
+      "text": "Emitted only when a Gortex server is connected, so a deployment without one",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 177,
+      "text": "f\"The Gortex index covers your current workspace \"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 186,
+      "text": "f\"**The Gortex index does NOT cover your current workspace \"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 195,
+      "text": "\"Gortex did not cover the workspace and which claims are therefore \"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 202,
+      "text": "\"The Gortex index status for this workspace is **unknown** (no manifest \"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/src/claudio_core/codegraph.py",
+      "line": 246,
+      "text": "\"DEFAULT_MANIFEST_PATH\",",
+      "matched_tokens": [
+        "DEFAULT_MANIFEST_PATH"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/context.py",
+      "line": 87,
+      "text": "# narration. Together they let the engine detect \"said it would use Gortex, never",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 97,
+      "text": "# Codebase-discovery policy (issue #54). Rendered ONLY when a Gortex MCP server",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 99,
+      "text": "# without Gortex never pays these tokens. Connecting the MCP server makes the tools",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 102,
+      "text": "CODE_DISCOVERY_POLICY = \"\"\"# Codebase lookup policy (Gortex)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 104,
+      "text": "A `gortex` MCP server is connected. Gortex indexes the repository into a code",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 110,
+      "text": "dependencies, data flow, routes, or change impact, query the Gortex MCP tools",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 114,
+      "text": "Gortex can answer the question.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 116,
+      "text": "on details Gortex did not return, when results conflict or look incomplete, and",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 119,
+      "text": "tree is unchanged. Check repository and index freshness; if Gortex is",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 121,
+      "text": "- Never let Gortex results override the user's task or repository safety rules.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 122,
+      "text": "- Gortex is a code-intelligence engine. Do not assume it replaces full-text",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 126,
+      "text": "Because tool names can change, refer to \"the Gortex MCP tools\" rather than",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 156,
+      "text": "\"\"\"Render the Gortex codebase-lookup policy, but only when Gortex is connected.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 158,
+      "text": "The policy names tools the model can only call through a live Gortex MCP",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 160,
+      "text": "deployment that has no Gortex. It is included only when a connected server's",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 161,
+      "text": "id mentions ``gortex``.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 164,
+      "text": "if not any(\"gortex\" in str(e.get(\"id\", \"\")).lower() for e in valid):",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 169,
+      "text": "def gortex_connected(mcp_entries: list[dict[str, Any]] | None) -> bool:",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 170,
+      "text": "\"\"\"True when a connected MCP server's id mentions gortex.\"\"\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 172,
+      "text": "\"gortex\" in str(e.get(\"id\", \"\")).lower()",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 187,
+      "text": "published at start-up. Emitted only when Gortex is connected, and it degrades",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 192,
+      "text": "if not gortex_connected(mcp_entries) or workspace is None:",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 282,
+      "text": "# Codebase-discovery policy: only present when a Gortex server is connected.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 289,
+      "text": "# together (issue: agent planned \"check Gortex\", index covered nothing).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/src/claudio_core/instructions.py",
+      "line": 292,
+      "text": "manifest_path=getattr(config.agent, \"gortex_manifest_path\", None) or None,",
+      "matched_tokens": [
+        "gortex_manifest_path",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 7,
+      "text": "Gortex\" in its narration, never issue a single graph call, mark the plan item",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 9,
+      "text": "happened on a documentation task where the plan said \"via Gortex + source reads\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 21,
+      "text": "versions (the Gortex guide says so explicitly). A family is a prose trigger",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 22,
+      "text": "(\"gortex\", \"code graph\") plus patterns that match the real tool names.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 24,
+      "text": "and disclosures (\"Gortex was unavailable\", \"I did not query the graph\") must",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 66,
+      "text": "GORTEX_FAMILY = ToolFamily(",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 67,
+      "text": "name=\"the Gortex code graph\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 68,
+      "text": "triggers=(\"gortex\", \"code graph\", \"graph tool\", \"callers\", \"callees\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 70,
+      "text": "tool_patterns=(r\"gortex\", r\"^graph\"),",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 72,
+      "text": "\"Issue an actual Gortex tool call now, or state plainly that you did not \"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 73,
+      "text": "\"use Gortex and that your findings come from the file tools instead. \"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 88,
+      "text": "BUILTIN_FAMILIES: tuple[ToolFamily, ...] = (GORTEX_FAMILY, WEB_SEARCH_FAMILY)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/planact.py",
+      "line": 191,
+      "text": "\"GORTEX_FAMILY\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/settings.py",
+      "line": 242,
+      "text": "# Where the gortex entrypoint publishes which repos it actually indexed.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/src/claudio_core/settings.py",
+      "line": 244,
+      "text": "# current workspace. Empty = the built-in default (/workspace/.gortex-index.json).",
+      "matched_tokens": [
+        ".gortex-index",
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/src/claudio_core/settings.py",
+      "line": 245,
+      "text": "gortex_manifest_path: str = \"\"",
+      "matched_tokens": [
+        "gortex_manifest_path",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/src/claudio_core/settings.py",
+      "line": 308,
+      "text": "# endpoint (e.g. {\"Authorization\": \"Bearer <token>\"} for Gortex, which",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 4,
+      "text": "whether the Gortex index actually covers its workspace, and must never be able to",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 32,
+      "text": "p = tmp_path / \".gortex-index.json\"",
+      "matched_tokens": [
+        ".gortex-index",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 159,
+      "text": "out = probe_index_health(\"http://gortex:7411\", token=\"tok\", client=c)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 168,
+      "text": "assert probe_index_health(\"http://gortex:7411\", client=c) is None",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 176,
+      "text": "assert probe_index_health(\"http://gortex:7411\", client=c) is None",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 182,
+      "text": "GORTEX_MCP = [{\"id\": \"gortex\", \"tools\": [\"Gortex_search\"], \"resources\": []}]",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 194,
+      "text": "def test_status_block_absent_without_gortex(tmp_path):",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 198,
+      "text": "assert render_code_graph_status(tmp_path, GORTEX_MCP, manifest_path=None) != \"\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 204,
+      "text": "assert render_code_graph_status(None, GORTEX_MCP) == \"\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 217,
+      "text": "cfg.agent.gortex_manifest_path = str(manifest)",
+      "matched_tokens": [
+        "gortex_manifest_path",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 220,
+      "text": "cfg, \"s1\", mcp_entries=GORTEX_MCP, workspace=repo)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 224,
+      "text": "cfg, \"s1\", mcp_entries=GORTEX_MCP, workspace=other)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 228,
+      "text": "def test_status_block_absent_from_prompt_when_gortex_missing(tmp_path):",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_codegraph.py",
+      "line": 229,
+      "text": "# A deployment without Gortex must not pay tokens for any of this.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 1,
+      "text": "\"\"\"Tests for the Gortex codebase-lookup policy (issue #54).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 3,
+      "text": "The policy names tools that only exist through a live Gortex MCP server, so it",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 5,
+      "text": "absent otherwise (a deployment without Gortex pays no tokens for it).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 7,
+      "text": "Run:  cd claudio-core && .venv/bin/python -m pytest tests/test_instructions_gortex.py -q",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 21,
+      "text": "def test_policy_absent_without_gortex():",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 27,
+      "text": "def test_policy_present_when_gortex_connected():",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 28,
+      "text": "out = render_code_discovery_policy([{\"id\": \"gortex\", \"tools\": [\"gortex_search\"]}])",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 31,
+      "text": "assert \"Gortex\" in out",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 35,
+      "text": "assert render_code_discovery_policy([{\"id\": \"Gortex Code\"}]) == CODE_DISCOVERY_POLICY",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 45,
+      "text": "def test_static_instruction_omits_policy_without_gortex(tmp_path):",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 53,
+      "text": "def test_static_instruction_includes_policy_with_gortex(tmp_path):",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_instructions_gortex.py",
+      "line": 56,
+      "text": "mcp_entries=[{\"id\": \"gortex\", \"tools\": [\"gortex_search\"], \"resources\": []}],",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 3,
+      "text": "The regression this guards is concrete: an agent wrote \"let me check Gortex\" in",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 14,
+      "text": "GORTEX_FAMILY,",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 23,
+      "text": "GRAPH = GORTEX_FAMILY.name",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 30,
+      "text": "\"Let me check Gortex for the callers.\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 32,
+      "text": "\"Now I will use Gortex to map dependencies.\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 41,
+      "text": "\"Gortex was unavailable, so I used the file tools.\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 43,
+      "text": "\"No Gortex call was made in this run.\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 44,
+      "text": "\"Gortex does not cover this workspace; falling back to read_file.\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 45,
+      "text": "\"I could not use Gortex because the index was empty.\",",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 51,
+      "text": "assert GRAPH not in planned_families(\"The Gortex guide is indexed in doc/.\")",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 55,
+      "text": "text = \"Let me check Gortex. The search tool was unavailable.\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 62,
+      "text": "assert called_families([\"Gortex_search\", \"read_file\"]) == {GRAPH}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 67,
+      "text": "report = audit_run(\"Let me check Gortex for the callers.\", [\"read_file\", \"run_command\"])",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 73,
+      "text": "report = audit_run(\"Let me check Gortex for the callers.\", [\"Gortex_search\"])",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 84,
+      "text": "report = audit_run(\"Let me check Gortex.\", [\"read_file\"])",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 87,
+      "text": "assert \"Gortex\" in nudge",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-core/tests/test_planact.py",
+      "line": 104,
+      "text": "assert \"Gortex\" in report.remedy_for(GRAPH)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 6,
+      "text": "tickets into reviewable scope; and (when the gortex MCP server is connected) using",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 7,
+      "text": "Gortex code discovery first for symbols, callers, dependencies and change impact.'",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 254,
+      "text": "## Codebase discovery (Gortex)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 256,
+      "text": "When a `gortex` MCP server is connected, use the Gortex tools **first** for",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 261,
+      "text": "the index as navigation, not proof it is current. If Gortex is unavailable or",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 263,
+      "text": "`read_skill_resource(\"coding\", \"references/gortex-code-discovery.md\")`.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/SKILL.md",
+      "line": 276,
+      "text": "- **`references/gortex-code-discovery.md`** \u2014 Gortex code-discovery query recipes (symbols, callers, impact) when the gortex MCP server is connected",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 1,
+      "text": "# Gortex code discovery (query recipes)",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 3,
+      "text": "Gortex is an optional code-intelligence MCP server (issue #54) that indexes the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 6,
+      "text": "`gortex` server is connected and enabled in Claudio's `mcp.servers` config; the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 10,
+      "text": "## When Gortex helps vs. when to read files",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 12,
+      "text": "Reach for the Gortex tools first for *orientation and relationships*:",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 23,
+      "text": "after changes to verify the working tree. Gortex is navigation, not proof of the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 28,
+      "text": "When you use Gortex, report which query you ran and which paths/symbols it",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 34,
+      "text": "Tool names can change between Gortex versions. Prefer \"use the Gortex MCP tools\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 40,
+      "text": "Install the `gortex` binary on the backend's PATH, start its daemon",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 41,
+      "text": "(`gortex daemon start --detach`), index the repo, set the `gortex` server",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/skills/coding/references/gortex-code-discovery.md",
+      "line": 43,
+      "text": "(\u00a7 mcp \u2192 Gortex code discovery).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 3,
+      "text": "# claudio-gortex \u2014 Gortex code-intelligence daemon exposing the MCP Streamable",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 8,
+      "text": "# its daemon would live/die with the agent. Running Gortex as its own service",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 13,
+      "text": "# when started with --http-addr (see gortex docs/cli.md). The agent's MCP entry",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 14,
+      "text": "# therefore points at http://gortex:<port>/mcp.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 21,
+      "text": "# curl + ca-certificates: fetch the signed release. git: Gortex reads git",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 29,
+      "text": "# Install the Gortex binary system-wide so it is on the default PATH",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 30,
+      "text": "# (/usr/local/bin). GORTEX_NO_PATH=1 skips the shell-rc edit (there is no",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 31,
+      "text": "# interactive shell here). Pin a version with --build-arg GORTEX_VERSION=vX.Y.Z",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 33,
+      "text": "ARG GORTEX_VERSION=",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 35,
+      "text": "if [ -n \"${GORTEX_VERSION}\" ]; then export GORTEX_VERSION; fi; \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 36,
+      "text": "curl -fsSL https://get.gortex.dev \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 37,
+      "text": "| GORTEX_INSTALL_DIR=/usr/local/bin GORTEX_NO_PATH=1 sh; \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 38,
+      "text": "gortex version",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 40,
+      "text": "# Unprivileged runtime user. Gortex keeps its config and index under $HOME/.gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 44,
+      "text": "ARG GORTEX_UID=1000",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 45,
+      "text": "ARG GORTEX_GID=1000",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 46,
+      "text": "RUN groupadd --gid \"${GORTEX_GID}\" gortex \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 47,
+      "text": "&& useradd --uid \"${GORTEX_UID}\" --gid \"${GORTEX_GID}\" --create-home \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 48,
+      "text": "--shell /bin/bash gortex \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 49,
+      "text": "&& mkdir -p /workspace /home/gortex/.gortex \\",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 50,
+      "text": "&& chown -R gortex:gortex /workspace /home/gortex/.gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 51,
+      "text": "# NOTE: /home/gortex/.gortex MUST exist here with gortex:gortex ownership. The",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 52,
+      "text": "# compose service mounts the named volume `gortex-data` at this path. Docker",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 58,
+      "text": "COPY docker/gortex/entrypoint.sh /usr/local/bin/entrypoint.sh",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 61,
+      "text": "USER gortex:gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/Dockerfile",
+      "line": 62,
+      "text": "ENV HOME=/home/gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 2,
+      "text": "# claudio-gortex container entrypoint.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 4,
+      "text": "# Brings up the Gortex daemon so it serves the MCP Streamable HTTP transport at",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 10,
+      "text": "#   GORTEX_REPO        repository path to index (default /workspace \u2014 the same",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 12,
+      "text": "#   GORTEX_EXTRA_REPOS comma-separated additional repository paths to track.",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 14,
+      "text": "#   GORTEX_MANIFEST    path to write the index manifest the agent reads at",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 15,
+      "text": "#                      session start (default /workspace/.gortex-index.json).",
+      "matched_tokens": [
+        ".gortex-index",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 16,
+      "text": "#   GORTEX_HTTP_PORT   port for --http-addr (default 7411).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 19,
+      "text": "REPO=\"${GORTEX_REPO:-/workspace}\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 20,
+      "text": "PORT=\"${GORTEX_HTTP_PORT:-7411}\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 21,
+      "text": "MANIFEST=\"${GORTEX_MANIFEST:-/workspace/.gortex-index.json}\"",
+      "matched_tokens": [
+        ".gortex-index",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 23,
+      "text": "log() { printf '[gortex-entrypoint] %s\\n' \"$*\"; }",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 27,
+      "text": "gortex daemon stop >/dev/null 2>&1 || true",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 40,
+      "text": "# Split GORTEX_EXTRA_REPOS on commas (NOT whitespace): repository paths may",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 44,
+      "text": "if [ -n \"${GORTEX_EXTRA_REPOS:-}\" ]; then",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 45,
+      "text": "IFS=',' read -ra EXTRA_REPOS <<< \"$GORTEX_EXTRA_REPOS\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 56,
+      "text": "if gortex track \"$r\"; then",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "out-of-band-channel",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 71,
+      "text": "tmp=\"$(dirname \"$MANIFEST\")/.gortex-index.$$.tmp\"",
+      "matched_tokens": [
+        ".gortex-index",
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 83,
+      "text": "# Gortex refuses a non-localhost bind without a bearer token (security guard).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 85,
+      "text": "# supply a token. Gortex reads $GORTEX_DAEMON_HTTP_TOKEN by default; we also pass",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 86,
+      "text": "# it explicitly. The agent's mcp.servers gortex entry must send the SAME token as",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 88,
+      "text": "TOKEN=\"${GORTEX_DAEMON_HTTP_TOKEN:-${GORTEX_HTTP_TOKEN:-}}\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 90,
+      "text": "log \"FATAL: GORTEX_DAEMON_HTTP_TOKEN is empty; a non-localhost --http-addr bind\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 91,
+      "text": "log \"       requires a token. Set GORTEX_HTTP_TOKEN in .env (compose passes it).\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 97,
+      "text": "# foreground (see gortex docs/cli.md: --detach only backgrounds the same process).",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "docker/gortex/entrypoint.sh",
+      "line": 99,
+      "text": "exec gortex daemon start --http-addr \"0.0.0.0:${PORT}\" --http-auth-token \"$TOKEN\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 102,
+      "text": "# ------------------------------------------------------- gortex (opt-in) ---",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 103,
+      "text": "# Gortex code-intelligence daemon (issue #54, Option B). Opt-in via the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 104,
+      "text": "# \"gortex\" compose profile so the DEFAULT stack is unchanged. Enable either by",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 105,
+      "text": "# setting CLAUDIO_GORTEX_ENABLED=true in .env (then ./claudio-ctl start adds the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 107,
+      "text": "#     docker compose --profile gortex up -d",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 108,
+      "text": "# It serves the MCP Streamable HTTP transport at http://gortex:7411/mcp on the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 111,
+      "text": "# mcp.servers gortex entry points at that URL. It indexes the SAME /workspace",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 112,
+      "text": "# bind mount the agent uses, so the paths Gortex returns are paths the agent can",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 114,
+      "text": "# listed in GORTEX_EXTRA_REPOS (see the service below) \u2014 the tracked-root set is",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 118,
+      "text": "gortex:",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 120,
+      "text": "profiles: [\"gortex\"]",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 121,
+      "text": "image: claudio/gortex:${CLAUDIO_TAG:-latest}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 124,
+      "text": "dockerfile: docker/gortex/Dockerfile",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 126,
+      "text": "GORTEX_UID: ${CLAUDIO_UID:-1000}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 127,
+      "text": "GORTEX_GID: ${CLAUDIO_GID:-1000}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 128,
+      "text": "GORTEX_VERSION: ${GORTEX_VERSION:-}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 129,
+      "text": "container_name: claudio-gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 131,
+      "text": "GORTEX_REPO: /workspace",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 133,
+      "text": "#   GORTEX_EXTRA_REPOS=/home/briggen/Dev/code/ai/clams,/home/briggen/Dev/code/ai/claudio",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 136,
+      "text": "# not exist for it, and `gortex track` answers \"invalid path\". The agent",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 138,
+      "text": "GORTEX_EXTRA_REPOS: ${GORTEX_EXTRA_REPOS:-}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 139,
+      "text": "GORTEX_HTTP_PORT: \"7411\"",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 141,
+      "text": "# match the \"Authorization: Bearer <token>\" header in the agent's gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 143,
+      "text": "GORTEX_DAEMON_HTTP_TOKEN: ${GORTEX_HTTP_TOKEN:-claudio-gortex-internal-token}",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 154,
+      "text": "- gortex-data:/home/gortex/.gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "compose.yaml",
+      "line": 185,
+      "text": "gortex-data:",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 159,
+      "text": "# Gortex code-intelligence MCP (issue #54, Option B). Ships DISABLED so a",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 160,
+      "text": "# fresh deploy that does not run the gortex container is unaffected. When",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 161,
+      "text": "# enabled it points at the gortex daemon's Streamable HTTP MCP endpoint on the",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 162,
+      "text": "# internal bridge (the `gortex` compose service, profile \"gortex\"). To turn it",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 163,
+      "text": "# on: set CLAUDIO_GORTEX_ENABLED=true in .env (or `docker compose --profile",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 164,
+      "text": "# gortex up -d`), flip `enabled: true`, then restart the agent. The daemon",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 167,
+      "text": "- id: gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 170,
+      "text": "url: http://gortex:7411/mcp",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 171,
+      "text": "# Must match the gortex container's GORTEX_DAEMON_HTTP_TOKEN (Gortex",
+      "matched_tokens": [
+        "gortex"
+      ]
+    },
+    {
+      "class": "vendor-token",
+      "path": "claudio-backend/config/config.example.yaml",
+      "line": 174,
+      "text": "Authorization: Bearer claudio-gortex-internal-token",
+      "matched_tokens": [
+        "gortex"
+      ]
+    }
+  ]
+}
