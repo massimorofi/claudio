@@ -341,3 +341,162 @@ def test_helpers_do_not_import_the_agent_framework():
     joined = " ".join(imports).lower()
     for banned in ("pydantic", "google", "adk", "claudio_backend", "mcp"):
         assert banned not in joined, f"mcp_status.py must stay framework-free: {banned}"
+
+
+# ==========================================================================
+# Deployment wiring (replaces the old issue-54 tests).
+#
+# Same constraints as above, and for the same reasons: no ``config.yaml`` read
+# (gitignored), no ``yaml``/``pydantic`` import (not installed in the gate), no
+# agent-framework import. Everything below is a plain text read of the files an
+# operator actually deploys, asserting the indexer's deployment is *not* in
+# Claudio's product code and that the generic replacement is documented.
+# ==========================================================================
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMPOSE_PATH = REPO_ROOT / "compose.yaml"
+EXAMPLE_PATH = REPO_ROOT / "claudio-backend" / "config" / "config.example.yaml"
+OVERLAY_PATH = REPO_ROOT / "docker" / "mcp" / "codegraph.compose.yaml"
+RUNBOOK_PATH = REPO_ROOT / "docs" / "mcp-codegraph.md"
+SKILLS_DIR = REPO_ROOT / "claudio-backend" / "skills"
+CODING_SKILL = SKILLS_DIR / "coding" / "SKILL.md"
+NEW_REFERENCE = CODING_SKILL.parent / "references" / "code-graph-discovery.md"
+OLD_REFERENCE = CODING_SKILL.parent / "references" / (VENDOR + "-code-discovery.md")
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _top_level_keys(text: str, under: str) -> list[str]:
+    """Two-space-indented keys of a top-level mapping, found without a YAML parser."""
+    keys: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if not line.startswith(" ") and line.rstrip().endswith(":"):
+            inside = line.rstrip() == f"{under}:"
+            continue
+        if inside and line.startswith("  ") and not line.startswith("   "):
+            stripped = line.strip()
+            if stripped.endswith(":") and not stripped.startswith("#") and ":" in stripped:
+                keys.append(stripped[:-1].strip().strip("\"'"))
+    return keys
+
+
+def _active_lines(text: str) -> list[str]:
+    """Non-comment, non-blank lines - what a config loader would actually see."""
+    return [
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+# --------------------------------------------------------------------------
+# C3: the indexer's deployment left the product
+# --------------------------------------------------------------------------
+
+
+def test_vendor_indexer_directory_is_gone():
+    """Claudio does not build the indexer, so its Dockerfile is not ours to keep."""
+    assert not (REPO_ROOT / "docker" / VENDOR).exists(), (
+        f"docker/{VENDOR} must not exist; the indexer is an external process"
+    )
+
+
+def test_compose_has_no_vendor_service_or_volume():
+    text = _read(COMPOSE_PATH)
+    assert VENDOR not in text.lower(), "compose.yaml must not name the indexer product"
+    services = _top_level_keys(text, "services")
+    assert VENDOR not in services
+    assert "agent" in services and "web" in services, "the real services are still defined"
+
+
+def test_docker_tree_is_vendor_free():
+    for path in sorted((REPO_ROOT / "docker").rglob("*")):
+        if path.is_file():
+            assert VENDOR not in path.name.lower(), f"file named after the vendor: {path}"
+            try:
+                body = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:  # pragma: no cover - binary asset
+                continue
+            assert VENDOR not in body.lower(), f"{path} names the indexer product"
+
+
+# --------------------------------------------------------------------------
+# C3: the generic, optional replacement exists and is really generic
+# --------------------------------------------------------------------------
+
+
+def test_generic_overlay_exists_and_is_env_driven():
+    assert OVERLAY_PATH.is_file(), "docker/mcp/codegraph.compose.yaml must exist"
+    text = _read(OVERLAY_PATH)
+    for var in ("CODEGRAPH_IMAGE", "CODEGRAPH_PORT", "CODEGRAPH_TOKEN"):
+        assert var in text, f"the overlay must be driven by ${var}"
+    assert "streamable" in text.lower() or "/mcp" in text, "it must serve the Streamable HTTP MCP endpoint"
+    assert ":ro" in text, "the workspace must be mounted read-only"
+    assert "profiles:" in text, "it must be opt-in so the default stack is unchanged"
+    assert VENDOR not in text.lower()
+
+
+def test_runbook_documents_registration_and_verification():
+    assert RUNBOOK_PATH.is_file(), "docs/mcp-codegraph.md must exist"
+    text = _read(RUNBOOK_PATH)
+    for needle in (
+        "streamable_http",
+        "mcp.servers",
+        "Authorization: Bearer",
+        "capability: code_graph",
+        "tools/list",
+        "initialize",
+    ):
+        assert needle in text, f"the runbook must document `{needle}`"
+    assert "unknown" in text.lower(), "readiness must be reported as unknown when unadvertised"
+
+
+# --------------------------------------------------------------------------
+# C5/C3: shipped config offers the generic entry, disabled
+# --------------------------------------------------------------------------
+
+
+def test_config_example_offers_a_generic_streamable_http_example():
+    text = _read(EXAMPLE_PATH)
+    assert VENDOR not in text.lower(), "config.example.yaml must not name a product"
+    assert "streamable_http" in text
+    assert "Authorization: Bearer" in text, "the example must show the bearer header"
+    assert "capability: code_graph" in text, "the example must show the capability override"
+    assert "codegraph" in text.lower()
+
+
+def test_config_example_ships_the_indexer_disabled():
+    """A fresh clone must start with no indexer: the example is commented out."""
+    text = _read(EXAMPLE_PATH)
+    for line in _active_lines(text):
+        assert "codegraph" not in line.lower(), (
+            f"the code-graph example must stay commented out, found: {line.strip()}"
+        )
+
+
+# --------------------------------------------------------------------------
+# C1: agent-facing text is vendor-free and points at the renamed reference
+# --------------------------------------------------------------------------
+
+
+def test_skill_tree_is_vendor_free():
+    for path in sorted(SKILLS_DIR.rglob("*")):
+        if path.is_file():
+            assert VENDOR not in path.name.lower(), f"skill file named after the vendor: {path}"
+            body = _read(path)
+            assert VENDOR not in body.lower(), f"{path} names the indexer product"
+
+
+def test_skill_reference_was_renamed_and_is_referenced():
+    assert NEW_REFERENCE.is_file(), "references/code-graph-discovery.md must exist"
+    assert not OLD_REFERENCE.exists(), "the vendor-named reference file must be gone"
+    skill = _read(CODING_SKILL)
+    assert "references/code-graph-discovery.md" in skill, "SKILL.md must point at the renamed file"
+    assert "code-graph" in skill
+    for needle in ("empty", "read", "advertised"):
+        assert needle in _read(NEW_REFERENCE).lower(), (
+            f"the reference must keep the {needle} guidance"
+        )

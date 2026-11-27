@@ -3,8 +3,9 @@ name: coding
 description: 'Practical coding craft: writing clear, correct, maintainable code; reviewing
   diffs and PRs for defects; refactoring safely; testing as you go; enforcing coding
   standards; fixing lint; stacking and merging PRs from concurrent agents; turning
-  tickets into reviewable scope; and (when the gortex MCP server is connected) using
-  Gortex code discovery first for symbols, callers, dependencies and change impact.'
+  tickets into reviewable scope; and (when a code-graph MCP server is connected)
+  using code-graph discovery first for symbols, callers, dependencies and change
+  impact.'
 license: mixed — see Credits
 metadata:
   last_reviewed: '2026-10-25'
@@ -251,16 +252,19 @@ changes accumulate into an unusable codebase.
 "Review this PR/diff", "fix the lint", "enforce our style", "split this
 into stacked PRs", "merge what the agents did", "what is this ticket asking?".
 
-## Codebase discovery (Gortex)
+## Codebase discovery (code-graph MCP)
 
-When a `gortex` MCP server is connected, use the Gortex tools **first** for
+When a code-graph MCP server is connected, use its advertised tools **first** for
 structural questions — where a symbol is defined, callers/callees, dependencies,
 routes and change impact — instead of recursively reading whole files for
-orientation. Cite the evidence (query + returned paths/symbols). Still read the
-exact source before editing and after changes to verify the working tree; treat
-the index as navigation, not proof it is current. If Gortex is unavailable or
-stale, say so and use the regular file tools. Detailed query recipes:
-`read_skill_resource("coding", "references/gortex-code-discovery.md")`.
+orientation. Use only the tool names listed in the system prompt (they come from
+the server's `tools/list`); never guess one. Cite the evidence (tool + arguments +
+returned paths/symbols). Still read the exact source before editing and after
+changes to verify the working tree; treat the graph as navigation, not proof it is
+current. An empty result is not absence — it can mean the symbol, file or repo is
+outside the index or the index is stale, so say so and fall back to the file tools.
+Detailed query recipes:
+`read_skill_resource("coding", "references/code-graph-discovery.md")`.
 
 ## References (load on demand)
 
@@ -273,4 +277,4 @@ The detailed sections below are **not** in this body to keep the loaded skill sm
 - **`references/database.md`** — database/SQL best practices, testing, anti-patterns and the SQL review checklist
 - **`references/pr-review-github.md`** — reviewing a GitHub pull request end-to-end with the gh API, one-click suggestions and success criteria
 - **`references/knowledge-modules.md`** — the fractal knowledge-module sub-files and the script-output handling pattern
-- **`references/gortex-code-discovery.md`** — Gortex code-discovery query recipes (symbols, callers, impact) when the gortex MCP server is connected
+- **`references/code-graph-discovery.md`** — code-graph discovery query recipes (symbols, callers, impact) when a code-graph MCP server is connected

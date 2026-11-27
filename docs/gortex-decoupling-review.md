@@ -1058,3 +1058,125 @@ call makes the report clean.
    name in its filename and fixtures (backend test, outside this increment's
    writable scope); `test_mcp_codegraph_wiring.py` already covers the same chain
    vendor-free.
+
+
+---
+
+# C3 + remaining C1 closed — the indexer's deployment is out of the product
+
+**Scope of this increment.** Coupling class **C3** (deployment-coupling:
+`docker/gortex/`, the compose service, the shipped config entry) and the
+**remaining C1** sites that live in agent-facing skill text
+(`skills/coding/SKILL.md`, `references/gortex-code-discovery.md`). It implements
+target-contract items **T3** (the indexer is an external process) and the
+operator-override half of **T4**, and it retires the last C1 text that named the
+vendor to the model.
+
+## What was deleted
+
+| Path | Why it went |
+|---|---|
+| `docker/gortex/Dockerfile` | built a third-party binary from the vendor's URL inside Claudio's image build, created the vendor's user and index volume. Claudio does not ship the indexer. |
+| `docker/gortex/entrypoint.sh` | the out-of-band channel's writer: it tracked repos and wrote the JSON manifest Claudio used to read index coverage (class C2's producer). |
+| `compose.yaml` service `gortex` (+ `gortex-data` volume) | Claudio was configuring and supervising the indexer: its image, port `7411`, bearer token, extra-repo list and shared volume mount. |
+| `config.example.yaml` entry `id: gortex` | shipped the vendor's service name, port and a shared default token as the product's own template. |
+| `skills/coding/references/gortex-code-discovery.md` | agent-facing text that named the vendor and told the model to say the vendor's name. |
+| `tests/test_issue54_gortex.py` | asserted the coupling *was the contract* (live `config.yaml` entry enabled, compose service exists, vendor id reaches the prompt). It also read the gitignored `config.yaml`, so it could not run in the gate at all. |
+
+## What replaced it
+
+**`docker/mcp/codegraph.compose.yaml`** — a generic, opt-in overlay that runs
+*any* Streamable-HTTP MCP indexer. Nothing in it names a product:
+`CODEGRAPH_IMAGE`, `CODEGRAPH_PORT`, `CODEGRAPH_TOKEN` (plus optional
+`CODEGRAPH_MCP_PATH`, `CODEGRAPH_MOUNT`, `CODEGRAPH_WORKSPACE_DIR`) come from the
+environment; the workspace is mounted **read-only** at the same path the agent
+sees; it publishes no host port; it sits behind a `codegraph` profile so the
+default stack is untouched; and it forwards the common env-var spellings
+(`MCP_PORT`, `MCP_TOKEN`, `MCP_PATH`, `REPO`) so most indexers work unedited.
+An overlay, not a fork of `compose.yaml`: `-f compose.yaml -f
+docker/mcp/codegraph.compose.yaml`.
+
+**`docs/mcp-codegraph.md`** — the operator runbook: registering the server under
+`mcp.servers` (`id`, `transport: streamable_http`, `url`,
+`headers: Authorization: Bearer`, optional `capability: code_graph`, `enabled`),
+why `mcp.servers` cannot be set from the environment (two-level
+`CLAUDIO__SECTION__KEY` overrides only), how to restart the agent, **how readiness
+is now reported over MCP instead of a file** (`initialize` → instructions,
+`tools/list` → names/descriptions/annotations, an advertised status tool called
+once per session, `unknown` when none is advertised), the detection precedence
+(declared capability > advertised lexicon ≥2 > not a code graph), a copy-paste
+`tools/list` handshake for verification, and a troubleshooting table.
+
+**`config.example.yaml`** — the vendor entry became a **commented** generic
+example (`id: codegraph`, `streamable_http`, `url: ${CODEGRAPH_URL}`, bearer
+header, `capability: code_graph`). Commented rather than `enabled: false`,
+because a fresh clone must work with no indexer and the placeholders are not
+secret-managed. The file also now states plainly that Claudio does **not** expand
+`${VAR}` inside the YAML, so the placeholders are to be replaced, not exported.
+
+**`skills/coding/references/code-graph-discovery.md`** (renamed) — same guidance,
+vendor-free: "the connected code-graph MCP server" and *its advertised tools*;
+graph-first for orientation and relationships; read the exact source before
+editing and after changing; **empty is not absence** (not indexed / repo not
+tracked / stale) and say which it was; cite tool + arguments + returned paths;
+never guess a tool name — use the names the prompt lists from `tools/list`;
+readiness is a property of the live connection, and "no code-graph server is
+connected" is a legitimate answer. `SKILL.md`'s frontmatter description, its
+"Codebase discovery (code-graph MCP)" section and its reference line all point at
+the new file.
+
+**`tests/test_mcp_codegraph_wiring.py`** — the old file's *subject* (the wiring)
+survives as plain-text assertions on the deployed artifacts, with none of the old
+file's blockers: it does not read `config.yaml`, and it imports neither `yaml`
+nor `pydantic` nor `google.adk` nor `claudio_backend.engine.adk_engine`. New
+assertions: `docker/<vendor>` absent; `compose.yaml` free of the vendor token and
+still defining `agent`/`web`; the whole `docker/` tree free of the token by
+filename and content; the overlay present, env-driven, read-only-mounted and
+profile-gated; the runbook documenting `streamable_http`, `mcp.servers`,
+`Authorization: Bearer`, `capability: code_graph`, `tools/list`, `initialize` and
+`unknown` readiness; `config.example.yaml` carrying the streamable_http example
+with bearer + capability while keeping **no active** code-graph line (disabled by
+default); the skills tree vendor-free by filename and content; the reference
+renamed with the old filename gone and `SKILL.md` pointing at the new one. The
+21 pre-existing advertisement tests are untouched and still pass alongside them:
+**30 passed**.
+
+## Gate
+
+```
+docker/gortex                                  absent
+compose.yaml / docker/ / config.example.yaml   grep -ri <vendor> -> empty
+claudio-backend/skills                         grep -ri <vendor> -> empty
+docs/mcp-codegraph.md, docker/mcp/codegraph.compose.yaml   present
+tests/test_issue54_gortex.py                   absent
+tests/test_mcp_codegraph_wiring.py             30 passed, 0 failed, 0 errors
+```
+
+## What still carries the vendor name (outside this task's writable scope)
+
+1. **`claudio-ctl`** — still adds `--profile gortex`, lists `gortex` in
+   `ALL_SERVICES`, accepts it as a service argument and iterates it in status.
+   **This is now a live breakage** for anyone with `CLAUDIO_GORTEX_ENABLED=true`:
+   the compose service no longer exists, so `claudio-ctl start` would fail on an
+   unknown service. Needs a follow-up that deletes those five sites (lines ~54-61,
+   126-127, 356) and the `CLAUDIO_GORTEX_ENABLED` switch.
+2. **`.env.example`** — `CLAUDIO_GORTEX_ENABLED`, `GORTEX_VERSION`,
+   `GORTEX_HTTP_TOKEN`, `GORTEX_EXTRA_REPOS` are now dead knobs; replace with the
+   `CODEGRAPH_*` names the overlay reads.
+3. **`doc/docker.md` §9 and `doc/configuration.md`** — the operator prose still
+   documents the deleted service and the old config entry; both should point at
+   `docs/mcp-codegraph.md`.
+4. **`claudio-backend/tests/test_issue53_skill_compression.py`** —
+   `test_coding_skill_wires_gortex_discovery` asserts `"gortex" in body` and the
+   old reference filename, so it now **fails (1 failed, 6 passed)**. It should
+   assert the code-graph wording and the renamed file instead.
+5. **`claudio-backend/tests/test_issue58_tier1.py`** — uses the literal
+   `"gortex_search"` as a sample tool name in a plan/act fixture (harmless, but it
+   is a vendor token in a test).
+6. **`claudio-core/tests/test_codegraph.py`, `test_planact.py`** — C1/C2/C4/C5
+   test-pinned names from the earlier classes; renaming them is part of those
+   classes' migrations, as the coupling table says.
+7. **`scripts/audit_gortex_coupling.py`, `reports/gortex-coupling.json`,
+   `docs/gortex-decoupling-review.md`** — the audit instrument and its record.
+   They keep the name on purpose: they are how the coupling was measured, and the
+   report is regenerated output.
