@@ -443,3 +443,115 @@ def test_unjudged_runs_do_not_dilute_rubric_means(tmp_path: Path) -> None:
     # mean over the judged run only, not (4 + 0) / 2
     assert block["rubric"]["quality"] == {"mean": 4.0, "median": 4.0}
     assert summary["categories"]["bug_fix"]["mix"]["rubric_mean"] == 4.0
+
+# --------------------------------------------------------------------------
+# task manifest filter (--tasks)
+#
+# ``benchmark/results`` accumulates directories for tasks that were removed from
+# ``benchmark/tasks.json``. Those runs are stale artefacts: they must not be
+# counted, categorised or allowed to move a winner. The tests below use a
+# manifest listing one task and a results tree holding a second, unlisted task,
+# and prove the unlisted one is ignored.
+# --------------------------------------------------------------------------
+MANIFEST_TASK = "rate-limiter-offbyone"
+STALE_TASK = "fix_slugify"          # a task id that is NOT in the manifest
+
+
+def make_manifest(root: Path, *ids: str) -> Path:
+    """Write a ``tasks.json``-shaped manifest listing *ids*; returns its path."""
+    return write_json(root / "tasks.json", {"tasks": [{"id": task} for task in ids]})
+
+
+def manifest_tree(root: Path) -> Path:
+    """One listed run (100 tokens) plus one stale run (900 tokens)."""
+    add_run(root, "alpha", MANIFEST_TASK, 1, total=100, rubric=(4, 4, 4))
+    add_run(root, "alpha", STALE_TASK, 1, total=900, rubric=(1, 1, 1))
+    return root
+
+
+def test_load_task_manifest_reads_dict_entries(tmp_path: Path) -> None:
+    assert A.load_task_manifest(make_manifest(tmp_path, "a", "b")) == {"a", "b"}
+
+
+def test_load_task_manifest_accepts_plain_string_entries(tmp_path: Path) -> None:
+    assert A.load_task_manifest(write_json(tmp_path / "tasks.json", {"tasks": ["a", "b"]})) == {"a", "b"}
+
+
+@pytest.mark.parametrize("payload", [{}, {"tasks": "nope"}, {"tasks": []}])
+def test_load_task_manifest_disables_filter_when_unusable(tmp_path: Path, payload: dict) -> None:
+    """A broken/empty manifest means "no filter", never "drop every run"."""
+    assert A.load_task_manifest(write_json(tmp_path / "tasks.json", payload)) is None
+
+
+def test_load_task_manifest_disables_filter_when_absent_or_sentinel(tmp_path: Path) -> None:
+    assert A.load_task_manifest(tmp_path / "missing.json") is None
+    assert A.load_task_manifest(None) is None
+    assert A.load_task_manifest(Path("none")) is None
+
+
+def test_task_id_from_path_follows_the_results_layout(tmp_path: Path) -> None:
+    run_dir = add_run(tmp_path, "alpha", MANIFEST_TASK, 1)
+    assert A.task_id_from_path(run_dir, tmp_path) == MANIFEST_TASK
+    assert A.task_id_from_path(run_dir.parent, tmp_path) == MANIFEST_TASK
+    assert A.task_id_from_path(tmp_path / "alpha", tmp_path) is None
+
+
+def test_discover_runs_ignores_task_dir_not_in_manifest(tmp_path: Path) -> None:
+    """The core guarantee: a non-manifest task dir contributes nothing."""
+    ids = A.load_task_manifest(make_manifest(tmp_path, MANIFEST_TASK))
+    runs = A.discover_runs(manifest_tree(tmp_path), {}, None, ids)
+    assert [r["task_id"] for r in runs] == [MANIFEST_TASK]
+
+    summary = A.build_summary(runs)
+    assert summary["n_runs"] == 1
+    alpha = summary["backends"]["alpha"]
+    assert alpha["n_runs"] == 1
+    # the stale 900-token run is gone, so the mean is the listed run's 100
+    assert alpha["tokens"]["total"]["mean"] == 100.0
+    assert alpha["rubric"]["quality"]["mean"] == 4.0
+    # fix_slugify would have landed in bug_fix; that phantom row never appears
+    assert summary["categories"]["bug_fix"] == {}
+
+
+def test_discover_runs_keeps_everything_without_a_manifest(tmp_path: Path) -> None:
+    runs = A.discover_runs(manifest_tree(tmp_path), {}, None)
+    assert {r["task_id"] for r in runs} == {MANIFEST_TASK, STALE_TASK}
+    assert A.build_summary(runs)["n_runs"] == 2
+
+
+def test_split_by_manifest_partitions_run_dirs(tmp_path: Path) -> None:
+    ids = A.load_task_manifest(make_manifest(tmp_path, MANIFEST_TASK))
+    kept, skipped = A.split_by_manifest(manifest_tree(tmp_path), ids)
+    assert [d.name for d in kept] == ["trial_1"]
+    assert [d.parts[-2] for d in skipped] == [STALE_TASK]
+
+
+def test_cli_tasks_option_excludes_the_stale_task_dir(tmp_path: Path) -> None:
+    tree = manifest_tree(tmp_path)
+    manifest = make_manifest(tmp_path, MANIFEST_TASK)
+    out = tmp_path / "summary.json"
+    assert A.main(["--results", str(tree), "--out", str(out),
+                   "--tasks", str(manifest), "--quiet"]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["n_runs"] == 1
+    # ... and --tasks none restores the unfiltered behaviour
+    assert A.main(["--results", str(tree), "--out", str(out),
+                   "--tasks", "none", "--quiet"]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["n_runs"] == 2
+
+
+def test_cli_defaults_to_benchmark_tasks_json() -> None:
+    assert A.DEFAULT_TASKS_MANIFEST == BENCHMARK_DIR / "tasks.json"
+    assert A.parse_args([]).tasks == A.DEFAULT_TASKS_MANIFEST
+    ids = A.load_task_manifest(A.DEFAULT_TASKS_MANIFEST)
+    assert ids and "rate-limiter-offbyone" in ids
+
+
+@pytest.mark.skipif(not REAL_RESULTS.is_dir(), reason="committed results tree is absent")
+def test_committed_tree_aggregates_exactly_the_manifest_runs(tmp_path: Path) -> None:
+    """``n_runs`` == the number of ``run.json`` under manifest task dirs."""
+    ids = A.load_task_manifest(A.DEFAULT_TASKS_MANIFEST)
+    expected = len([p for p in REAL_RESULTS.rglob("run.json")
+                    if A.task_id_from_path(p.parent, REAL_RESULTS) in ids])
+    out = tmp_path / "summary.json"
+    assert A.main(["--results", str(REAL_RESULTS), "--out", str(out), "--quiet"]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["n_runs"] == expected

@@ -352,3 +352,111 @@ def test_rubric_scale_differences_are_normalised(tmp_path: Path) -> None:
     assert agg["opencode"]["kpis"]["quality"] == 0.8
     assert agg["opencode"]["kpis"]["intelligence"] == 1.0   # 5 on a 0-5 scale
     assert agg["opencode"]["kpis"]["coding_ability"] == 0.9
+
+# --- task manifest filter (--tasks) -------------------------------------------
+#
+# ``benchmark/results`` keeps ``<backend>/<task>/`` dirs for tasks that were
+# dropped from ``benchmark/tasks.json``. Those stale runs must produce no rows
+# and must not move a KPI winner, so the report filters them against the
+# manifest the same way ``aggregate.py`` does.
+
+STALE_TASK = "fix_slugify"          # present on disk, absent from the manifest
+
+
+def make_manifest(root: Path, *ids: str) -> Path:
+    """Write a ``tasks.json``-shaped manifest listing *ids*; returns its path."""
+    path = root / "tasks.json"
+    _write(path, {"tasks": [{"id": task} for task in ids]})
+    return path
+
+
+def add_stale_run(root: Path) -> Path:
+    """Add one ``run.json`` for a task that is *not* in the manifest."""
+    path = root / "opencode" / STALE_TASK / "trial-1" / "run.json"
+    _write(path, {"task_id": STALE_TASK, "backend": "opencode", "trial": 1,
+                  "engine_mode": "real", "ok": True, "tokens": 999999})
+    return path
+
+
+def _cap(root: Path) -> dict:
+    return report._backend_map(report._read_json(root / "capability.json"))
+
+
+def test_load_task_manifest_reads_ids(tmp_path: Path) -> None:
+    assert report.load_task_manifest(make_manifest(tmp_path, *TASKS)) == set(TASKS)
+    assert report.load_task_manifest(tmp_path / "missing.json") is None
+    assert report.load_task_manifest(Path("none")) is None
+    assert report.load_task_manifest(None) is None
+
+
+def test_task_id_from_path_follows_the_results_layout(tmp_path: Path) -> None:
+    run_path = add_stale_run(tmp_path)
+    assert report.task_id_from_path(run_path, tmp_path) == STALE_TASK
+
+
+def test_load_trials_skips_task_dir_not_in_manifest(tmp_path: Path) -> None:
+    root = build_results(tmp_path / "results")
+    add_stale_run(root)
+    ids = report.load_task_manifest(make_manifest(tmp_path, *TASKS))
+
+    trials, warnings = report.load_trials(root, _cap(root), ids)
+    assert {t["task_id"] for t in trials} == set(TASKS)
+    assert all(STALE_TASK not in str(t["run_path"]) for t in trials)
+    assert any("task manifest" in w for w in warnings)
+
+    # without a manifest the stale dir comes back, so the filter is what excludes it
+    unfiltered, _ = report.load_trials(root, _cap(root))
+    assert len(unfiltered) == len(trials) + 1
+    assert any(t["task_id"] == STALE_TASK for t in unfiltered)
+
+
+def test_render_report_omits_non_manifest_task(tmp_path: Path) -> None:
+    root = build_results(tmp_path / "results")
+    add_stale_run(root)
+    ids = report.load_task_manifest(make_manifest(tmp_path, *TASKS))
+
+    text = report.render_report(root, ids)
+    assert STALE_TASK not in text
+    for task in TASKS:
+        assert task in text
+    # and it is rendered when the filter is off
+    assert STALE_TASK in report.render_report(root)
+
+
+def test_cli_tasks_option_excludes_stale_task(tmp_path: Path) -> None:
+    root = build_results(tmp_path / "results")
+    add_stale_run(root)
+    out = tmp_path / "REPORT.md"
+    manifest = make_manifest(tmp_path, *TASKS)
+
+    assert report.main(["--results", str(root), "--out", str(out),
+                        "--tasks", str(manifest)]) == 0
+    assert STALE_TASK not in out.read_text(encoding="utf-8")
+
+    assert report.main(["--results", str(root), "--out", str(out),
+                        "--tasks", "none"]) == 0
+    assert STALE_TASK in out.read_text(encoding="utf-8")
+
+
+def test_cli_defaults_to_benchmark_tasks_json() -> None:
+    assert report.DEFAULT_TASKS_MANIFEST == Path(report.__file__).resolve().parent / "tasks.json"
+    ids = report.load_task_manifest(report.DEFAULT_TASKS_MANIFEST)
+    assert ids and "rate-limiter-offbyone" in ids
+
+
+def test_committed_report_contains_only_manifest_tasks(tmp_path: Path) -> None:
+    """The committed tree renders no task dir that is absent from tasks.json."""
+    real = Path(__file__).resolve().parents[1] / "results"
+    if not real.is_dir():
+        pytest.skip("committed results tree is absent")
+    ids = report.load_task_manifest(report.DEFAULT_TASKS_MANIFEST)
+    trials, _ = report.load_trials(real, report._backend_map(
+        report._read_json(real / "capability.json")), ids)
+    assert trials, "committed results should render something"
+    path_ids = {report.task_id_from_path(t["run_path"], real) for t in trials}
+    assert path_ids <= ids
+    text = report.render_report(real, ids)
+    for stale in ("fix_slugify", "add_config_loader", "fix_csv_top_row",
+                  "fix_parse_ints", "fix_deadline_parse", "fix_retry_backoff",
+                  "fix_sum_list"):
+        assert stale not in text
