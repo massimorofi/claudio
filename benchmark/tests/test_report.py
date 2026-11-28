@@ -495,8 +495,6 @@ def test_summary_embedded_trials_are_filtered_too(tmp_path: Path) -> None:
 
 REAL_RESULTS = Path(__file__).resolve().parents[1] / "results"
 
-STALE_TASK = "fix_slugify"  # written on disk, deliberately absent from the manifest
-
 #: The seven task ids left behind in ``benchmark/results`` by older manifests.
 STALE_TASK_IDS = (
     "add_config_loader",
@@ -507,13 +505,6 @@ STALE_TASK_IDS = (
     "fix_slugify",
     "fix_sum_list",
 )
-
-
-def make_manifest(root: Path, *ids: str) -> Path:
-    """Write a ``tasks.json``-shaped manifest listing *ids*; returns its path."""
-    path = root / "tasks.json"
-    _write(path, {"version": 1, "tasks": [{"id": i, "title": i.title()} for i in ids]})
-    return path
 
 
 def manifest_tree(root: Path) -> Path:
