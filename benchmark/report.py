@@ -38,11 +38,15 @@ from typing import Any, Iterable
 
 BACKENDS = ("claude_code", "opencode", "google_adk")
 
-#: Task manifest (``--tasks``). Only ``results/<backend>/<task>/`` directories whose
-#: task id is listed here are rendered. ``benchmark/results`` keeps stale dirs from
-#: removed tasks, which would otherwise show up as phantom rows and move the KPI
-#: winners. ``--tasks none`` turns the filter off.
-DEFAULT_TASKS_MANIFEST = Path(__file__).resolve().parent / "tasks.json"
+#: Task manifest (``--manifest``, formerly ``--tasks``). Only the
+#: ``results/<backend>/<task>/`` directories whose task id is listed here are
+#: rendered in the per-task detail table. ``benchmark/results`` keeps stale dirs
+#: from removed tasks, which would otherwise show up as phantom rows and move the
+#: KPI winners. ``--manifest none`` (or ``off``) turns the filter off.
+DEFAULT_TASK_MANIFEST = Path(__file__).resolve().parent / "tasks.json"
+#: Back-compatible spelling of :data:`DEFAULT_TASK_MANIFEST` (kept for callers
+#: that imported it before the flag was renamed to ``--manifest``).
+DEFAULT_TASKS_MANIFEST = DEFAULT_TASK_MANIFEST
 NO_MANIFEST = {"", "none", "off", "null"}
 
 #: Canonical backend id <- aliases seen in the wild (CLI names, config kinds).
@@ -242,23 +246,27 @@ def _engine_mode(record: dict[str, Any], backend: str, available: bool) -> str:
     return "real" if available else "stub"
 
 
-def load_task_manifest(path: Path | None) -> set[str] | None:
-    """Task ids declared by the task manifest (``benchmark/tasks.json``).
+def load_manifest_ids(path: Path | str | None) -> set[str]:
+    """Task ids declared by a task manifest (``benchmark/tasks.json``).
 
-    Accepts ``{"tasks": [{"id": ...}, ...]}`` and ``{"tasks": ["<id>", ...]}``.
-    Returns ``None`` - meaning *do not filter* - when *path* is empty or one of
-    ``none``/``off``/``null``, or when the file is missing, unparsable or has an
-    empty ``tasks`` list: a broken manifest must never silently empty the report.
+    Same contract as ``aggregate.load_manifest_ids``: reads ``tasks[].id`` and
+    also accepts ``task_id`` / ``name`` keys and a plain
+    ``{"tasks": ["<id>", ...]}`` list, so hand-written manifests keep working.
+
+    Always returns a ``set`` (possibly empty) - the caller decides what an empty
+    set means. A missing file, unparsable JSON, a missing ``tasks`` list and the
+    ``none``/``off``/``null`` sentinels all yield ``set()``. Use
+    :func:`load_task_manifest` for the "``None`` means do not filter" variant.
     """
     if path is None:
-        return None
+        return set()
     text = str(path).strip()
-    if text.lower() in NO_MANIFEST:
-        return None
+    if not text or text.lower() in NO_MANIFEST:
+        return set()
     data = _read_json(Path(text))
     entries = data.get("tasks") if isinstance(data, dict) else None
     if not isinstance(entries, list):
-        return None
+        return set()
     ids: set[str] = set()
     for entry in entries:
         if isinstance(entry, dict):
@@ -267,7 +275,28 @@ def load_task_manifest(path: Path | None) -> set[str] | None:
                 ids.add(str(task_id))
         elif isinstance(entry, str) and entry.strip():
             ids.add(entry.strip())
-    return ids or None
+    return ids
+
+
+def load_task_manifest(path: Path | None) -> set[str] | None:
+    """Task ids declared by the task manifest, or ``None`` = *do not filter*.
+
+    Thin wrapper around :func:`load_manifest_ids` that keeps the historical
+    safety behaviour: a missing, unparsable or empty manifest - and the
+    ``none``/``off``/``null`` sentinels - disable filtering instead of silently
+    dropping every run.
+    """
+    if path is None:
+        return None
+    text = str(path).strip()
+    if text.lower() in NO_MANIFEST:
+        return None
+    ids = load_manifest_ids(text)
+    if not ids:
+        print(f"report: no usable task ids in manifest, filter disabled: {text}",
+              file=sys.stderr)
+        return None
+    return ids
 
 
 def task_id_from_path(run_path: Path, results_dir: Path) -> str | None:
@@ -285,16 +314,21 @@ def task_id_from_path(run_path: Path, results_dir: Path) -> str | None:
 
 
 def load_trials(results_dir: Path, capability: dict[str, Any],
-                task_ids: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+                task_ids: set[str] | None = None, *,
+                manifest_ids: set[str] | None = None
+                ) -> tuple[list[dict[str, Any]], list[str]]:
     """Collect every ``run.json`` + sibling ``judge.json`` under *results_dir*.
 
     ``task_ids`` (from :func:`load_task_manifest`) restricts the scan to task
     directories listed in the task manifest; runs belonging to tasks that are no
     longer in the manifest are skipped. ``None`` keeps everything.
+    ``manifest_ids`` is an alias for the same filter (the spelling
+    ``aggregate.discover_runs`` uses); when both are given ``manifest_ids`` wins.
 
     Returns ``(trials, warnings)``; a warning is emitted for each unreadable file
     so the report can be honest about incomplete input.
     """
+    ids = manifest_ids if manifest_ids is not None else task_ids
     warnings: list[str] = []
     trials: list[dict[str, Any]] = []
     if not results_dir.is_dir():
@@ -302,9 +336,9 @@ def load_trials(results_dir: Path, capability: dict[str, Any],
 
     skipped_not_in_manifest = 0
     for run_path in sorted(results_dir.rglob("run.json")):
-        if task_ids is not None:
+        if ids is not None:
             path_task = task_id_from_path(run_path, results_dir)
-            if path_task is not None and str(path_task) not in task_ids:
+            if path_task is not None and str(path_task) not in ids:
                 skipped_not_in_manifest += 1
                 continue
         run = _read_json(run_path)
@@ -1125,20 +1159,26 @@ def probe_environment() -> dict[str, str]:
     return probe
 
 
-def render_report(results_dir: Path, task_ids: set[str] | None = None) -> str:
+def render_report(results_dir: Path, task_ids: set[str] | None = None, *,
+                  manifest_ids: set[str] | None = None) -> str:
     """Render the markdown report.
 
     ``task_ids`` restricts rendering to task directories listed in the task
     manifest (see :func:`load_task_manifest`); ``None`` renders everything found.
+    ``manifest_ids`` is the equivalent filter for the per-task detail table (the
+    ``aggregate.discover_runs`` spelling of the same idea) and wins when both are
+    passed. The ``summary.json`` / ``capability.json`` sections are rendered the
+    same way either way.
     """
+    ids = manifest_ids if manifest_ids is not None else task_ids
     summary = _read_json(results_dir / "summary.json") or {}
     capability_doc = _read_json(results_dir / "capability.json") or {}
     capability = _backend_map(summary)
     capability = {b: {**_backend_map(capability_doc).get(b, {}), **capability.get(b, {})}
                   for b in BACKENDS}
-    trials, warnings = load_trials(results_dir, capability, task_ids)
+    trials, warnings = load_trials(results_dir, capability, ids)
     if not trials:
-        extra, extra_warnings = trials_from_summary(summary, capability, task_ids)
+        extra, extra_warnings = trials_from_summary(summary, capability, ids)
         trials.extend(extra)
         warnings.extend(extra_warnings)
 
@@ -1233,21 +1273,51 @@ def _build_trial(backend: str, task_id: str, run: dict[str, Any], judge: dict[st
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Render BENCHMARK_REPORT.md from benchmark/results artifacts.")
-    parser.add_argument("--results", default="benchmark/results", help="directory holding summary.json/capability.json/run.json/judge.json")
-    parser.add_argument("--tasks", default=str(DEFAULT_TASKS_MANIFEST),
-                        help="task manifest JSON; only results/<backend>/<task>/ dirs whose id "
-                             "is listed here are rendered (default: benchmark/tasks.json; "
-                             "'none' disables the filter)")
+def build_parser() -> argparse.ArgumentParser:
+    """CLI for ``report.py`` (split out so ``--help`` can be asserted in tests)."""
+    parser = argparse.ArgumentParser(
+        description="Render BENCHMARK_REPORT.md from benchmark/results artifacts.")
+    parser.add_argument("--results", default="benchmark/results",
+                        help="directory holding summary.json/capability.json/run.json/judge.json")
+    parser.add_argument("--manifest", default=str(DEFAULT_TASK_MANIFEST), metavar="PATH",
+                        help="task manifest JSON; the per-task detail table only renders "
+                             "results/<backend>/<task>/ dirs whose id is listed here "
+                             "(default: benchmark/tasks.json; 'none' or 'off' disables the "
+                             "filter so stale result dirs are shown again)")
+    parser.add_argument("--tasks", default=None, metavar="PATH",
+                        help="deprecated alias for --manifest; when given it wins over "
+                             f"--manifest (default: {DEFAULT_TASK_MANIFEST})")
     parser.add_argument("--out", default="BENCHMARK_REPORT.md", help="markdown file to write")
     parser.add_argument("--stdout", action="store_true", help="also print the report to stdout")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
+
+
+def manifest_arg_from_args(args: argparse.Namespace) -> str | None:
+    """Which manifest path the CLI asked for (``--tasks`` still wins)."""
+    tasks = getattr(args, "tasks", None)
+    if tasks:
+        if getattr(args, "manifest", None) not in (None, str(DEFAULT_TASK_MANIFEST)):
+            print(f"report: --tasks {tasks!r} overrides --manifest {args.manifest!r}",
+                  file=sys.stderr)
+        return str(tasks)
+    manifest = getattr(args, "manifest", None)
+    return str(manifest) if manifest else None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     results_dir = Path(args.results)
-    task_ids = load_task_manifest(Path(args.tasks))
+    manifest_arg = manifest_arg_from_args(args)
+    # ``load_manifest_ids`` -> the ids on disk that are *not* listed here are
+    # stale result dirs and must not reach the per-task detail table.
+    task_ids = load_task_manifest(Path(manifest_arg)) if manifest_arg else None
     try:
-        text = render_report(results_dir, task_ids)
+        text = render_report(results_dir, manifest_ids=task_ids)
     except Exception as exc:  # never leave the repo without a report
         text = (f"# Benchmark Report\n\n## Executive summary\n\nReport generation failed: `{exc!r}`.\n"
                 "\nNo backend result should be inferred from this file.\n")
