@@ -483,3 +483,218 @@ def test_summary_embedded_trials_are_filtered_too(tmp_path: Path) -> None:
     # unfiltered, both embedded trials survive
     both, _ = report.trials_from_summary(report._read_json(root / "summary.json"), {})
     assert len(both) == 2
+
+
+# --- task manifest filter (--tasks) -----------------------------------------
+#
+# ``benchmark/results`` keeps accumulating ``<backend>/<task>/`` directories for
+# tasks that were later removed from ``benchmark/tasks.json``. Those runs are
+# stale: they must not turn into phantom Per-task rows or move a KPI winner.
+# Every test below builds a tree holding a listed task *and* an unlisted one and
+# proves the unlisted directory is ignored.
+
+REAL_RESULTS = Path(__file__).resolve().parents[1] / "results"
+
+STALE_TASK = "fix_slugify"  # written on disk, deliberately absent from the manifest
+
+#: The seven task ids left behind in ``benchmark/results`` by older manifests.
+STALE_TASK_IDS = (
+    "add_config_loader",
+    "fix_csv_top_row",
+    "fix_deadline_parse",
+    "fix_parse_ints",
+    "fix_retry_backoff",
+    "fix_slugify",
+    "fix_sum_list",
+)
+
+
+def make_manifest(root: Path, *ids: str) -> Path:
+    """Write a ``tasks.json``-shaped manifest listing *ids*; returns its path."""
+    path = root / "tasks.json"
+    _write(path, {"version": 1, "tasks": [{"id": i, "title": i.title()} for i in ids]})
+    return path
+
+
+def manifest_tree(root: Path) -> Path:
+    """Stub tree: every ``TASKS`` run plus two runs for the unlisted ``STALE_TASK``."""
+    root = build_results(root)
+    for trial in (1, 2):
+        base = root / "claude_code" / STALE_TASK / f"trial-{trial}"
+        _write(base / "run.json", {
+            "task_id": STALE_TASK, "backend": "claude_code", "trial": trial,
+            "engine_mode": "real", "ok": True, "tokens": 9000, "latency_ms": 5000,
+        })
+        _write(base / "judge.json", {
+            "task_id": STALE_TASK, "backend": "claude_code", "judge_mode": "heuristic",
+            "scores": {"quality": 5, "intelligence": 5, "coding_ability": 5},
+        })
+    return root
+
+
+def _capability(root: Path) -> dict:
+    return report._backend_map(report._read_json(root / "capability.json"))
+
+
+# --- manifest parsing --------------------------------------------------------
+
+def test_load_task_manifest_reads_dict_and_string_entries(tmp_path: Path) -> None:
+    assert report.load_task_manifest(make_manifest(tmp_path, "a", "b")) == {"a", "b"}
+    path = tmp_path / "strings.json"
+    _write(path, {"tasks": ["a", " b ", {"id": "c"}]})
+    assert report.load_task_manifest(path) == {"a", "b", "c"}
+
+
+@pytest.mark.parametrize("payload", [{}, {"tasks": []}, {"tasks": "nope"}, {"tasks": {}}])
+def test_load_task_manifest_disables_filter_when_unusable(tmp_path: Path, payload: dict) -> None:
+    """A broken or empty manifest means *no filter*, never *drop every run*."""
+    path = tmp_path / "tasks.json"
+    _write(path, payload)
+    assert report.load_task_manifest(path) is None
+
+
+def test_load_task_manifest_disables_filter_when_absent_or_sentinel(tmp_path: Path) -> None:
+    assert report.load_task_manifest(None) is None
+    assert report.load_task_manifest(Path("none")) is None
+    assert report.load_task_manifest(Path("off")) is None
+    assert report.load_task_manifest(tmp_path / "missing.json") is None
+
+
+def test_default_tasks_manifest_is_benchmark_tasks_json() -> None:
+    assert report.DEFAULT_TASKS_MANIFEST.name == "tasks.json"
+    assert report.DEFAULT_TASKS_MANIFEST.parent.name == "benchmark"
+    ids = report.load_task_manifest(report.DEFAULT_TASKS_MANIFEST)
+    assert ids, "benchmark/tasks.json must yield a non-empty id set"
+    assert not (set(STALE_TASK_IDS) & ids), "stale ids must not be in the manifest"
+
+
+# --- path helper -------------------------------------------------------------
+
+def test_task_id_from_path_uses_the_task_directory(tmp_path: Path) -> None:
+    run = tmp_path / "claude_code" / STALE_TASK / "trial-1" / "run.json"
+    run.parent.mkdir(parents=True)
+    run.write_text("{}", encoding="utf-8")
+    assert report.task_id_from_path(run, tmp_path) == STALE_TASK
+    # a run.json with no task level falls back to the id inside run.json
+    assert report.task_id_from_path(tmp_path / "run.json", tmp_path) is None
+
+
+# --- load_trials -------------------------------------------------------------
+
+def test_load_trials_ignores_task_dir_not_in_manifest(tmp_path: Path) -> None:
+    """The core guarantee: a non-manifest task dir contributes nothing."""
+    root = manifest_tree(tmp_path / "results")
+    capability = _capability(root)
+    listed = report.load_task_manifest(make_manifest(tmp_path, *TASKS))
+
+    trials, warnings = report.load_trials(root, capability, listed)
+
+    assert {t["task_id"] for t in trials} == set(TASKS)
+    assert STALE_TASK not in {t["task_id"] for t in trials}
+    assert all(t["tokens"] != 9000 for t in trials)  # the stale run's tokens are gone
+    assert any("task not in the task manifest" in w for w in warnings)
+
+
+def test_load_trials_keeps_everything_without_a_manifest(tmp_path: Path) -> None:
+    """Without ``task_ids`` the stale dir still shows up - i.e. the filter is what
+    removes it, not the tree layout."""
+    root = manifest_tree(tmp_path / "results")
+    unfiltered, warnings = report.load_trials(root, _capability(root))
+    filtered, _ = report.load_trials(root, _capability(root),
+                                     report.load_task_manifest(make_manifest(tmp_path, *TASKS)))
+    assert STALE_TASK in {t["task_id"] for t in unfiltered}
+    assert len(filtered) == len(unfiltered) - 2
+    assert not any("manifest" in w for w in warnings)
+
+
+def test_load_trials_filters_nested_trial_dirs_of_the_same_task(tmp_path: Path) -> None:
+    """Every trial dir under an unlisted task is skipped, not just the first."""
+    root = manifest_tree(tmp_path / "results")
+    for trial in (3, 4):
+        base = root / "opencode" / STALE_TASK / f"trial-{trial}"
+        _write(base / "run.json", {"task_id": STALE_TASK, "backend": "opencode",
+                                   "trial": trial, "engine_mode": "real", "ok": True,
+                                   "tokens": 1})
+    listed = report.load_task_manifest(make_manifest(tmp_path, *TASKS))
+    trials, _ = report.load_trials(root, _capability(root), listed)
+    assert not [t for t in trials if t["task_id"] == STALE_TASK]
+    assert len(trials) == len(TASKS) * len(BACKEND_IDS) * 2
+
+
+# --- render_report -----------------------------------------------------------
+
+def test_render_report_omits_task_dirs_outside_the_manifest(tmp_path: Path) -> None:
+    root = manifest_tree(tmp_path / "results")
+    text = report.render_report(root, report.load_task_manifest(make_manifest(tmp_path, *TASKS)))
+    assert STALE_TASK not in text
+    for task in TASKS:
+        assert task in text
+    for heading in REQUIRED_HEADINGS:
+        assert heading in text
+
+
+def test_render_report_without_a_manifest_shows_the_stale_task(tmp_path: Path) -> None:
+    """Counterpart of the test above: unfiltered rendering is polluted."""
+    root = manifest_tree(tmp_path / "results")
+    assert STALE_TASK in report.render_report(root)
+
+
+def test_summary_fallback_also_respects_the_manifest(tmp_path: Path) -> None:
+    """A stale ``summary.json`` must not leak a removed task through the fallback."""
+    root = tmp_path / "results"
+    root.mkdir()
+    _write(root / "summary.json", {
+        "judge_mode": "heuristic",
+        "backends": {"claude_code": {"available": True, "engine_mode": "real"}},
+        "trials": [
+            {"backend": "claude_code", "task_id": "t1", "engine_mode": "real",
+             "tokens": 500, "passed": True},
+            {"backend": "claude_code", "task_id": STALE_TASK, "engine_mode": "real",
+             "tokens": 500, "passed": True},
+        ],
+    })
+    assert STALE_TASK not in report.render_report(root, {"t1"})
+    assert "t1" in report.render_report(root, {"t1"})
+    assert STALE_TASK in report.render_report(root)
+
+
+# --- CLI ---------------------------------------------------------------------
+
+def test_cli_tasks_option_excludes_the_stale_task_dir(tmp_path: Path) -> None:
+    root = manifest_tree(tmp_path / "results")
+    manifest = make_manifest(tmp_path, *TASKS)
+    out = tmp_path / "REPORT.md"
+    assert report.main(["--results", str(root), "--out", str(out),
+                        "--tasks", str(manifest)]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert STALE_TASK not in text
+    for task in TASKS:
+        assert task in text
+    # ``--tasks none`` restores the unfiltered behaviour
+    assert report.main(["--results", str(root), "--out", str(out), "--tasks", "none"]) == 0
+    assert STALE_TASK in out.read_text(encoding="utf-8")
+
+
+def test_cli_defaults_to_the_committed_task_manifest(tmp_path: Path) -> None:
+    """No ``--tasks`` flag: the default ``benchmark/tasks.json`` still filters."""
+    listed = sorted(report.load_task_manifest(report.DEFAULT_TASKS_MANIFEST))[0]
+    tree = tmp_path / "results"
+    for task, tokens in ((listed, 100), (STALE_TASK, 9000)):
+        _write(tree / "claude_code" / task / "trial-1" / "run.json", {
+            "task_id": task, "backend": "claude_code", "trial": 1,
+            "engine_mode": "real", "ok": True, "tokens": tokens,
+        })
+    out = tmp_path / "REPORT.md"
+    assert report.main(["--results", str(tree), "--out", str(out)]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert listed in text
+    assert STALE_TASK not in text
+
+
+@pytest.mark.skipif(not REAL_RESULTS.is_dir(), reason="committed results tree is absent")
+def test_committed_tree_report_contains_no_stale_task_ids(tmp_path: Path) -> None:
+    out = tmp_path / "REPORT.md"
+    assert report.main(["--results", str(REAL_RESULTS), "--out", str(out)]) == 0
+    text = out.read_text(encoding="utf-8")
+    for stale in STALE_TASK_IDS:
+        assert stale not in text, f"stale task {stale!r} leaked into the report"
