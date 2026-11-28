@@ -1,0 +1,35 @@
+{
+  "backend": "google_adk",
+  "changed_files": [
+    "BENCHMARK_SOLUTION.md"
+  ],
+  "diff_lines": 9,
+  "duration_s": 0.086,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 0,
+    "retries": 0,
+    "timeouts": 0,
+    "tool_errors": 0
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "fixtures/csv-normalizer-dedup",
+  "session_events": 9,
+  "task_id": "csv-normalizer-dedup",
+  "timed_out": false,
+  "timeout_s": 60.0,
+  "tokens": {
+    "cache_read": 608,
+    "cache_write": 0,
+    "input": 1943,
+    "output": 882,
+    "total": 3433
+  },
+  "trial": 1,
+  "verification_passed": true,
+  "verify_command": "test -f BENCHMARK_SOLUTION.md",
+  "verify_exit_code": 0
+}

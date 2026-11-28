@@ -1,0 +1,1 @@
+Fix the token-bucket rate limiter in app/rate_limiter.py. Two defects are reported in README.md: allow() rejects a request whose cost equals the tokens available (a capacity-3 bucket only serves 2 requests), and wait_seconds() divides by the bucket size instead of the refill rate. Repair app/rate_limiter.py only; tests/test_rate_limiter.py is the contract and must not be edited.

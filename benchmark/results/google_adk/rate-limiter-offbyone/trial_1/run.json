@@ -1,0 +1,35 @@
+{
+  "backend": "google_adk",
+  "changed_files": [
+    "BENCHMARK_SOLUTION.md"
+  ],
+  "diff_lines": 9,
+  "duration_s": 0.083,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 0,
+    "retries": 0,
+    "timeouts": 0,
+    "tool_errors": 0
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "fixtures/rate-limiter-offbyone",
+  "session_events": 9,
+  "task_id": "rate-limiter-offbyone",
+  "timed_out": false,
+  "timeout_s": 60.0,
+  "tokens": {
+    "cache_read": 33,
+    "cache_write": 0,
+    "input": 3105,
+    "output": 1001,
+    "total": 4139
+  },
+  "trial": 1,
+  "verification_passed": true,
+  "verify_command": "test -f BENCHMARK_SOLUTION.md",
+  "verify_exit_code": 0
+}
