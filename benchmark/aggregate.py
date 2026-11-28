@@ -55,9 +55,12 @@ Usage::
 Task manifest
 -------------
 Only ``results/<backend>/<task>/`` directories whose task id appears in the
-manifest (``--tasks``, default ``benchmark/tasks.json``) are aggregated; result
-dirs left behind by removed tasks are skipped. ``--tasks none`` disables the
-filter and aggregates every ``run.json`` on disk.
+manifest (``--manifest``, default ``benchmark/tasks.json``; ``--tasks`` is the
+deprecated alias) are aggregated; result dirs left behind by removed tasks are
+**skipped, never deleted** - this tool never removes or moves anything under
+``benchmark/results``. ``--manifest none`` (or ``off``) disables the filter and
+aggregates every ``run.json`` on disk. When filtering, the number of dropped
+runs is reported as ``aggregate: skipped N non-manifest run(s)``.
 
 Exit ``0`` with a compact markdown table on stdout (progress on stderr), or
 exit ``1`` when no ``run.json`` is found.
@@ -213,25 +216,27 @@ def infer_category(task_id: str, explicit: Any = None,
     return FALLBACK_CATEGORY
 
 
-def load_task_manifest(path: Path | None) -> set[str] | None:
-    """Task ids declared by the task manifest (``benchmark/tasks.json``).
+def load_manifest_ids(path: Path | str) -> set[str]:
+    """Task ids declared by a task manifest (``benchmark/tasks.json``).
 
-    Accepts ``{"tasks": [{"id": ...}, ...]}`` and ``{"tasks": ["<id>", ...]}``.
-    Returns ``None`` - meaning *do not filter* - when *path* is empty or one of
-    ``none``/``off``/``null``, or when the file is missing, unparsable or has an
-    empty ``tasks`` list: a broken manifest must never silently drop every run.
+    Reads the manifest's ``tasks[].id`` entries. Also accepts ``task_id`` /
+    ``name`` keys and a plain ``{"tasks": ["<id>", ...]}`` list, so hand-written
+    manifests keep working.
+
+    Always returns a ``set`` (possibly empty): the caller decides what an empty
+    set means. Missing file, unparsable JSON, no ``tasks`` list and the
+    ``none``/``off`` sentinels all yield ``set()``. Use
+    :func:`load_task_manifest` for the "``None`` means do not filter" variant.
     """
     if path is None:
-        return None
+        return set()
     text = str(path).strip()
-    if text.lower() in NO_MANIFEST:
-        return None
+    if not text or text.lower() in NO_MANIFEST:
+        return set()
     data = _load_json(Path(text))
     entries = data.get("tasks") if isinstance(data, dict) else None
     if not isinstance(entries, list):
-        print(f"aggregate: no 'tasks' list in manifest, filter disabled: {text}",
-              file=sys.stderr)
-        return None
+        return set()
     ids: set[str] = set()
     for entry in entries:
         if isinstance(entry, dict):
@@ -240,24 +245,64 @@ def load_task_manifest(path: Path | None) -> set[str] | None:
                 ids.add(str(task_id))
         elif isinstance(entry, str) and entry.strip():
             ids.add(entry.strip())
+    return ids
+
+
+def load_task_manifest(path: Path | None) -> set[str] | None:
+    """Task ids declared by the task manifest, or ``None`` = *do not filter*.
+
+    Thin wrapper around :func:`load_manifest_ids` that keeps the historical
+    safety behaviour: a missing, unparsable or empty manifest - and the
+    ``none``/``off``/``null`` sentinels - disable filtering instead of silently
+    dropping every run.
+    """
+    if path is None:
+        return None
+    text = str(path).strip()
+    if text.lower() in NO_MANIFEST:
+        return None
+    ids = load_manifest_ids(Path(text))
     if not ids:
-        print(f"aggregate: empty task manifest, filter disabled: {text}", file=sys.stderr)
+        print(f"aggregate: no usable task ids in manifest, filter disabled: {text}",
+              file=sys.stderr)
         return None
     return ids
 
 
-def task_id_from_path(directory: Path, results_dir: Path) -> str | None:
-    """Task id implied by the ``results/<backend>/<task>/...`` layout.
+def task_id_from_path(directory: Path, results_dir: Path | None = None) -> str | None:
+    """Task id implied by the ``results/<backend>/<task_id>/trial_<k>`` layout.
 
-    ``directory`` is the directory holding ``run.json``. ``None`` when the path
-    has no task level (e.g. ``results/<backend>/run.json``).
+    With *results_dir*: ``directory`` is made relative to it and the second
+    component (the task level) is returned - ``None`` when the path has no task
+    level (e.g. ``results/<backend>/run.json``).
+
+    Without *results_dir* the task level is inferred from the path shape alone,
+    so ``task_id_from_path(Path("benchmark/results/claude_code/my-task/trial_1"))``
+    returns ``"my-task"``. A trailing ``trial_N``/``run_N`` (or ``run.json``)
+    component is skipped first; ``None`` when nothing plausible is left.
     """
-    try:
-        relative = directory.relative_to(results_dir)
-    except ValueError:
-        return None
-    parts = relative.parts
-    return parts[1] if len(parts) >= 2 else None
+    if results_dir is not None:
+        try:
+            relative = directory.relative_to(results_dir)
+        except ValueError:
+            return None
+        parts = relative.parts
+        return parts[1] if len(parts) >= 2 else None
+    return _task_id_from_layout(directory)
+
+
+def _task_id_from_layout(directory: Path) -> str | None:
+    """Task level of ``.../results/<backend>/<task_id>/trial_<k>`` without a root."""
+    parts = [str(part) for part in Path(directory).parts]
+    if parts and Path(parts[-1]).suffix.lower() in {".json", ".md", ".txt"}:
+        parts.pop()
+    while parts and _is_trial_dir(parts[-1]):
+        parts.pop()
+    names = [part.lower() for part in parts]
+    if "results" in names:
+        index = len(names) - 1 - names[::-1].index("results")
+        return parts[index + 2] if index + 2 < len(parts) else None
+    return parts[-1] if len(parts) >= 2 else None
 
 
 def split_by_manifest(results_dir: Path, task_ids: set[str] | None,
@@ -388,17 +433,25 @@ def _is_trial_dir(name: str) -> bool:
 
 def discover_runs(results_dir: Path, capability: dict[str, dict[str, Any]] | None = None,
                   category_map: dict[str, str] | None = None,
-                  task_ids: set[str] | None = None) -> list[dict[str, Any]]:
+                  task_ids: set[str] | None = None,
+                  manifest_ids: set[str] | None = None) -> list[dict[str, Any]]:
     """Every directory under ``results_dir`` that holds a ``run.json``.
 
-    ``task_ids`` (from :func:`load_task_manifest`) restricts the scan to the task
-    directories listed in the task manifest, so leftover result dirs for removed
-    tasks are skipped instead of polluting the summary. ``None`` keeps everything.
+    ``manifest_ids`` (alias ``task_ids``; see :func:`load_manifest_ids`) restricts
+    the scan to the task directories listed in the task manifest, so leftover
+    result dirs for removed tasks are *skipped* - never deleted or moved.
+    ``None`` (the default) keeps everything, which is the back-compatible
+    behaviour ``report.py`` relies on. A set passed as the second positional
+    argument is read as ``manifest_ids``.
     """
-    kept, skipped = split_by_manifest(results_dir, task_ids)
-    if skipped:
-        print(f"aggregate: skipped {len(skipped)} run dir(s) whose task is not in "
-              f"the task manifest", file=sys.stderr)
+    if isinstance(capability, (set, frozenset)):
+        # Called as ``discover_runs(results_dir, manifest_ids)``.
+        capability, manifest_ids = None, capability
+    ids = manifest_ids if manifest_ids is not None else task_ids
+    kept, skipped = split_by_manifest(results_dir, ids)
+    if ids is not None and skipped:
+        print(f"aggregate: skipped {len(skipped)} non-manifest run(s)",
+              file=sys.stderr)
     return sorted(
         (read_run(d, results_dir, capability, category_map) for d in kept),
         key=lambda r: (r["backend"], r["category"], r["task_id"], r["run_id"]),
@@ -630,12 +683,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="summary.json path (default: <results>/summary.json)")
     parser.add_argument("--category-map", type=Path, default=None,
                         help="JSON file mapping task_id -> category")
-    parser.add_argument("--tasks", type=Path, default=DEFAULT_TASKS_MANIFEST,
-                        help="task manifest JSON; only results/<backend>/<task>/ dirs whose "
-                             "id is listed here are aggregated (default: benchmark/tasks.json; "
-                             "'none' disables the filter)")
+    parser.add_argument("--manifest", type=Path, default=None,
+                        help="task manifest JSON used as a filter: only "
+                             "results/<backend>/<task>/ dirs whose id is listed here are "
+                             "aggregated (default: benchmark/tasks.json; the literal values "
+                             "'none' or 'off' disable filtering; nothing is ever deleted)")
+    parser.add_argument("--tasks", type=Path, default=None,
+                        help="deprecated alias for --manifest")
     parser.add_argument("--quiet", action="store_true", help="do not print the markdown table")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # ``--manifest`` is the documented flag; ``--tasks`` stays as a hidden alias.
+    if args.manifest is None:
+        args.manifest = args.tasks if args.tasks is not None else DEFAULT_TASKS_MANIFEST
+    args.tasks = args.manifest
+    return args
+
+
+def manifest_arg_from_args(args: argparse.Namespace) -> Path | str | None:
+    """Effective ``--manifest`` value (falling back to ``--tasks``) for a CLI run."""
+    value = getattr(args, "manifest", None)
+    if value is None:
+        value = getattr(args, "tasks", None)
+    return DEFAULT_TASKS_MANIFEST if value is None else value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -645,8 +714,9 @@ def main(argv: list[str] | None = None) -> int:
 
     capability = load_capability(results_dir)
     category_map = load_category_map(args.category_map)
-    task_ids = load_task_manifest(args.tasks)
-    runs = discover_runs(results_dir, capability, category_map, task_ids)
+    manifest_ids = load_task_manifest(manifest_arg_from_args(args))
+    runs = discover_runs(results_dir, capability, category_map,
+                         manifest_ids=manifest_ids)
     if not runs:
         print(f"aggregate: no run.json found under {results_dir}", file=sys.stderr)
         return 1
