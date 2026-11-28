@@ -1138,7 +1138,7 @@ def render_report(results_dir: Path, task_ids: set[str] | None = None) -> str:
                   for b in BACKENDS}
     trials, warnings = load_trials(results_dir, capability, task_ids)
     if not trials:
-        extra, extra_warnings = trials_from_summary(summary, capability)
+        extra, extra_warnings = trials_from_summary(summary, capability, task_ids)
         trials.extend(extra)
         warnings.extend(extra_warnings)
 
@@ -1162,8 +1162,14 @@ def render_report(results_dir: Path, task_ids: set[str] | None = None) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
-def trials_from_summary(summary: dict[str, Any], capability: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Fallback: some runners embed trials directly in ``summary.json``."""
+def trials_from_summary(summary: dict[str, Any], capability: dict[str, Any],
+                        task_ids: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fallback: some runners embed trials directly in ``summary.json``.
+
+    ``task_ids`` (see :func:`load_task_manifest`) also drops embedded trials whose
+    task is no longer in the manifest, so a stale ``summary.json`` cannot leak a
+    removed task into the report either.
+    """
     out: list[dict[str, Any]] = []
     warnings: list[str] = []
     raw = summary.get("trials") or summary.get("runs") or summary.get("results")
@@ -1178,8 +1184,10 @@ def trials_from_summary(summary: dict[str, Any], capability: dict[str, Any]) -> 
         if not backend:
             warnings.append("summary trial with unknown backend skipped")
             continue
-        out.append(_build_trial(backend, str(run.get("task_id") or run.get("task") or "unknown"),
-                                run, judge, capability))
+        task_id = str(run.get("task_id") or run.get("task") or "unknown")
+        if task_ids is not None and task_id not in task_ids:
+            continue
+        out.append(_build_trial(backend, task_id, run, judge, capability))
     return out, warnings
 
 

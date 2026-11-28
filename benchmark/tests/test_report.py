@@ -460,3 +460,26 @@ def test_committed_report_contains_only_manifest_tasks(tmp_path: Path) -> None:
                   "fix_parse_ints", "fix_deadline_parse", "fix_retry_backoff",
                   "fix_sum_list"):
         assert stale not in text
+
+
+def test_summary_embedded_trials_are_filtered_too(tmp_path: Path) -> None:
+    """A stale ``summary.json`` cannot leak a removed task through the fallback."""
+    root = tmp_path / "results"
+    root.mkdir()
+    _write(root / "summary.json", {
+        "judge_mode": "heuristic",
+        "backends": {"claude_code": {"available": True, "engine_mode": "real"}},
+        "trials": [
+            {"backend": "claude_code", "task_id": "rate-limiter-offbyone",
+             "engine_mode": "real", "tokens": 500, "passed": True},
+            {"backend": "claude_code", "task_id": STALE_TASK,
+             "engine_mode": "real", "tokens": 900, "passed": True},
+        ],
+    })
+    ids = report.load_task_manifest(make_manifest(tmp_path, "rate-limiter-offbyone"))
+    trials, _ = report.trials_from_summary(
+        report._read_json(root / "summary.json"), {}, ids)
+    assert [t["task_id"] for t in trials] == ["rate-limiter-offbyone"]
+    # unfiltered, both embedded trials survive
+    both, _ = report.trials_from_summary(report._read_json(root / "summary.json"), {})
+    assert len(both) == 2
