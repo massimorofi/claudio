@@ -1,0 +1,15 @@
+{
+  "backend_anon": "A",
+  "evidence_sha": "8fe5e2de0ae5ec6f8dac99528926d2bf3a4649d7f9bbdab6bc9d67b0677f6e94",
+  "justifications": {
+    "coding": "Coding 5: clean pass, no blemishes recorded.",
+    "intelligence": "Intelligence 5: clean pass, no blemishes recorded.",
+    "quality": "Quality 5: clean pass, no blemishes recorded."
+  },
+  "mode": "heuristic",
+  "scores": {
+    "coding": 5,
+    "intelligence": 5,
+    "quality": 5
+  }
+}

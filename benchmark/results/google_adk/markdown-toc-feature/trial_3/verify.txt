@@ -1,0 +1,3 @@
+command: test -f BENCHMARK_SOLUTION.md
+exit_status: 0
+

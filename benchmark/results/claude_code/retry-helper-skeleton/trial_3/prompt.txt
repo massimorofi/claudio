@@ -1,0 +1,1 @@
+Implement retry_call in app/retry.py exactly as specified in SPEC.md: bounded attempts, injected sleep callable, delay list whose last entry is reused, immediate propagation of exceptions outside the exceptions tuple, RetryExhausted with the attempt count in its message and the last error as __cause__. Standard library only; do not edit tests/test_retry.py.

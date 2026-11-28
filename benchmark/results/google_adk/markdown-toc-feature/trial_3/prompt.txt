@@ -1,0 +1,1 @@
+Implement slugify and build_toc in app/toc.py following SPEC.md: GitHub-style anchors (lower-case, strip punctuation other than space/hyphen, spaces to hyphens), ATX headings with 1-6 hashes and at most three leading spaces, headings inside ``` or ~~~ fenced blocks ignored, duplicate anchors suffixed -1, -2. Standard library only; tests/test_toc.py is the contract.

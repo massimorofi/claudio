@@ -1,0 +1,35 @@
+{
+  "backend": "opencode",
+  "changed_files": [
+    "BENCHMARK_SOLUTION.md"
+  ],
+  "diff_lines": 9,
+  "duration_s": 0.233,
+  "engine_exit_code": 0,
+  "engine_mode": "stub",
+  "errors": {
+    "command_errors": 0,
+    "retries": 0,
+    "timeouts": 0,
+    "tool_errors": 0
+  },
+  "exit_status": "ok",
+  "notes": [],
+  "sandbox_outside_repo": true,
+  "seeded_from": "fixtures/markdown-toc-feature",
+  "session_events": 9,
+  "task_id": "markdown-toc-feature",
+  "timed_out": false,
+  "timeout_s": 60.0,
+  "tokens": {
+    "cache_read": 189,
+    "cache_write": 0,
+    "input": 3282,
+    "output": 287,
+    "total": 3758
+  },
+  "trial": 3,
+  "verification_passed": true,
+  "verify_command": "test -f BENCHMARK_SOLUTION.md",
+  "verify_exit_code": 0
+}

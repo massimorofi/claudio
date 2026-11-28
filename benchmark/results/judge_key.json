@@ -1,0 +1,19 @@
+{
+  "algorithm": "random.Random(seed).shuffle(sorted(backends))",
+  "backends": [
+    "claude_code",
+    "google_adk",
+    "opencode"
+  ],
+  "mapping": {
+    "claude_code": "A",
+    "google_adk": "B",
+    "opencode": "C"
+  },
+  "reverse": {
+    "A": "claude_code",
+    "B": "google_adk",
+    "C": "opencode"
+  },
+  "seed": "claudio-bench-2026"
+}
